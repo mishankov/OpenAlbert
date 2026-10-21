@@ -1,0 +1,21 @@
+sequenceDiagram
+    accTitle: Статус задачи в новой сессии
+    accDescr: Поручение из Telegram продолжает работать после закрытия сессии, а новая сессия на следующий день читает его актуальный статус.
+    actor User as Пользователь
+    participant Old as Вчера: Telegram
+    participant Tasks as Задачи
+    participant BG as Workflow задачи
+    participant New as Сегодня: Telegram
+    User->>Old: Следи за билетами
+    Old->>Tasks: Создать задачу
+    Tasks->>BG: Обеспечить независимый запуск
+    Old-->>User: Поручение принято
+    Note over Old: Сессия закрывается
+    BG->>Tasks: Сохранить результат проверки и продолжение
+    Note over BG: Ожидание следующей проверки
+    User->>New: Что там с билетами?
+    New->>Tasks: Найти задачу
+    Tasks-->>New: Подходящая задача
+    New->>Tasks: Прочитать актуальное состояние
+    Tasks-->>New: Результат, время проверки, следующий шаг
+    New-->>User: Статус с указанием свежести данных

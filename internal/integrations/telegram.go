@@ -1,0 +1,385 @@
+package integrations
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"mime/multipart"
+	"net/http"
+	"net/url"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"jarvis/internal/domain"
+	"jarvis/internal/messagefmt"
+)
+
+type TelegramConfig struct {
+	Token           string
+	BaseURL         string // Optional Bot API server root; default https://api.telegram.org.
+	AllowedUserIDs  []int64
+	AllowedGroupIDs []int64 // Groups disabled by default; all non-bot participants inside these groups are accepted.
+	HTTPClient      *http.Client
+	PollTimeout     time.Duration
+	MaxFileBytes    int64
+}
+type Telegram struct {
+	config TelegramConfig
+	client *http.Client
+	users  map[int64]bool
+	groups map[int64]bool
+}
+type Update struct {
+	Offset   int64
+	Incoming *domain.Incoming
+}
+type TelegramError struct {
+	Code       int
+	RetryAfter time.Duration
+}
+
+func (e *TelegramError) HTTPStatus() int { return e.Code }
+
+// TelegramDeliveryError means the send may have reached Telegram, but an acknowledgement
+// was not safely received. Do not automatically retry it: that could duplicate a message.
+type TelegramDeliveryError struct {
+	Cause   error
+	Unknown bool
+}
+
+func (e *TelegramDeliveryError) Error() string         { return "Telegram delivery outcome is unknown" }
+func (e *TelegramDeliveryError) Unwrap() error         { return e.Cause }
+func (e *TelegramDeliveryError) DeliveryUnknown() bool { return e.Unknown }
+func deliveryError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var rejected *TelegramError
+	if errors.As(err, &rejected) && rejected.Code < 500 {
+		return err
+	}
+	return &TelegramDeliveryError{Cause: err, Unknown: true}
+}
+
+func (e *TelegramError) Error() string { return fmt.Sprintf("Telegram API error %d", e.Code) }
+func NewTelegram(c TelegramConfig) (*Telegram, error) {
+	if c.Token == "" || strings.ContainsAny(c.Token, "/?#\r\n") {
+		return nil, errors.New("Telegram bot token is required and must not contain URL separators")
+	}
+	if len(c.AllowedUserIDs) == 0 {
+		return nil, errors.New("at least one Telegram allowed user ID is required")
+	}
+	if c.BaseURL == "" {
+		c.BaseURL = "https://api.telegram.org"
+	}
+	base, err := providerURL(c.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	c.BaseURL = base
+	if c.PollTimeout <= 0 {
+		c.PollTimeout = 25 * time.Second
+	}
+	if c.PollTimeout > 50*time.Second {
+		c.PollTimeout = 50 * time.Second
+	}
+	if c.MaxFileBytes <= 0 {
+		c.MaxFileBytes = 20 << 20
+	}
+	t := &Telegram{config: c, client: httpClient(c.HTTPClient, c.PollTimeout+15*time.Second), users: map[int64]bool{}, groups: map[int64]bool{}}
+	for _, id := range c.AllowedUserIDs {
+		if id <= 0 {
+			return nil, errors.New("Telegram user IDs must be positive")
+		}
+		t.users[id] = true
+	}
+	for _, id := range c.AllowedGroupIDs {
+		if id >= 0 {
+			return nil, errors.New("Telegram group IDs must be negative")
+		}
+		t.groups[id] = true
+	}
+	return t, nil
+}
+func (t *Telegram) api(ctx context.Context, method string, payload any, out any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.config.BaseURL+"/bot"+t.config.Token+"/"+method, bytes.NewReader(body))
+	if err != nil {
+		return errors.New("invalid Telegram request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return t.response(ctx, req, out)
+}
+func (t *Telegram) response(ctx context.Context, req *http.Request, out any) error {
+	// Telegram can report rate limits and other API errors in either successful or error HTTP responses.
+	resp, err := t.client.Do(req.WithContext(ctx))
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errors.New("Telegram request failed")
+	}
+	defer resp.Body.Close()
+	data, err := limitedRead(resp.Body, 4<<20)
+	if err != nil {
+		return err
+	}
+	var envelope struct {
+		OK         *bool           `json:"ok"`
+		Code       int             `json:"error_code"`
+		Result     json.RawMessage `json:"result"`
+		Parameters struct {
+			RetryAfter int `json:"retry_after"`
+		} `json:"parameters"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return &TelegramError{Code: resp.StatusCode}
+		}
+		return errors.New("invalid Telegram response")
+	}
+	if envelope.OK == nil {
+		return errors.New("invalid Telegram response envelope")
+	}
+	if !*envelope.OK || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		code := envelope.Code
+		if code == 0 {
+			code = resp.StatusCode
+		}
+		return &TelegramError{Code: code, RetryAfter: time.Duration(envelope.Parameters.RetryAfter) * time.Second}
+	}
+	if out != nil && json.Unmarshal(envelope.Result, out) != nil {
+		return errors.New("invalid Telegram result")
+	}
+	return nil
+}
+
+type telegramFile struct {
+	ID   string `json:"file_id"`
+	Name string `json:"file_name"`
+	MIME string `json:"mime_type"`
+	Size int64  `json:"file_size"`
+}
+type telegramMessage struct {
+	ID       int64  `json:"message_id"`
+	ThreadID int    `json:"message_thread_id"`
+	Date     int64  `json:"date"`
+	Text     string `json:"text"`
+	Caption  string `json:"caption"`
+	From     *struct {
+		ID        int64  `json:"id"`
+		FirstName string `json:"first_name"`
+		LastName  string `json:"last_name"`
+		Username  string `json:"username"`
+		IsBot     bool   `json:"is_bot"`
+	} `json:"from"`
+	Chat struct {
+		ID    int64  `json:"id"`
+		Type  string `json:"type"`
+		Title string `json:"title"`
+	} `json:"chat"`
+	Photo    []telegramFile `json:"photo"`
+	Document *telegramFile  `json:"document"`
+	Voice    *telegramFile  `json:"voice"`
+	Audio    *telegramFile  `json:"audio"`
+	Video    *telegramFile  `json:"video"`
+}
+
+func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
+	var raw []struct {
+		ID      int64            `json:"update_id"`
+		Message *telegramMessage `json:"message"`
+	}
+	err := t.api(ctx, "getUpdates", map[string]any{"offset": offset, "limit": 100, "timeout": int(t.config.PollTimeout / time.Second), "allowed_updates": []string{"message"}}, &raw)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Update, 0, len(raw))
+	for _, u := range raw {
+		update := Update{Offset: u.ID + 1}
+		m := u.Message
+		if m == nil || m.From == nil || m.From.IsBot || m.From.ID <= 0 {
+			out = append(out, update)
+			continue
+		}
+		private := m.Chat.Type == "private"
+		if (!private && (!t.groups[m.Chat.ID] || (m.Chat.Type != "group" && m.Chat.Type != "supergroup"))) || (private && (m.Chat.ID != m.From.ID || !t.users[m.From.ID])) {
+			out = append(out, update)
+			continue
+		}
+		conv := domain.Conversation{Title: m.Chat.Title, ChatID: m.Chat.ID, ThreadID: m.ThreadID, OwnerID: m.From.ID, Private: private}
+		if private {
+			conv.ID = fmt.Sprintf("personal:%d", m.From.ID)
+		} else {
+			conv.ID = fmt.Sprintf("telegram:group:%d:topic:%d", m.Chat.ID, m.ThreadID)
+		}
+		incoming := domain.Incoming{AuthorName: strings.TrimSpace(m.From.FirstName + " " + m.From.LastName), AuthorUsername: m.From.Username, ID: fmt.Sprintf("telegram:%d", u.ID), Conversation: conv, Text: m.Text, CreatedAt: time.Unix(m.Date, 0).UTC()}
+		if incoming.Text == "" {
+			incoming.Text = m.Caption
+		}
+		add := func(f *telegramFile, kind, name, mime string) {
+			if f == nil {
+				return
+			}
+			if f.Name != "" {
+				name = path.Base(f.Name)
+			}
+			if f.MIME != "" {
+				mime = f.MIME
+			}
+			incoming.Attachments = append(incoming.Attachments, domain.Attachment{FileID: f.ID, Name: name, MIME: mime, Kind: kind})
+		}
+		if len(m.Photo) > 0 {
+			photo := m.Photo[len(m.Photo)-1]
+			add(&photo, "image", "photo.jpg", "image/jpeg")
+		}
+		add(m.Document, "document", "document.bin", "application/octet-stream")
+		add(m.Voice, "voice", "voice.ogg", "audio/ogg")
+		add(m.Audio, "audio", "audio.mp3", "audio/mpeg")
+		add(m.Video, "video", "video.mp4", "video/mp4")
+		if incoming.Text != "" || len(incoming.Attachments) > 0 {
+			update.Incoming = &incoming
+		}
+		out = append(out, update)
+	}
+	return out, nil
+}
+func (t *Telegram) allowed(c domain.Conversation) bool {
+	if c.Private {
+		return t.users[c.OwnerID] && c.ChatID == c.OwnerID
+	}
+	return c.ChatID < 0 && t.groups[c.ChatID]
+}
+func (t *Telegram) Send(ctx context.Context, c domain.Conversation, text string) (string, error) {
+	return t.sendRich(ctx, c, text, "markdown")
+}
+
+// SendFormatted sends a durable outbox chunk without parsing its text again.
+func (t *Telegram) SendFormatted(ctx context.Context, c domain.Conversation, text string, entities []domain.TextEntity) (string, error) {
+	return t.sendRich(ctx, c, messagefmt.LegacyHTML(messagefmt.Message{Text: text, Entities: entities}), "html")
+}
+
+func (t *Telegram) sendRich(ctx context.Context, c domain.Conversation, text, format string) (string, error) {
+	if !t.allowed(c) {
+		return "", errors.New("Telegram recipient is not allowed")
+	}
+	if text == "" {
+		return "", errors.New("Telegram message is empty")
+	}
+	if !utf8.ValidString(text) || utf8.RuneCountInString(text) > 32768 {
+		return "", errors.New("Telegram rich text exceeds 32768 characters or is invalid UTF-8")
+	}
+	payload := map[string]any{"chat_id": c.ChatID, "rich_message": map[string]any{format: text}}
+	if c.ThreadID > 0 {
+		payload["message_thread_id"] = c.ThreadID
+	}
+	var result struct {
+		ID int64 `json:"message_id"`
+	}
+	if err := t.api(ctx, "sendRichMessage", payload, &result); err != nil {
+		return "", deliveryError(err)
+	}
+	if result.ID <= 0 {
+		return "", &TelegramDeliveryError{Cause: errors.New("missing message ID"), Unknown: true}
+	}
+	return strconv.FormatInt(result.ID, 10), nil
+}
+
+// Typing is ephemeral and must never block or fail a user's actual response.
+func (t *Telegram) Typing(ctx context.Context, c domain.Conversation) error {
+	if !t.allowed(c) {
+		return errors.New("Telegram recipient is not allowed")
+	}
+	payload := map[string]any{"chat_id": c.ChatID, "action": "typing"}
+	if c.ThreadID > 0 {
+		payload["message_thread_id"] = c.ThreadID
+	}
+	return t.api(ctx, "sendChatAction", payload, nil)
+}
+func (t *Telegram) SendFile(ctx context.Context, c domain.Conversation, name string, data []byte) (string, error) {
+	if !t.allowed(c) {
+		return "", errors.New("Telegram recipient is not allowed")
+	}
+	if int64(len(data)) > t.config.MaxFileBytes {
+		return "", errors.New("Telegram file exceeds size limit")
+	}
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	_ = w.WriteField("chat_id", strconv.FormatInt(c.ChatID, 10))
+	if c.ThreadID > 0 {
+		_ = w.WriteField("message_thread_id", strconv.Itoa(c.ThreadID))
+	}
+	part, err := w.CreateFormFile("document", path.Base(name))
+	if err != nil {
+		return "", err
+	}
+	if _, err = part.Write(data); err != nil {
+		return "", err
+	}
+	if err = w.Close(); err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.config.BaseURL+"/bot"+t.config.Token+"/sendDocument", &body)
+	if err != nil {
+		return "", errors.New("invalid Telegram request")
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	var out struct {
+		ID int64 `json:"message_id"`
+	}
+	if err = t.response(ctx, req, &out); err != nil {
+		return "", deliveryError(err)
+	}
+	if out.ID <= 0 {
+		return "", &TelegramDeliveryError{Cause: errors.New("missing message ID"), Unknown: true}
+	}
+	return strconv.FormatInt(out.ID, 10), nil
+}
+func (t *Telegram) Download(ctx context.Context, fileID string) ([]byte, error) {
+	var file struct {
+		Path string `json:"file_path"`
+		Size int64  `json:"file_size"`
+	}
+	if err := t.api(ctx, "getFile", map[string]string{"file_id": fileID}, &file); err != nil {
+		return nil, err
+	}
+	if file.Size > t.config.MaxFileBytes {
+		return nil, errors.New("Telegram file exceeds size limit")
+	}
+	if file.Path == "" || strings.HasPrefix(file.Path, "/") || strings.Contains(file.Path, "\\") {
+		return nil, errors.New("invalid Telegram file path")
+	}
+	segments := strings.Split(file.Path, "/")
+	for i, s := range segments {
+		if s == "." || s == ".." || s == "" {
+			return nil, errors.New("invalid Telegram file path")
+		}
+		segments[i] = url.PathEscape(s)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.config.BaseURL+"/file/bot"+t.config.Token+"/"+strings.Join(segments, "/"), nil)
+	if err != nil {
+		return nil, errors.New("invalid Telegram download request")
+	}
+	resp, err := t.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("Telegram download failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Telegram file HTTP status %d", resp.StatusCode)
+	}
+	return limitedRead(resp.Body, t.config.MaxFileBytes)
+}
+
+var _ domain.Messenger = (*Telegram)(nil)

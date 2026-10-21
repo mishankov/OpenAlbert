@@ -1,0 +1,19 @@
+sequenceDiagram
+    accTitle: Совместное изменение навыка
+    accDescr: Jarvis подготавливает предложение, обсуждает его с пользователем и применяет версию только после согласования.
+    participant Agent as Jarvis
+    participant Draft as Предложение skill
+    actor User as Пользователь
+    participant Apply as Механизм согласованных правок
+    participant Active as Активные skills
+    Agent->>Draft: Подготовить новый навык или изменение
+    Agent->>User: Объяснить предложение
+    User->>Agent: Обсудить и уточнить
+    Agent->>Draft: Обновить текст
+    alt Пользователь согласовал
+        User->>Apply: Разрешить применение этой версии
+        Apply->>Active: Сохранить согласованную версию
+        Active-->>Agent: Навык доступен для загрузки
+    else Предложение не согласовано
+        Note over Draft,Active: Активная версия остаётся прежней
+    end

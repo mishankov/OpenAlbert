@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+!.env.example
+docs
+node_modules
+data
+knowledge
+container_data
+bin
+coverage*
+*.test
+
+/internal/inspector/test-results/

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Сессии · Jarvis Inspector</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/inspect/style.css" />
+    <script type="module" src="/inspect/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a href="#/" class="brand">Jarvis <span>/ Инспектор</span></a>
+      <button
+        id="refresh"
+        class="button"
+        title="Обновить сессии и текущую сессию (Alt+R)"
+        aria-keyshortcuts="Alt+R"
+      >
+        Обновить <kbd>Alt R</kbd>
+      </button>
+    </header>
+    <div class="workspace">
+      <aside class="sidebar" aria-label="Сессии">
+        <div class="sidebar-heading">
+          <h1>Сессии</h1>
+          <span id="list-count" class="count"></span>
+        </div>
+        <label class="sr-only" for="search"
+          >Поиск по ID, сообщению или разговору</label
+        >
+        <div class="search-wrap">
+          <span aria-hidden="true">⌕</span
+          ><input
+            id="search"
+            type="search"
+            placeholder="Найти сессию…"
+            autocomplete="off"
+            aria-keyshortcuts="Meta+K Control+K"
+          /><kbd id="search-key">⌘ K</kbd>
+        </div>
+        <div class="filters">
+          <label
+            >Источник<select id="trigger">
+              <option value="">Все источники</option>
+              <option value="message">Сообщение</option>
+              <option value="task">Задача</option>
+              <option value="initiative">Инициатива</option>
+            </select></label
+          ><label
+            >Состояние<select id="status">
+              <option value="">Все сессии</option>
+              <option value="active">Активные</option>
+              <option value="closed">Закрытые</option>
+            </select></label
+          >
+        </div>
+        <div id="list-error" role="alert" class="error hidden"></div>
+        <nav id="sessions" aria-label="Список сессий" aria-busy="true">
+          <div class="list-empty">Загружаем сессии…</div>
+        </nav>
+        <button id="more-sessions" class="button load-more hidden">
+          Ещё сессии
+        </button>
+      </aside>
+      <main id="main" tabindex="-1">
+        <div class="empty-panel">
+          <p>Выберите сессию в списке.</p>
+          <p><kbd>⌘K / Ctrl+K</kbd> — поиск</p>
+        </div>
+      </main>
+    </div>
+    <div id="drawer-backdrop" class="backdrop hidden"></div>
+    <section
+      id="drawer"
+      class="drawer hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="drawer-title"
+      tabindex="-1"
+    >
+      <div class="drawer-header">
+        <div>
+          <h2 id="drawer-title">Вызов модели</h2>
+        </div>
+        <button
+          id="close-drawer"
+          class="icon-button"
+          title="Закрыть подробности (Escape)"
+          aria-label="Закрыть подробности"
+          aria-keyshortcuts="Escape"
+        >
+          ×
+        </button>
+      </div>
+      <div id="drawer-content"></div>
+    </section>
+    <div id="announce" class="sr-only" role="status" aria-live="polite"></div>
+  </body>
+</html>

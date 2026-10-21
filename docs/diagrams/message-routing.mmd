@@ -1,0 +1,19 @@
+sequenceDiagram
+    accTitle: Приём сообщения
+    accDescr: Ядро определяет разговор по ключу, сохраняет событие, находит или создаёт сессию и пробуждает её Workflow.
+    actor User as Пользователь
+    participant Channel as Telegram
+    participant Core as Ядро
+    participant Store as Хранилище приложения
+    participant WF as Workflow сессии
+    User->>Channel: Сообщение
+    Channel->>Core: Событие и отправитель
+    Core->>Core: Определить ключ разговора
+    Core->>Store: Сохранить событие, устранить дубли
+    Core->>Store: Найти или создать активную сессию
+    Store-->>Core: Сессия разговора
+    Core->>Store: Поместить событие в очередь сессии
+    Core->>WF: Обеспечить запуск и пробудить
+    Note over Core,WF: При сбое передача повторяется без дублирования сообщения
+    WF->>Store: Прочитать необработанные события
+    WF->>WF: Продолжить агентский цикл

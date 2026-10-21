@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+/data/
+/knowledge/
+/container_data/
+/bin/
+/coverage.out
+*.test
+.DS_Store
+
+__pycache__/
+
+/internal/inspector/test-results/

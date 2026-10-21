@@ -1,0 +1,16 @@
+flowchart LR
+    accTitle: Доставка логов в VictoriaLogs
+    accDescr: Собственный код Jarvis формирует широкие события, инфраструктура пишет штатные логи, и все контейнеры отправляют потоки через logging driver в VictoriaLogs.
+    subgraph Containers["Контейнеры Jarvis"]
+        App["Go-компоненты<br/>Wide Events в JSON"]
+        Infra["Temporal · PostgreSQL<br/>и вспомогательные службы"]
+    end
+    Driver["Logging driver<br/>на Docker-хосте"]
+    Normalize["log-gateway<br/>service · level · turn_id<br/>Подтверждение после записи"]
+    Logs[("VictoriaLogs")]
+    Query["Диагностика по задаче,<br/>сессии и попытке"]
+    App -->|"stdout / stderr"| Driver
+    Infra -->|"stdout / stderr"| Driver
+    Driver -->|"Splunk HEC"| Normalize
+    Normalize -->|"JSON Lines"| Logs
+    Logs --> Query

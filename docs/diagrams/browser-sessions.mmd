@@ -1,0 +1,17 @@
+flowchart TD
+    accTitle: Браузеры сессий Jarvis
+    accDescr: В одном контейнере BrowserManager выделяет до пяти независимых Chromium. Фоновые запуски занимают максимум четыре. Интерактивный браузер закрывается вместе с сессией, фоновый в конце запуска.
+    subgraph Container["Контейнер Jarvis"]
+      Core["Go · агентский цикл и Temporal workers"] --> UI["Очередь browser-ui"]
+      Core --> BG["Очередь browser-bg"]
+      UI --> Pool["BrowserManager<br/>Всего 5 · фоновых не более 4"]
+      BG --> Pool
+      Pool --> A["Chromium A<br/>Личная сессия"]
+      Pool --> B["Chromium B<br/>Группа"]
+      Pool --> C["Chromium C<br/>Фоновый запуск"]
+      A --> End["Закрытие сессии"]
+      B --> End
+      C --> Finish["Завершение фонового запуска"]
+      End --> Free["Процесс завершён<br/>Слот освобождён"]
+      Finish --> Free
+    end

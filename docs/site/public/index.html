@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f8faf8">
+  <meta name="description" content="Архитектура персонального AI-агента Jarvis: компоненты, сессии, задачи, память и инструменты.">
+  <title>Jarvis — архитектура</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='11' fill='%232b654b'/%3E%3Ctext x='20' y='29' text-anchor='middle' font-family='Arial' font-size='28' fill='white'%3Ej%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" type="module"></script>
+</head>
+<body>
+  <a href="#content" class="skip-link">Перейти к содержимому</a>
+  <aside class="sidebar">
+    <a class="brand" href="#/overview" aria-label="Jarvis — обзор"><span class="brand-mark">j<span></span></span><span>jarvis<span class="brand-caption">архитектура проекта</span></span></a>
+    <div class="nav-label">ДОКУМЕНТАЦИЯ</div>
+    <nav class="page-nav" aria-label="Разделы документации"></nav>
+    <div class="sidebar-footer"><span class="status-dot"></span><div>Рабочая концепция<span>Обсуждаем и уточняем</span></div></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar">
+      <div class="breadcrumbs"><button class="icon-button mobile-menu" aria-label="Открыть разделы" title="Разделы" data-action="menu">☰</button><span>Документация</span><span class="separator">/</span><span id="breadcrumb-current">Обзор</span></div>
+      <button class="search-trigger" data-action="search" aria-keyshortcuts="Meta+K Control+K" title="Поиск по документации (⌘K / Ctrl+K)"><span class="search-icon" aria-hidden="true"></span><span>Поиск по документации</span><kbd data-search-key>⌘ K</kbd></button>
+      <button class="toc-trigger text-button" data-action="toc" title="Оглавление текущей страницы" aria-label="Оглавление текущей страницы">Оглавление <span aria-hidden="true">⌄</span></button>
+      <a id="source-link" class="source-link" href="docs/README.md" target="_blank" rel="noreferrer">Markdown <span aria-hidden="true">↗</span></a>
+    </header>
+    <div class="reading-layout">
+      <main id="content" tabindex="-1">
+        <div class="eyebrow"><span class="eyebrow-line"></span><span id="page-number">00</span><span>АРХИТЕКТУРА JARVIS</span></div>
+        <article id="article" aria-label="Документация"><p class="loading-state" role="status">Загружаем документацию…</p></article>
+        <nav id="page-pagination" class="page-pagination" aria-label="Соседние разделы"></nav>
+        <footer class="document-footer"><span>Jarvis / Архитектурная документация</span><span>Сделано для обсуждения</span></footer>
+      </main>
+      <aside class="toc"><div class="nav-label">НА ЭТОЙ СТРАНИЦЕ</div><nav id="toc-links" aria-label="Оглавление страницы"></nav><div class="review-hint"><span aria-hidden="true">↗</span>Схемы можно открыть<br>и рассмотреть крупнее</div></aside>
+    </div>
+  </div>
+  <dialog id="search-dialog" aria-labelledby="search-title">
+    <header class="search-dialog-header"><span class="search-icon" aria-hidden="true"></span><label id="search-title" class="sr-only" for="search-input">Поиск по документации</label><input id="search-input" type="search" placeholder="Что найти в архитектуре?" autocomplete="off" aria-controls="search-results"><button class="text-button" data-close="search-dialog" aria-label="Закрыть поиск" title="Закрыть · Esc">Esc</button></header>
+    <div id="search-results" aria-live="polite"></div>
+    <footer class="search-footer"><span><kbd>↑</kbd> <kbd>↓</kbd> выбрать</span><span><kbd>Enter</kbd> открыть</span><span id="search-scope">По всем разделам</span></footer>
+  </dialog>
+  <dialog id="diagram-dialog" aria-labelledby="diagram-title">
+    <header class="diagram-dialog-header"><h2 id="diagram-title">Схема</h2><button class="icon-button" data-close="diagram-dialog" title="Закрыть · Esc" aria-label="Закрыть схему" aria-keyshortcuts="Escape">✕</button></header>
+    <div class="diagram-toolbar"><span>Масштаб</span><button class="icon-button" data-action="zoom-out" title="Уменьшить (−)" aria-label="Уменьшить схему" aria-keyshortcuts="-">−</button><output id="zoom-level" aria-live="polite">100%</output><button class="icon-button" data-action="zoom-in" title="Увеличить (+)" aria-label="Увеличить схему" aria-keyshortcuts="+">+</button><button class="text-button" data-action="zoom-reset" title="Вписать схему (0)" aria-keyshortcuts="0">Вписать <kbd>0</kbd></button><button class="text-button" data-action="zoom-width" title="По ширине (W)" aria-keyshortcuts="W">По ширине <kbd>W</kbd></button></div>
+    <div id="diagram-stage"><img id="diagram-image" alt=""></div>
+  </dialog>
+  <dialog id="menu-dialog" aria-label="Разделы документации"><header><span class="menu-title">Разделы</span><button class="icon-button" data-close="menu-dialog" aria-label="Закрыть разделы" title="Закрыть · Esc">✕</button></header><nav class="page-nav" aria-label="Разделы документации на мобильном"></nav></dialog>
+  <dialog id="toc-dialog" aria-label="Оглавление страницы"><header><span class="menu-title">На этой странице</span><button class="icon-button" data-close="toc-dialog" aria-label="Закрыть оглавление" title="Закрыть · Esc">✕</button></header><nav id="compact-toc-links" aria-label="Разделы текущей страницы"></nav></dialog>
+  <noscript>Для просмотра сайта включи JavaScript. Исходная документация доступна в папке docs.</noscript>
+</body>
+</html>

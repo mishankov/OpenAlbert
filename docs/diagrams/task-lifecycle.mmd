@@ -1,0 +1,30 @@
+stateDiagram-v2
+    accTitle: Жизненный цикл задачи
+    accDescr: Задача выполняется, ожидает события или ответа, может быть приостановлена, возобновлена, завершена либо отменена.
+    state "Создана" as Created
+    state "Активная задача" as Active {
+        state "Выполняется" as Running
+        state "Ожидает события" as Waiting
+        state "Нужен ответ" as NeedsInput
+        state "Приостановлена" as Paused
+        state "Ошибка" as Failed
+        [*] --> Running
+        Running --> Waiting
+        Waiting --> Running: Событие / время
+        Running --> NeedsInput
+        NeedsInput --> Running: Ответ
+        Running --> Paused
+        Paused --> Running: Возобновление
+        Running --> Failed
+        Failed --> Running: Решение проблемы
+    }
+    state "Завершена" as Completed
+    state "Отменена" as Cancelled
+
+    [*] --> Created
+    Created --> Active
+    Active --> Completed: Цель достигнута
+    Created --> Cancelled: Отмена
+    Active --> Cancelled: Отмена
+    Completed --> [*]
+    Cancelled --> [*]

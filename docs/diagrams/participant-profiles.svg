@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="560" viewBox="0 0 1000 560" role="img" aria-labelledby="title desc">
+<title id="title">Профили участников групп</title>
+<desc id="desc">Факт связывается с ID автора и исходной цитатой. Профиль используется в своей группе и доступен владельцу из личного чата. Другие разговоры доступа не получают.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#657b68"/></marker></defs>
+<rect width="1000" height="560" fill="#fff"/>
+<g fill="#f2f6ef" stroke="#8fa288" stroke-width="1.5">
+<rect x="20" y="30" width="270" height="110" rx="8"/>
+<rect x="365" y="30" width="270" height="110" rx="8"/>
+<rect x="710" y="30" width="270" height="110" rx="8"/>
+<rect x="20" y="220" width="270" height="110" rx="8"/>
+<rect x="365" y="220" width="270" height="110" rx="8"/>
+<rect x="365" y="410" width="270" height="110" rx="8"/>
+<rect x="710" y="410" width="270" height="110" rx="8"/>
+</g>
+<rect x="20" y="410" width="270" height="110" rx="8" fill="#faf8f6" stroke="#af9c92" stroke-dasharray="5 4"/>
+<g fill="none" stroke="#657b68" stroke-width="1.5" marker-end="url(#arrow)">
+<path d="M290 85H365"/><path d="M635 85H710"/>
+<path d="M845 140V185H500V220"/>
+<path d="M155 220V170H680V85H710"/>
+<path d="M500 330V410"/>
+<path d="M635 275H845V410"/>
+</g>
+<g font-family="Arial, sans-serif" font-size="18" text-anchor="middle" fill="#344334">
+<text x="155" y="65"><tspan x="155" font-weight="bold">Сообщение участника</tspan><tspan x="155" dy="29">Текст и данные Telegram</tspan></text>
+<text x="500" y="65"><tspan x="500" font-weight="bold">Привязать автора</tspan><tspan x="500" dy="29">ID · имя · username</tspan></text>
+<text x="845" y="59"><tspan x="845" font-weight="bold">Проверить факт</tspan><tspan x="845" dy="27">Автор · разговор</tspan><tspan x="845" dy="27">Точная цитата</tspan></text>
+<text x="155" y="253"><tspan x="155" font-weight="bold">Анализ закрытой сессии</tspan><tspan x="155" dy="29">Дополнить пропущенное</tspan></text>
+<text x="500" y="251"><tspan x="500" font-weight="bold">Профиль в этой группе</tspan><tspan x="500" dy="28">Факты · предпочтения</tspan><tspan x="500" dy="28">Сообщения и цитаты</tspan></text>
+<text x="155" y="446"><tspan x="155" font-weight="bold">Другие разговоры</tspan><tspan x="155" dy="29">Доступ закрыт</tspan></text>
+<text x="500" y="442"><tspan x="500" font-weight="bold">Следующий запрос</tspan><tspan x="500" dy="28">в этой группе</tspan><tspan x="500" dy="28">Учесть профиль автора</tspan></text>
+<text x="845" y="442"><tspan x="845" font-weight="bold">Личный чат владельца</tspan><tspan x="845" dy="28">Поиск и чтение</tspan><tspan x="845" dy="28">профилей всех групп</tspan></text>
+</g></svg>

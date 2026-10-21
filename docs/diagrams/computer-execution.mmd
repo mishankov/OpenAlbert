@@ -1,0 +1,21 @@
+sequenceDiagram
+    accTitle: Работа с удалённым компьютером
+    accDescr: Activity передаёт команду по SSH и сохраняет результат, а при потере ответа проверяет фактическое состояние.
+    participant Agent as Агентский цикл
+    participant Activity as Activity и адаптер
+    participant Store as Состояние операции
+    participant Computer as Computer box
+    Agent->>Activity: Выполнить удалённое действие
+    Activity->>Store: Зафиксировать намерение
+    Activity->>Computer: Команда через SSH / другой протокол
+    alt Результат получен
+        Computer-->>Activity: Вывод или ссылка на длительную операцию
+        Activity->>Store: Сохранить известное состояние
+        Activity-->>Agent: Результат или возможность проверки статуса
+    else Ответ потерян
+        Activity->>Store: Результат пока неизвестен
+        Activity->>Computer: Проверить состояние, если возможно
+        Computer-->>Activity: Найденное состояние или отсутствие подтверждения
+        Activity->>Store: Сохранить результат проверки
+        Activity-->>Agent: Подтверждённый статус или неопределённость
+    end

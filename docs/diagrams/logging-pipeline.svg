@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1380 310" role="img" aria-labelledby="title desc">
+<title id="title">Доставка и нормализация логов</title>
+<desc id="desc">Контейнеры отправляют stdout и stderr через Docker logging driver в log-gateway. Шлюз нормализует поля и передаёт JSON Lines в VictoriaLogs, подтверждая пакет только после записи.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#64748b"/></marker></defs>
+<rect width="1380" height="310" fill="white"/>
+<g stroke="#94a3b8" fill="#f8fafc"><rect x="12" y="35" width="220" height="245" rx="8"/><rect x="30" y="75" width="185" height="75" rx="4"/><rect x="30" y="180" width="185" height="75" rx="4"/><rect x="300" y="120" width="210" height="95" rx="4"/><rect x="585" y="105" width="260" height="125" rx="4" fill="#edf5ec"/><rect x="920" y="120" width="165" height="95" rx="4"/><rect x="1155" y="120" width="205" height="95" rx="4"/></g>
+<g fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"><path d="M215 112H257V150H300"/><path d="M215 217H257V185H300"/><path d="M510 168H585"/><path d="M845 168H920"/><path d="M1085 168H1155"/></g>
+<g font-family="Arial,sans-serif" fill="#172033" text-anchor="middle" font-size="17">
+<text x="122" y="58">Все контейнеры</text><text x="122" y="105">Jarvis · Go</text><text x="122" y="130">Wide Events · JSON</text><text x="122" y="210">Temporal · PostgreSQL</text><text x="122" y="235">и другие службы</text>
+<text x="405" y="156">Docker logging driver</text><text x="405" y="184">Splunk HEC</text>
+<text x="715" y="138" font-weight="bold">log-gateway</text><text x="715" y="166">service · level · turn_id</text><text x="715" y="193">Подтверждение после записи</text>
+<text x="1002" y="173">VictoriaLogs</text><text x="1257" y="157">VMUI · поиск</text><text x="1257" y="185">по сервису и обращению</text>
+</g><g font-family="Arial,sans-serif" fill="#64748b" font-size="13" text-anchor="middle"><text x="258" y="102">stdout</text><text x="258" y="242">stderr</text><text x="882" y="152">JSON Lines</text></g>
+</svg>
