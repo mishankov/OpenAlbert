@@ -10,6 +10,8 @@ import (
 	"io/fs"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"jarvis/internal/domain"
 )
@@ -25,11 +27,24 @@ func schema(properties string, required ...string) json.RawMessage {
 	}
 	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{` + properties + `},"required":` + string(b) + `}`)
 }
+
+const sendMessageDescription = `Send a real Telegram message or saved artifact to the current conversation.
+
+Use for direct answers, clarifications, due reminders, requested results, useful new information, or questions blocking progress.
+
+Background checks do not require notifications. If nothing warrants a message, finish with a final assistant response and no tool calls. It stays in internal history and need not be empty. No special marker or tool is required.
+
+Examples: unchanged monitoring results need no message; a user asking "Any news?" needs an answer even if there is no news. Send routine status reports only when requested. Never send placeholders or announce a decision to stay silent.
+
+Send once after completing the work. Success means queued delivery and ends the turn after the current tool batch. Do not send a follow-up confirmation.
+
+Use original Rich Markdown without MarkdownV2 escaping. Limits: 32000 UTF-8 bytes, 500 blocks, 20 table columns, 16 nesting levels. Save larger content as an artifact.`
+
 func Definitions() []domain.Tool {
 	return []domain.Tool{
 		{Name: "web_search", Description: "Search the public web with Yandex; returns sources. Read sources before asserting facts.", Parameters: schema(`"query":{"type":"string"}`, "query")},
 		{Name: "web_read", Description: "Read a public HTTP(S) page. Private network addresses are forbidden.", Parameters: schema(`"url":{"type":"string"}`, "url")},
-		{Name: "send_message", Description: "Use this tool only to send a message or a requested artifact to the user. You must explicitly call it for replies, questions and notifications; plain assistant content is saved only in run history and is never automatically delivered. If there is nothing to communicate, do not call this tool; finish with empty assistant content and no tool calls. Never send empty, whitespace-only or invisible-character placeholder messages. Send Telegram Rich Markdown to the current conversation; headings, GFM tables, lists, code, spoilers, formulas and details are supported. Supply original Markdown, without MarkdownV2 escaping. Up to 32000 UTF-8 bytes, 500 blocks, 20 table columns and 16 nesting levels; use an artifact for larger content. Optional saved artifact attachment. When a final reply is needed, send it once after completing the required work; a successful send completes the turn after this tool batch. Never send the same reply twice.", Parameters: schema(`"text":{"type":"string"},"artifact_id":{"type":"string"}`, "text")},
+		{Name: "send_message", Description: sendMessageDescription, Parameters: schema(`"text":{"type":"string","description":"User-facing Rich Markdown: headings, GFM tables, lists, code, spoilers, formulas and details are supported. Use an empty string for an artifact without a caption."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
 		{Name: "send_group_message", Description: "Post the text your owner explicitly requests to a known allowed Telegram group or topic, only from the owner's interactive private chat. Get the exact conversation_id from conversation_list; ask if the intended group/topic is ambiguous. Use original Rich Markdown, up to 32000 UTF-8 bytes. Send only the intended public text, never private instructions/history. Returns queued, not confirmed delivered. Does not finish this turn: acknowledge the queued post privately via send_message. Do not repost it to check delivery. Text only; attachments are not supported by this tool.", Parameters: schema(`"conversation_id":{"type":"string"},"text":{"type":"string"}`, "conversation_id", "text")},
 		{Name: "task_create", Description: "Create an independent durable task. Specify next_run_at RFC3339 for a reminder; schedule_seconds>0 for repeating checks. Explain reason for self-initiated tasks. Task continues after session closes.", Parameters: schema(`"title":{"type":"string"},"goal":{"type":"string"},"reason":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0}`, "title", "goal")},
 		{Name: "task_find", Description: "Find assignments, reminders and monitoring tasks in the current conversation, including those created in earlier sessions. Use for schedules, progress, results and status questions, and before creating a possible duplicate; these belong to tasks, not memory_search. query is a literal case-insensitive substring of title or goal, or an exact task ID; omitted or empty query returns all saved tasks in this conversation, including completed ones. Inspect status and use task_read for details.", Parameters: schema(`"query":{"type":"string","description":"A literal substring of task title or goal, or an exact ID. Omit or use an empty string to list all saved tasks in this conversation."}`)},
@@ -118,11 +133,15 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 	case "web_read":
 		return a.Search.Read(ctx, p.URL)
 	case "send_message":
-		if strings.TrimSpace(p.Text) == "" && p.ArtifactID == "" {
-			return nil, errors.New("empty message")
+		hasText := visibleMessageText(p.Text)
+		if !hasText && p.ArtifactID == "" {
+			return nil, errors.New("message has no visible text or artifact; if there is nothing to communicate, finish with a normal final assistant response and no tool calls")
 		}
-		if len(p.Text) > 32000 {
-			return nil, errors.New("message too long; save as artifact")
+		if !utf8.ValidString(p.Text) || len(p.Text) > 32000 {
+			return nil, errors.New("message must be valid UTF-8 and at most 32000 bytes; save larger content as artifact")
+		}
+		if (in.Background || in.TaskID != "") && backgroundPlaceholder(p.Text) {
+			return nil, errors.New("background placeholder is not a notification; if there is nothing to communicate, finish with a normal final assistant response and no tool calls")
 		}
 		if p.ArtifactID != "" {
 			_, found, err := a.Repo.Artifact(ctx, scope, p.ArtifactID)
@@ -134,7 +153,7 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 			}
 		}
 		partCount := 0
-		if strings.TrimSpace(p.Text) != "" {
+		if hasText {
 			partCount++
 		}
 		if p.ArtifactID != "" {
@@ -142,7 +161,7 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 		}
 		trace := domain.Outgoing{TurnID: in.RunKey, SessionID: in.SessionID, TaskID: in.TaskID, Trigger: in.TriggerName(), StartedAt: in.StartedAt, ReceivedAt: in.ReceivedAt, EnqueuedAt: now, PartCount: partCount}
 		partIndex := 0
-		if strings.TrimSpace(p.Text) != "" {
+		if hasText {
 			out := trace
 			out.ID, out.Conversation, out.Text, out.State, out.PartIndex = key+"/000", in.Conversation, p.Text, "pending", partIndex
 			partIndex++
@@ -363,6 +382,31 @@ func (a *Activities) searchEnabled() bool {
 	}
 	return true
 }
+func visibleMessageText(text string) bool {
+	for _, r := range text {
+		if unicode.IsGraphic(r) && !unicode.IsSpace(r) && !unicode.IsMark(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// Only recognize standalone protocol markers, not ordinary prose or quoted examples.
+// Interactive replies may legitimately repeat a marker at the user's request.
+func backgroundPlaceholder(text string) bool {
+	marker := strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return unicode.ToLower(r)
+		}
+		return -1
+	}, text)
+	switch marker {
+	case "placeholder", "noreply", "nomessage", "noop":
+		return true
+	}
+	return false
+}
+
 func (a *Activities) toolDefinitions() []domain.Tool {
 	tools := Definitions()
 	if a.Browser != nil {

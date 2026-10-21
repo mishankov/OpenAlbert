@@ -666,6 +666,87 @@ func TestFinalTextIsSavedWithoutDelivery(t *testing.T) {
 	}
 }
 
+func TestFinalResponseFinishesBackgroundTurnAndPersistsTaskProgress(t *testing.T) {
+	for _, initiative := range []bool{false, true} {
+		t.Run(fmt.Sprintf("initiative=%t", initiative), func(t *testing.T) {
+			a, repo, _, conv := newFixture(t)
+			ctx := context.Background()
+			const taskID = "monitor"
+			nextRun := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+			if _, err := repo.CreateTask(ctx, domain.Task{ID: taskID, ConversationID: conv.ID, Status: "running", Goal: "Check for updates"}); err != nil {
+				t.Fatal(err)
+			}
+			model := &scriptedModel{run: func(n int, _ []domain.Message) (domain.Message, error) {
+				switch n {
+				case 0:
+					return calls(call("progress", "task_update", map[string]string{"id": taskID, "status": "waiting", "result": "Checked: unchanged", "next_run_at": nextRun.Format(time.RFC3339)})), nil
+				case 1:
+					return finish("Ничего не отправляю — проверка без новостей."), nil
+				default:
+					t.Fatal("final response did not end the turn")
+					return domain.Message{}, nil
+				}
+			}}
+			a.Model = model
+			in := agent.RunInput{Key: "quiet-check", SessionID: "quiet-session", ConversationID: conv.ID, Initiative: initiative}
+			if !initiative {
+				in.TaskID = taskID
+			}
+			env := newEnv(a)
+			env.ExecuteWorkflow(finishOnlyTurn, in)
+			requireWorkflowOK(t, env)
+			var turn agent.Turn
+			if err := env.GetWorkflowResult(&turn); err != nil {
+				t.Fatal(err)
+			}
+			if turn.Sent || turn.Stats.FinishReason != "no_reply" || turn.Stats.ToolErrors != 0 || turn.Stats.ToolCalls != 1 || model.count() != 2 {
+				t.Fatalf("silent completion failed: %+v", turn)
+			}
+			outgoing, err := repo.PendingOutgoing(ctx, 10)
+			if err != nil || len(outgoing) != 0 {
+				t.Fatalf("silent check sent a message: %+v %v", outgoing, err)
+			}
+			task, found, err := repo.Task(ctx, conv.ID, taskID)
+			if err != nil || !found || task.Status != "waiting" || task.Result != "Checked: unchanged" || !task.NextRunAt.Equal(nextRun) {
+				t.Fatalf("silent completion lost progress: %+v %v", task, err)
+			}
+			raw, found, err := repo.LoadCheckpoint(ctx, "turn-done/"+in.Key)
+			var saved agent.Turn
+			if err != nil || !found || json.Unmarshal(raw, &saved) != nil || !saved.Done || saved.Sent || saved.Stats.FinishReason != "no_reply" {
+				t.Fatalf("silent completion was not checkpointed: %+v %v", saved, err)
+			}
+		})
+	}
+}
+
+func TestBackgroundPlaceholderCanRecoverWithoutDelivery(t *testing.T) {
+	a, repo, _, conv := newFixture(t)
+	model := &scriptedModel{run: func(n int, messages []domain.Message) (domain.Message, error) {
+		if n == 0 {
+			return reply("placeholder"), nil
+		}
+		if n != 1 || messages[len(messages)-1].Role != "tool" || !agent.ToolFailed(messages[len(messages)-1].Content) {
+			t.Fatal("placeholder rejection was not returned to the model")
+		}
+		return finish("Проверка завершена, новых событий нет."), nil
+	}}
+	a.Model = model
+	env := newEnv(a)
+	env.ExecuteWorkflow(finishOnlyTurn, agent.RunInput{Key: "placeholder-check", SessionID: "placeholder-session", ConversationID: conv.ID, Initiative: true})
+	requireWorkflowOK(t, env)
+	var turn agent.Turn
+	if err := env.GetWorkflowResult(&turn); err != nil {
+		t.Fatal(err)
+	}
+	if turn.Sent || turn.Stats.FinishReason != "no_reply" || turn.Stats.ToolErrors != 1 || model.count() != 2 {
+		t.Fatalf("placeholder did not recover silently: %+v", turn)
+	}
+	outgoing, err := repo.PendingOutgoing(context.Background(), 10)
+	if err != nil || len(outgoing) != 0 {
+		t.Fatalf("placeholder reached outbox: %+v %v", outgoing, err)
+	}
+}
+
 func TestExplicitDeliveryAppliesToNextTurnOfExistingWorkflow(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
 	a.Model = &scriptedModel{run: func(n int, _ []domain.Message) (domain.Message, error) {
