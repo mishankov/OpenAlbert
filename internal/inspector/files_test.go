@@ -52,6 +52,10 @@ func TestFileListPagination(t *testing.T) {
 	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.NextAfter != "a/2" || len(out.Files) != 1 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
+	rec = fileRequest(fileStore{err: fs.ErrInvalid}, "/api/inspect/files?prefix=a%2F&after=a%2F1", nil)
+	if rec.Code != 400 {
+		t.Fatalf("invalid cursor: %d %s", rec.Code, rec.Body)
+	}
 }
 func TestFilePreviewAndDownload(t *testing.T) {
 	for _, tc := range []struct{ name, mime, data, kind string }{

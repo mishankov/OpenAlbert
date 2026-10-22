@@ -465,15 +465,23 @@ const fileSize = (bytes) =>
     : bytes < 1024 * 1024
       ? `${(bytes / 1024).toFixed(1)} КБ`
       : `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
+const fileDate = (value) =>
+  new Date(value).toLocaleString("ru-RU", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 function fileShell() {
   document.title = "Файлы · Jarvis Inspector";
-  main.innerHTML = `<div class="session-toolbar files-toolbar"><div class="session-heading"><h2>Файлы MinIO</h2><span id="file-bucket" class="mono muted"></span></div><label for="file-prefix">Префикс ключа</label><div class="search-wrap"><input id="file-prefix" type="search" placeholder="Например, artifacts/" autocomplete="off" value="${esc(state.filePrefix)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div><p class="muted">Объекты настроенного бакета, включая файлы без привязки к сессии.</p></div><div id="files-error" role="alert" class="error hidden"></div><div id="files-list" aria-busy="true"><div class="loading-line" role="status">Загружаем файлы…</div></div><div class="pagination"><span id="files-count" role="status"></span><button id="more-files" class="button hidden" title="Загрузить ещё файлы · Enter" aria-keyshortcuts="Enter">Ещё файлы</button></div>`;
+  main.innerHTML = `<div class="session-toolbar files-toolbar"><div class="session-heading"><h2>Файлы MinIO</h2><span id="file-bucket" class="mono muted"></span><span class="files-order">По дате изменения ↓ · сначала новые</span></div><label for="file-prefix">Префикс ключа</label><div class="search-wrap"><input id="file-prefix" type="search" placeholder="Например, artifacts/" autocomplete="off" value="${esc(state.filePrefix)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></div><div id="files-error" role="alert" class="error hidden"></div><div id="files-list" aria-busy="true"><div class="loading-line" role="status">Загружаем файлы…</div></div><div class="pagination"><span id="files-count" role="status"></span><button id="more-files" class="button hidden" title="Загрузить ещё файлы · Enter" aria-keyshortcuts="Enter">Ещё файлы</button></div>`;
   if (state.files.length) renderFiles();
 }
 function renderFiles() {
   const focusedKey = document.activeElement?.dataset.file;
   $("#files-list").innerHTML = state.files.length
-    ? `<ul class="file-list bucket-files">${state.files.map((f) => `<li><button class="file-row" data-file="${esc(f.key)}" title="Просмотреть файл · Enter" aria-keyshortcuts="Enter"><span class="file-icon" aria-hidden="true">FILE</span><span class="file-name">${esc(f.name)}<span class="mono muted">${esc(f.key)}</span></span><span class="file-facts"><span>${esc(fileSize(f.size))}</span><time>${esc(shortDate(f.modified_at))}</time></span></button></li>`).join("")}</ul>`
+    ? `<ul class="file-list bucket-files">${state.files.map(fileCard).join("")}</ul>`
     : `<div class="empty-panel">${state.filePrefix ? "Файлов с таким префиксом нет. Измените или очистите фильтр." : "В бакете пока нет файлов."}</div>`;
   if (focusedKey)
     [...main.querySelectorAll("[data-file]")]
@@ -482,6 +490,33 @@ function renderFiles() {
   $("#files-count").textContent =
     `Файлы: ${state.files.length}${state.fileNext ? "+" : ""}`;
   $("#more-files").classList.toggle("hidden", !state.fileNext);
+  for (const img of main.querySelectorAll(".file-thumbnail img")) {
+    const update = () => {
+      const loaded = img.naturalWidth > 0;
+      img.parentElement.classList.toggle("is-loaded", loaded);
+      img.parentElement.classList.toggle("is-failed", !loaded);
+      $(".file-thumbnail-status", img.parentElement).textContent = loaded
+        ? ""
+        : "Не удалось загрузить изображение";
+    };
+    img.addEventListener("load", update, { once: true });
+    img.addEventListener("error", update, { once: true });
+    if (img.complete) update();
+  }
+}
+function fileCard(f) {
+  const isImage = [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+  ].includes((f.mime || "").split(";")[0].trim().toLowerCase());
+  const type = f.name.match(/\.([a-z0-9]{1,8})$/i)?.[1].toUpperCase() || "ФАЙЛ";
+  const preview = isImage
+    ? `<span class="file-thumbnail"><img src="${esc(fileContentURL(f.key))}" alt="" loading="lazy" decoding="async"><span class="file-thumbnail-status">Загрузка…</span></span>`
+    : `<span class="file-thumbnail file-document" aria-hidden="true"><span class="file-type">${esc(type)}</span></span>`;
+  return `<li><button class="file-row" data-file="${esc(f.key)}" title="${isImage ? "Увеличить изображение" : "Просмотреть файл"} · Enter" aria-keyshortcuts="Enter">${preview}<span class="file-card-caption"><span class="file-name">${esc(f.name)}</span><span class="file-facts"><time title="Изменён ${esc(date(f.modified_at))}">${esc(fileDate(f.modified_at))}</time><span>${esc(fileSize(f.size))}</span></span><span class="file-key mono muted" title="${esc(f.key)}">${esc(f.key)}</span></span></button></li>`;
 }
 async function loadFiles(more = false) {
   if (state.view !== "files") return;

@@ -33,7 +33,7 @@ const png = Buffer.from(
   "base64",
 );
 
-async function fixture(page) {
+async function fixture(page, { imageFailure = false } = {}) {
   const requests = [];
   await page.route("**/api/inspect/**", async (route) => {
     const u = new URL(route.request().url());
@@ -58,6 +58,8 @@ async function fixture(page) {
     const file = files.find((f) => f.key === u.searchParams.get("key"));
     if (!file)
       return route.fulfill({ status: 404, json: { error: "Not Found" } });
+    if (u.pathname.endsWith("/content") && imageFailure)
+      return route.fulfill({ status: 500, body: "unavailable" });
     if (u.pathname.endsWith("/content"))
       return route.fulfill({
         body: file.mime === "image/png" ? png : Buffer.from("file bytes"),
@@ -156,6 +158,65 @@ test("файлы: страницы, текст, изображение, скач
   );
   await page.keyboard.press("Escape");
   expect(errors).toEqual([]);
+});
+
+test("галерея показывает изображения сразу, сохраняет кадр и сообщает порядок", async ({
+  page,
+}) => {
+  const requests = await fixture(page);
+  const thumbnail = page.locator(".file-thumbnail img");
+  await expect(page.locator(".files-order")).toHaveText(
+    "По дате изменения ↓ · сначала новые",
+  );
+  await expect(thumbnail).toBeVisible();
+  await expect
+    .poll(() => thumbnail.evaluate((img) => img.naturalWidth))
+    .toBeGreaterThan(0);
+  await expect(page.locator(".file-thumbnail.is-loaded")).toHaveCount(1);
+  expect(
+    requests.some(
+      (u) =>
+        u.pathname.endsWith("/content") &&
+        u.searchParams.get("key") === files[1].key,
+    ),
+  ).toBe(true);
+  expect(requests.some((u) => u.pathname.endsWith("/file"))).toBe(false);
+  const preview = await thumbnail.evaluate((img) => ({
+    width: img.clientWidth,
+    height: img.clientHeight,
+    fit: getComputedStyle(img).objectFit,
+  }));
+  expect(preview.width).toBeGreaterThanOrEqual(200);
+  expect(preview.height).toBeGreaterThanOrEqual(180);
+  expect(preview.fit).toBe("contain");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(thumbnail).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.locator(".file-row").nth(1).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".file-preview")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".file-row").nth(1)).toBeFocused();
+});
+
+test("ошибка превью не мешает открыть и скачать изображение", async ({
+  page,
+}) => {
+  await fixture(page, { imageFailure: true });
+  await expect(page.locator(".file-thumbnail.is-failed")).toContainText(
+    "Не удалось загрузить изображение",
+  );
+  await page.locator(".file-row").nth(1).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.locator("#download-file")).toBeVisible();
+  await expect(page.locator("#image-error")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".file-row").nth(1)).toBeFocused();
 });
 
 test("занятость и запоздавший ответ не заменяют новый фильтр", async ({
