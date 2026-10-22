@@ -26,6 +26,7 @@ type OpenAI struct {
 	config     OpenAIConfig
 	client     *http.Client
 	opencodeGo bool
+	deepSeek   bool
 }
 
 func NewOpenAI(c OpenAIConfig) (*OpenAI, error) {
@@ -42,7 +43,9 @@ func NewOpenAI(c OpenAIConfig) (*OpenAI, error) {
 	}
 	endpoint, _ := url.Parse(base)
 	isOpenCodeGo := strings.EqualFold(endpoint.Hostname(), "opencode.ai") && (strings.HasPrefix(endpoint.Path, "/inference/go/") || strings.HasPrefix(endpoint.Path, "/zen/go/"))
-	return &OpenAI{config: c, client: httpClient(c.HTTPClient, 120*time.Second), opencodeGo: isOpenCodeGo}, nil
+	modelID := strings.ToLower(c.Model)
+	modelID = modelID[strings.LastIndex(modelID, "/")+1:]
+	return &OpenAI{config: c, client: httpClient(c.HTTPClient, 120*time.Second), opencodeGo: isOpenCodeGo, deepSeek: strings.HasPrefix(modelID, "deepseek-")}, nil
 }
 
 type apiToolCall struct {
@@ -54,16 +57,23 @@ type apiToolCall struct {
 	} `json:"function"`
 }
 type apiMessage struct {
-	Role       string        `json:"role"`
-	Content    any           `json:"content"`
-	ToolCalls  []apiToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
+	Role             string        `json:"role"`
+	Content          any           `json:"content"`
+	ReasoningContent *string       `json:"reasoning_content,omitempty"`
+	ToolCalls        []apiToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string        `json:"tool_call_id,omitempty"`
 }
 
 func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
 	converted := make([]apiMessage, 0, len(messages))
 	for _, m := range messages {
 		a := apiMessage{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}
+		if o.deepSeek && m.Role == "assistant" {
+			// DeepSeek thinking with tools requires this field on every assistant
+			// message, including text-only replies and empty reasoning. Keep it
+			// separate from user-facing content and omit it for other models.
+			a.ReasoningContent = &m.Reasoning
+		}
 		if len(m.Images) > 0 {
 			parts := []any{map[string]any{"type": "text", "text": m.Content}}
 			for _, u := range m.Images {

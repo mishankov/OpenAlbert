@@ -267,10 +267,11 @@ func TestOpenAIReplaysToolHistory(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Messages []struct {
-				Role       string        `json:"role"`
-				Content    string        `json:"content"`
-				ToolCalls  []apiToolCall `json:"tool_calls"`
-				ToolCallID string        `json:"tool_call_id"`
+				Role             string        `json:"role"`
+				Content          string        `json:"content"`
+				ReasoningContent *string       `json:"reasoning_content"`
+				ToolCalls        []apiToolCall `json:"tool_calls"`
+				ToolCallID       string        `json:"tool_call_id"`
 			} `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -279,11 +280,16 @@ func TestOpenAIReplaysToolHistory(t *testing.T) {
 		if len(request.Messages) != 2 || len(request.Messages[0].ToolCalls) != 1 || request.Messages[0].ToolCalls[0].Function.Arguments != `{"q":"go"}` || request.Messages[1].ToolCallID != "call" {
 			t.Errorf("invalid replay %+v", request)
 		}
+		for _, message := range request.Messages {
+			if message.ReasoningContent != nil {
+				t.Error("DeepSeek-specific field sent to another model")
+			}
+		}
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"Done"},"finish_reason":"stop"}]}`)
 	}))
 	defer s.Close()
 	model, _ := NewOpenAI(OpenAIConfig{BaseURL: s.URL, Model: "chosen"})
-	_, err := model.Complete(context.Background(), []domain.Message{{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "call", Name: "search", Arguments: json.RawMessage(`{"q":"go"}`)}}}, {Role: "tool", ToolCallID: "call", Content: "result"}}, nil)
+	_, err := model.Complete(context.Background(), []domain.Message{{Role: "assistant", Reasoning: "Internal reasoning from earlier history", ToolCalls: []domain.ToolCall{{ID: "call", Name: "search", Arguments: json.RawMessage(`{"q":"go"}`)}}}, {Role: "tool", ToolCallID: "call", Content: "result"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
