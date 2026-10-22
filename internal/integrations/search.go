@@ -7,7 +7,7 @@ import (
 	"jarvis/internal/domain"
 )
 
-var ErrSearchDisabled = errors.New("web search is disabled; ask for a public URL to read instead")
+var ErrSearchDisabled = errors.New("web_search API tool is disabled; use listed browser tools to find sources or web_read for a known public URL")
 
 // NewSearch enables Yandex only when both credentials are configured. Public URL
 // reading uses its own HTTP client and remains available without a search provider.

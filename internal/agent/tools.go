@@ -43,7 +43,7 @@ Use original Rich Markdown without MarkdownV2 escaping. Limits: 32000 UTF-8 byte
 func Definitions() []domain.Tool {
 	return []domain.Tool{
 		{Name: "web_search", Description: "Search the public web with Yandex; returns sources. Read sources before asserting facts.", Parameters: schema(`"query":{"type":"string"}`, "query")},
-		{Name: "web_read", Description: "Read a public HTTP(S) page. Private network addresses are forbidden.", Parameters: schema(`"url":{"type":"string"}`, "url")},
+		{Name: "web_read", Description: "Fetch plain text from a known public HTTP(S) URL. Use for static articles, documentation or plain-text files when only their text is needed. Does not run JavaScript or share browser cookies. HTML extraction discards link destinations and flattens headings, lists and tables; long results may be truncated. For search results, catalogs, following links, structured tables or JavaScript content, use the listed browser tools. An HTTP success may contain a CAPTCHA or an empty page; check that the requested content is actually present. Private network addresses are forbidden.", Parameters: schema(`"url":{"type":"string"}`, "url")},
 		{Name: "send_message", Description: sendMessageDescription, Parameters: schema(`"text":{"type":"string","description":"User-facing Rich Markdown: headings, GFM tables, lists, code, spoilers, formulas and details are supported. Use an empty string for an artifact without a caption."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
 		{Name: "send_group_message", Description: "Post the text your owner explicitly requests to a known allowed Telegram group or topic, only from the owner's interactive private chat. Get the exact conversation_id from conversation_list; ask if the intended group/topic is ambiguous. Use original Rich Markdown, up to 32000 UTF-8 bytes. Send only the intended public text, never private instructions/history. Returns queued, not confirmed delivered. Does not finish this turn: acknowledge the queued post privately via send_message. Do not repost it to check delivery. Text only; attachments are not supported by this tool.", Parameters: schema(`"conversation_id":{"type":"string"},"text":{"type":"string"}`, "conversation_id", "text")},
 		{Name: "task_create", Description: "Create an independent durable task. Specify next_run_at RFC3339 for a reminder; schedule_seconds>0 for repeating checks. Explain reason for self-initiated tasks. Task continues after session closes.", Parameters: schema(`"title":{"type":"string"},"goal":{"type":"string"},"reason":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0}`, "title", "goal")},
@@ -124,7 +124,7 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 	switch in.Call.Name {
 	case "web_search":
 		if !a.searchEnabled() {
-			return nil, errors.New("web search is disabled; ask for a public URL and use web_read")
+			return nil, errors.New("web_search API tool is disabled; use listed browser tools to find sources or web_read for a known public URL")
 		}
 		if strings.TrimSpace(p.Query) == "" {
 			return nil, errors.New("query required")
