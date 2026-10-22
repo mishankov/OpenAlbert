@@ -94,3 +94,36 @@ func TestInspectionPostgres(t *testing.T) {
 		t.Fatal("missing session not distinguished")
 	}
 }
+
+func TestPendingAudioIsVisibleBeforeMessagePreparation(t *testing.T) {
+	url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("disposable PostgreSQL only")
+	}
+	ctx := context.Background()
+	repo, e := Open(ctx, url)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer repo.Close()
+	id := fmt.Sprintf("pending-audio-%d", time.Now().UnixNano())
+	conv := domain.Conversation{ID: id, OwnerID: 42, Private: true}
+	_, e = repo.AcceptIncoming(ctx, domain.Incoming{ID: id, Conversation: conv}, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = repo.StartSession(ctx, domain.Session{ID: id, ConversationID: id}); e != nil {
+		t.Fatal(e)
+	}
+	if e = repo.SaveArtifact(ctx, domain.Artifact{ID: "source", SessionID: id, ConversationID: id, Name: "voice.ogg", MIME: "audio/ogg", Data: []byte("x")}); e != nil {
+		t.Fatal(e)
+	}
+	raw, _ := json.Marshal(domain.AudioResult{SessionID: id, ConversationID: id, IncomingID: id, ArtifactID: "source", Status: "queued", AuthorID: 42, AuthorName: "Анна", QueuedAt: time.Now()})
+	if e = repo.SaveCheckpoint(ctx, "audio/"+id, raw); e != nil {
+		t.Fatal(e)
+	}
+	d, ok, e := repo.InspectSession(ctx, id, 0)
+	if e != nil || !ok || len(d.Messages) != 0 || len(d.Audio) != 1 || len(d.Artifacts) != 1 || d.Audio[0].AuthorID != 42 {
+		t.Fatalf("pending audio missing %+v %v", d, e)
+	}
+}

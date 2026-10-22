@@ -42,6 +42,9 @@ const duration = (tr) =>
     ? `${Math.max(0, (new Date(tr.ended_at) - new Date(tr.started_at)) / 1000).toFixed(1)} с`
     : "выполняется";
 const labels = {
+  queued: "В очереди",
+  no_speech: "Речь не распознана",
+  unavailable: "Недоступно",
   message: "Сообщение",
   task: "Задача",
   initiative: "Инициатива",
@@ -181,6 +184,7 @@ async function loadList(more = false, preserve = false) {
 const tabs = [
   ["timeline", "Хронология"],
   ["models", "Модель"],
+  ["audio", "Аудио"],
   ["delivery", "Доставка"],
   ["turns", "Запуски"],
   ["artifacts", "Артефакты"],
@@ -190,6 +194,7 @@ function tabCount(name, d) {
     timeline: d.session.message_count,
     models: d.traces.filter((t) => t.kind === "model" || t.kind === "analysis")
       .length,
+    audio: (d.audio || []).length,
     delivery: d.outgoing.length,
     turns: d.turns.length,
     artifacts: d.artifacts.length,
@@ -314,6 +319,18 @@ function artifacts(d) {
   return `<ul class="file-list">${d.artifacts.map((a) => `<li><a href="${esc(artifactURL(a))}" target="_blank" rel="noopener noreferrer">${["image/png", "image/jpeg", "image/webp"].includes(a.mime) ? `<img src="${esc(artifactURL(a))}" alt="" loading="lazy">` : '<span class="file-icon">FILE</span>'}<span class="file-name">${esc(a.name)}<span class="mono muted">${esc(a.id)}</span></span><span class="muted">${esc(a.mime)}</span></a></li>`).join("")}</ul>`;
 }
 
+function audio(d) {
+  if (!d.audio?.length)
+    return '<div class="empty-panel">Голосовых сообщений пока нет.</div>';
+  return `<div class="runs">${d.audio.map((r) => {
+    const artifact = d.artifacts.find((a) => a.id === r.artifact_id);
+    const traces = d.traces.filter((t) => t.kind === "transcription" && t.call_id === r.artifact_id);
+    const author = d.messages.find((m) => m.message.source_message_id === r.incoming_id)?.message;
+    const wait = r.started_at && !r.started_at.startsWith("0001-") ? Math.max(0, (new Date(r.started_at) - new Date(r.queued_at)) / 1000).toFixed(1) : null;
+    return `<article class="audio-result"><div class="event-line"><strong>${esc(artifact?.name || "Аудио")}</strong>${pill(r.status)}${r.cached ? '<span class="muted">Из кэша · нового вызова STT не было</span>' : ""}</div><p class="muted">${esc(r.author_name || author?.author_name || r.incoming_id)} · ${esc(r.model)} · ${esc(date(r.queued_at))}</p>${artifact ? `<audio controls preload="none" aria-label="Исходное аудио" aria-keyshortcuts="Space" title="Воспроизведение и пауза · Space при фокусе на плеере" src="${esc(artifactURL(artifact))}"></audio><p><a href="${esc(artifactURL(artifact))}" target="_blank" rel="noopener noreferrer">Открыть исходное аудио</a></p>` : '<p class="muted">Исходный файл недоступен.</p>'}<p class="muted">${wait !== null ? `Ожидание: ${wait} с · ` : ""}${r.duration_seconds ? `Запись: ${r.duration_seconds.toFixed(1)} с · ` : ""}${r.ended_at && r.started_at && !r.started_at.startsWith("0001-") ? `Обработка: ${esc(duration(r))} · ` : ""}${r.cached ? "Время исходного распознавания: " : ""}Декодирование: ${r.decode_ms || 0} мс · STT: ${r.inference_ms || 0} мс</p>${r.text ? `<div class="prose">${esc(r.text)}</div>` : ""}${r.error_code ? `<p class="error">${esc(r.error_code)}</p>` : ""}${traces.map((t) => `<p>${traceButton(t.id, `Попытка ${t.attempt}`)} · ${esc(label(t.status))} · ${esc(duration(t))}</p>`).join("")}</article>`;
+  }).join("")}</div>`;
+}
+
 function render() {
   const d = state.data;
   if (!d) return;
@@ -335,7 +352,7 @@ function render() {
     (n, t) => n + (t.Stats?.InputTokens || 0) + (t.Stats?.OutputTokens || 0),
     0,
   );
-  main.innerHTML = `<div class="session-toolbar"><div id="detail-error" role="alert" class="error hidden"></div><div class="session-heading"><a class="back-link" href="#/">← Сессии</a><h2>${esc(sessionName(s))}</h2>${pill(s.status)}<span class="heading-source">${esc(label(s.trigger))} · ${esc(shortDate(s.created_at))}</span></div><div class="session-meta-line"><span class="mono" title="ID сессии">${esc(s.id)}</span><span>${esc(s.conversation_id)}</span><span>${s.tool_count} tools · ${tokens.toLocaleString("ru-RU")} ток.</span></div><nav class="tabs" role="tablist" aria-label="Разделы сессии">${tabs.map(([key, title]) => `<button class="tab" id="tab-${key}" role="tab" data-tab="${key}" aria-controls="panel" aria-selected="${state.tab === key}" tabindex="${state.tab === key ? 0 : -1}">${title} <small>${tabCount(key, d)}</small></button>`).join("")}</nav></div>${d.traces.some((t) => t.historical) ? '<div class="history-note">В старых записях контекст и время отдельных вызовов не сохранены.</div>' : ""}<section id="panel" role="tabpanel" aria-labelledby="tab-${state.tab}">${{ timeline, models, delivery: deliveries, turns, artifacts }[state.tab](d)}</section>`;
+  main.innerHTML = `<div class="session-toolbar"><div id="detail-error" role="alert" class="error hidden"></div><div class="session-heading"><a class="back-link" href="#/">← Сессии</a><h2>${esc(sessionName(s))}</h2>${pill(s.status)}<span class="heading-source">${esc(label(s.trigger))} · ${esc(shortDate(s.created_at))}</span></div><div class="session-meta-line"><span class="mono" title="ID сессии">${esc(s.id)}</span><span>${esc(s.conversation_id)}</span><span>${s.tool_count} tools · ${tokens.toLocaleString("ru-RU")} ток.</span></div><nav class="tabs" role="tablist" aria-label="Разделы сессии">${tabs.map(([key, title]) => `<button class="tab" id="tab-${key}" role="tab" data-tab="${key}" aria-controls="panel" aria-selected="${state.tab === key}" tabindex="${state.tab === key ? 0 : -1}">${title} <small>${tabCount(key, d)}</small></button>`).join("")}</nav></div>${d.traces.some((t) => t.historical) ? '<div class="history-note">В старых записях контекст и время отдельных вызовов не сохранены.</div>' : ""}<section id="panel" role="tabpanel" aria-labelledby="tab-${state.tab}">${{ timeline, models, audio, delivery: deliveries, turns, artifacts }[state.tab](d)}</section>`;
   for (const el of main.querySelectorAll("details[data-open-key]")) {
     if (openKeys.includes(el.dataset.openKey)) el.open = true;
     const summary = el.querySelector(":scope > summary");
@@ -835,6 +852,7 @@ setInterval(() => {
   if (
     state.view === "sessions" &&
     !document.hidden &&
+    ![...main.querySelectorAll("audio")].some((a) => !a.paused) &&
     !state.busy &&
     $("#drawer").classList.contains("hidden")
   )

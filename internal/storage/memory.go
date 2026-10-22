@@ -14,33 +14,35 @@ import (
 // Memory implements the same repository contract for deterministic workflow tests.
 // It owns all values; callers cannot mutate stored slices after a method returns.
 type Memory struct {
-	mu            sync.Mutex
-	offset        int64
-	conversations map[string]domain.Conversation
-	incoming      map[string]domain.Incoming
-	incomingOrder []string
-	handled       map[string]bool
-	sessions      map[string]domain.Session
-	sessionOrder  []string
-	analyzed      map[string]bool
-	messages      map[string][]domain.Message
-	messageKeys   map[string]bool
-	history       []domain.HistoryMessage
-	tasks         map[string]domain.Task
-	taskOrder     []string
-	outgoing      map[string]domain.Outgoing
-	outgoingOrder []string
-	artifacts     map[string]domain.Artifact
-	checkpoints   map[string]json.RawMessage
-	traces        map[string]domain.Trace
-	progress      map[string]domain.Progress
+	transcriptions map[string]transcriptionLease
+	mu             sync.Mutex
+	offset         int64
+	conversations  map[string]domain.Conversation
+	incoming       map[string]domain.Incoming
+	incomingOrder  []string
+	handled        map[string]bool
+	sessions       map[string]domain.Session
+	sessionOrder   []string
+	analyzed       map[string]bool
+	messages       map[string][]domain.Message
+	messageKeys    map[string]bool
+	history        []domain.HistoryMessage
+	tasks          map[string]domain.Task
+	taskOrder      []string
+	outgoing       map[string]domain.Outgoing
+	outgoingOrder  []string
+	artifacts      map[string]domain.Artifact
+	checkpoints    map[string]json.RawMessage
+	traces         map[string]domain.Trace
+	progress       map[string]domain.Progress
 }
 
 var _ domain.Repository = (*Memory)(nil)
 
 func NewMemory() *Memory {
 	return &Memory{
-		conversations: map[string]domain.Conversation{}, incoming: map[string]domain.Incoming{}, handled: map[string]bool{}, sessions: map[string]domain.Session{}, analyzed: map[string]bool{}, messages: map[string][]domain.Message{}, messageKeys: map[string]bool{}, tasks: map[string]domain.Task{}, outgoing: map[string]domain.Outgoing{}, artifacts: map[string]domain.Artifact{}, checkpoints: map[string]json.RawMessage{}, traces: map[string]domain.Trace{}, progress: map[string]domain.Progress{},
+		transcriptions: map[string]transcriptionLease{},
+		conversations:  map[string]domain.Conversation{}, incoming: map[string]domain.Incoming{}, handled: map[string]bool{}, sessions: map[string]domain.Session{}, analyzed: map[string]bool{}, messages: map[string][]domain.Message{}, messageKeys: map[string]bool{}, tasks: map[string]domain.Task{}, outgoing: map[string]domain.Outgoing{}, artifacts: map[string]domain.Artifact{}, checkpoints: map[string]json.RawMessage{}, traces: map[string]domain.Trace{}, progress: map[string]domain.Progress{},
 	}
 }
 func (m *Memory) Close()                         {}

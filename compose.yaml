@@ -15,6 +15,35 @@ x-logging: &logging
     max-buffer-size: "4m"
 
 services:
+  stt:
+    labels:
+      compose_service: stt
+    build:
+      context: .
+      dockerfile: deploy/stt/Dockerfile
+    restart: unless-stopped
+    init: true
+    cpus: "${STT_CPUS:-2}"
+    mem_limit: "${STT_MEMORY_LIMIT:-3g}"
+    pids_limit: 128
+    environment:
+      STT_MODEL: "${STT_MODEL:-nemotron-3.5}"
+      STT_API_KEY: "${STT_API_KEY:-}"
+      STT_DOWNLOAD_MODEL: "${STT_DOWNLOAD_MODEL:-true}"
+      OMP_NUM_THREADS: "${STT_THREADS:-2}"
+    volumes:
+      - ./container_data/stt:/models
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 15m
+    logging: *logging
+    stop_grace_period: 20s
+
   log-gateway:
     labels:
       compose_service: log-gateway
@@ -168,6 +197,8 @@ services:
     restart: unless-stopped
     init: true
     depends_on:
+      stt:
+        condition: service_started
       postgres:
         condition: service_healthy
       temporal:
@@ -186,7 +217,10 @@ services:
       TELEGRAM_ALLOWED_GROUP_IDS: "${TELEGRAM_ALLOWED_GROUP_IDS:-}"
       LLM_BASE_URL: "${LLM_BASE_URL:-https://api.openai.com/v1}"
       LLM_API_KEY: "${LLM_API_KEY:-}"
-      LLM_TRANSCRIPTION_MODEL: "${LLM_TRANSCRIPTION_MODEL:-}"
+      STT_BASE_URL: "${STT_BASE_URL-http://stt:8080/v1}"
+      STT_MODEL: "${STT_MODEL:-nemotron-3.5}"
+      STT_API_KEY: "${STT_API_KEY:-}"
+      STT_REVISION: "${STT_REVISION:-ea30d66d-q8-nemo2bdfb03b-ru-pcm16-v1}"
       LLM_MODEL: "${LLM_MODEL:-}"
       YANDEX_SEARCH_URL: "${YANDEX_SEARCH_URL:-}"
       YANDEX_API_KEY: "${YANDEX_API_KEY:-}"

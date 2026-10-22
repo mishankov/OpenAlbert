@@ -17,7 +17,8 @@ type Config struct {
 	TemporalAddress, TemporalNamespace, TemporalTaskQueue   string
 	TelegramBotToken, TelegramBaseURL                       string
 	TelegramAllowedUserIDs, TelegramAllowedGroupIDs         []int64
-	LLMBaseURL, LLMAPIKey, LLMModel, LLMTranscriptionModel  string
+	LLMBaseURL, LLMAPIKey, LLMModel                         string
+	STTBaseURL, STTAPIKey, STTModel, STTRevision            string
 	YandexAPIKey, YandexFolderID, YandexEndpoint            string
 	KnowledgeDir, SoulFile, HTTPAddr                        string
 	SessionIdleTimeout, TaskMinInterval, InitiativeInterval time.Duration
@@ -37,12 +38,21 @@ func load(get func(string) string) (Config, error) {
 		return fallback
 	}
 	c := Config{
+		STTBaseURL: value("STT_BASE_URL", ""), STTAPIKey: value("STT_API_KEY", ""), STTModel: value("STT_MODEL", ""), STTRevision: value("STT_REVISION", ""),
 		DatabaseURL: value("DATABASE_URL", ""), TemporalAddress: value("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: value("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: value("TEMPORAL_TASK_QUEUE", "jarvis"),
-		TelegramBotToken: value("TELEGRAM_BOT_TOKEN", ""), TelegramBaseURL: value("TELEGRAM_BASE_URL", ""), LLMBaseURL: value("LLM_BASE_URL", "https://api.openai.com/v1"), LLMAPIKey: value("LLM_API_KEY", ""), LLMModel: value("LLM_MODEL", ""), LLMTranscriptionModel: value("LLM_TRANSCRIPTION_MODEL", ""),
+		TelegramBotToken: value("TELEGRAM_BOT_TOKEN", ""), TelegramBaseURL: value("TELEGRAM_BASE_URL", ""), LLMBaseURL: value("LLM_BASE_URL", "https://api.openai.com/v1"), LLMAPIKey: value("LLM_API_KEY", ""), LLMModel: value("LLM_MODEL", ""),
 		YandexAPIKey: value("YANDEX_API_KEY", ""), YandexEndpoint: value("YANDEX_SEARCH_URL", ""), YandexFolderID: value("YANDEX_FOLDER_ID", ""), KnowledgeDir: value("KNOWLEDGE_DIR", "./container_data/knowledge"), SoulFile: value("SOUL_FILE", ""), HTTPAddr: value("HTTP_ADDR", ":8080"),
 		S3Endpoint: value("S3_ENDPOINT", "localhost:9000"), S3AccessKey: value("S3_ACCESS_KEY", ""), S3SecretKey: value("S3_SECRET_KEY", ""), S3Bucket: value("S3_BUCKET", "jarvis"),
 	}
 	var problems []error
+	if c.STTBaseURL != "" {
+		if u, e := url.Parse(c.STTBaseURL); e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			problems = append(problems, errors.New("STT_BASE_URL must be an HTTP(S) URL without credentials, query or fragment"))
+		}
+		if c.STTModel == "" || c.STTRevision == "" {
+			problems = append(problems, errors.New("STT_MODEL and STT_REVISION are required when STT_BASE_URL is set"))
+		}
+	}
 	required := []struct{ name, value string }{{"DATABASE_URL", c.DatabaseURL}, {"TELEGRAM_BOT_TOKEN", c.TelegramBotToken}, {"LLM_API_KEY", c.LLMAPIKey}, {"LLM_MODEL", c.LLMModel}, {"S3_ACCESS_KEY", c.S3AccessKey}, {"S3_SECRET_KEY", c.S3SecretKey}}
 	for _, r := range required {
 		if r.value == "" {

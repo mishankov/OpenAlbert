@@ -30,14 +30,15 @@ type SavedMessage struct {
 	Message    domain.Message `json:"message"`
 }
 type Detail struct {
-	Analysis  json.RawMessage   `json:"analysis,omitempty"`
-	Session   Session           `json:"session"`
-	Messages  []SavedMessage    `json:"messages"`
-	NextAfter int64             `json:"next_after,omitempty"`
-	Traces    []domain.Trace    `json:"traces"`
-	Turns     []json.RawMessage `json:"turns"`
-	Outgoing  []domain.Outgoing `json:"outgoing"`
-	Artifacts []domain.Artifact `json:"artifacts"`
+	Audio     []domain.AudioResult `json:"audio"`
+	Analysis  json.RawMessage      `json:"analysis,omitempty"`
+	Session   Session              `json:"session"`
+	Messages  []SavedMessage       `json:"messages"`
+	NextAfter int64                `json:"next_after,omitempty"`
+	Traces    []domain.Trace       `json:"traces"`
+	Turns     []json.RawMessage    `json:"turns"`
+	Outgoing  []domain.Outgoing    `json:"outgoing"`
+	Artifacts []domain.Artifact    `json:"artifacts"`
 }
 type Store interface {
 	InspectSessions(context.Context, Filter) ([]Session, error)

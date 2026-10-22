@@ -145,6 +145,45 @@ async function openSession(page) {
   await expect(page.locator("#event-1")).toBeVisible();
 }
 
+test("аудио: исходник, текст, диагностика и клавиатурная навигация", async ({ page }) => {
+  const speech = { session_id: session.id, conversation_id: conv.id, incoming_id: "voice", artifact_id: "voice-file", model: "nemotron-3.5", author_id: 42, author_name: "Анна", status: "completed", text: "Три яблока <script>window.XSS=true</script>", queued_at: modelTrace.started_at, started_at: modelTrace.started_at, ended_at: modelTrace.ended_at, duration_seconds: 2, decode_ms: 12, inference_ms: 200, cached: false };
+  const tr = { ...modelTrace, id: "speech-trace", kind: "transcription", name: "nemotron-3.5", call_id: "voice-file" };
+  await fixture(page, { ...detail, audio: [speech], traces: [...detail.traces, tr], artifacts: [{ id: "voice-file", conversation_id: conv.id, name: "voice.ogg", mime: "audio/ogg" }] });
+  const wav = Buffer.alloc(44 + 32000 * 10);
+  wav.write("RIFF");wav.writeUInt32LE(wav.length - 8, 4);wav.write("WAVEfmt ", 8);wav.writeUInt32LE(16, 16);wav.writeUInt16LE(1, 20);wav.writeUInt16LE(1, 22);wav.writeUInt32LE(16000, 24);wav.writeUInt32LE(32000, 28);wav.writeUInt16LE(2, 32);wav.writeUInt16LE(16, 34);wav.write("data", 36);wav.writeUInt32LE(wav.length - 44, 40);
+  await page.route("**/api/inspect/artifact?**", (route) => route.fulfill({ contentType: "audio/wav", body: wav }));
+  await page.route("**/api/inspect/trace?**", (route) => route.fulfill({ json: { ...tr, input: { artifact_id: "voice-file" }, output: speech } }));
+  await openSession(page);
+  await page.locator("#tab-timeline").focus();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#tab-audio")).toBeFocused();
+  await expect(page.locator("#panel")).toContainText("Анна");
+  await expect(page.locator("#panel")).toContainText(speech.text);
+  await expect(page.locator("audio")).toHaveAttribute("preload", "none");
+  await expect(page.locator("audio")).toHaveAttribute("src", /artifact.*voice-file/);
+  await page.locator("audio").focus();await page.keyboard.press("Space");
+  await expect.poll(() => page.locator("audio").evaluate((a) => a.paused)).toBe(false);
+  await page.keyboard.press("Space");await expect.poll(() => page.locator("audio").evaluate((a) => a.paused)).toBe(true);
+  const attempt = page.getByRole("button", { name: "Попытка 1", exact: true });
+  await attempt.focus();await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toContainText("Три яблока");
+  await page.keyboard.press("Escape");await expect(attempt).toBeFocused();
+  expect(await page.evaluate(() => window.XSS)).toBeUndefined();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath("audio.png"), fullPage: true });
+  await page.locator("#tab-audio").focus();await page.keyboard.press("Home");await expect(page.locator("#tab-timeline")).toBeFocused();
+});
+
+test("аудио из кэша не изображает новый вызов STT", async ({ page }) => {
+  await fixture(page, { ...detail, audio: [{ incoming_id: "voice", artifact_id: "missing", model: "nemotron", status: "completed", text: "Сохранённый текст", cached: true, queued_at: modelTrace.started_at, started_at: modelTrace.started_at, ended_at: modelTrace.ended_at }] });
+  await openSession(page);await page.getByRole("tab", { name: /Аудио/ }).click();
+  await expect(page.locator("#panel")).toContainText("Из кэша");
+  await expect(page.locator("#panel")).toContainText("Исходный файл недоступен");
+  await expect(page.locator("#panel [data-trace]")).toHaveCount(0);
+});
+
 test("история, аргументы и результат инструмента, контекст, финальный текст и отсутствие доставки", async ({
   page,
 }) => {

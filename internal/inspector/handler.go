@@ -82,6 +82,9 @@ func Register(mux *http.ServeMux, store Store, artifacts ArtifactStore) {
 		if out.MIME == "image/png" || out.MIME == "image/jpeg" || out.MIME == "image/webp" {
 			mime = out.MIME
 		}
+		if out.MIME == "audio/ogg" || out.MIME == "audio/mpeg" || out.MIME == "audio/wav" || out.MIME == "audio/mp4" || out.MIME == "audio/webm" {
+			mime = out.MIME
+		}
 		w.Header().Set("Content-Type", mime)
 		w.Header().Set("Content-Disposition", "inline")
 		_, _ = w.Write(out.Data)
@@ -128,7 +131,7 @@ func local(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'")
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
 		next.ServeHTTP(w, r.WithContext(ctx))
