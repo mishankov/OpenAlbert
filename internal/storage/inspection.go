@@ -169,9 +169,16 @@ func (s *Store) InspectSession(ctx context.Context, id string, after int64) (out
 	if out.Outgoing == nil {
 		out.Outgoing = []domain.Outgoing{}
 	}
+	out.Audio, err = selectJSON[inspector.AudioResult](ctx, s.pool, `SELECT c.data || jsonb_build_object('original_text',i.data->>'text','received_at',i.data->>'created_at') FROM jarvis_checkpoints c LEFT JOIN jarvis_incoming i ON i.id=c.data->>'incoming_id' AND i.data->'conversation'->>'id'=$2 WHERE c.id LIKE 'audio/%' AND c.data->>'session_id'=$1 ORDER BY c.data->>'queued_at',c.id`, id, out.Session.ConversationID)
+	if err != nil {
+		return
+	}
+	if out.Audio == nil {
+		out.Audio = []inspector.AudioResult{}
+	}
 	// Session artifacts are referenced in incoming/model/tool messages. Scope the
 	// lookup to that conversation and exact IDs mentioned in this session.
-	out.Artifacts, err = selectJSON[domain.Artifact](ctx, s.pool, `SELECT a.data FROM jarvis_artifacts a WHERE a.conversation_id=$2 AND EXISTS(SELECT 1 FROM jarvis_messages m WHERE m.session_id=$1 AND strpos(m.data::text,a.id)>0) ORDER BY a.data->>'created_at'`, id, out.Session.ConversationID)
+	out.Artifacts, err = selectJSON[domain.Artifact](ctx, s.pool, `SELECT a.data FROM jarvis_artifacts a WHERE a.conversation_id=$2 AND (a.data->>'session_id'=$1 OR EXISTS(SELECT 1 FROM jarvis_messages m WHERE m.session_id=$1 AND strpos(m.data::text,a.id)>0) OR EXISTS(SELECT 1 FROM jarvis_checkpoints c WHERE c.id LIKE 'audio/%' AND c.data->>'session_id'=$1 AND c.data->>'artifact_id'=a.id)) ORDER BY a.data->>'created_at'`, id, out.Session.ConversationID)
 	if out.Artifacts == nil {
 		out.Artifacts = []domain.Artifact{}
 	}

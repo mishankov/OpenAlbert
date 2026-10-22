@@ -5,10 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"mime/multipart"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,11 +14,10 @@ import (
 )
 
 type OpenAIConfig struct {
-	BaseURL            string
-	APIKey             string
-	Model              string
-	TranscriptionModel string // Optional: enables Transcribe using this independently configured model.
-	HTTPClient         *http.Client
+	BaseURL    string
+	APIKey     string
+	Model      string
+	HTTPClient *http.Client
 }
 type OpenAI struct {
 	config     OpenAIConfig
@@ -180,42 +177,6 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 		return domain.Completion{}, errors.New("model returned empty response")
 	}
 	return domain.Completion{Message: m, InputTokens: response.Usage.Prompt, OutputTokens: response.Usage.Completion}, nil
-}
-func (o *OpenAI) Transcribe(ctx context.Context, name string, data []byte) (string, error) {
-	if o.config.TranscriptionModel == "" {
-		return "", errors.New("audio transcription model is not configured")
-	}
-	if len(data) > 20<<20 {
-		return "", errors.New("audio exceeds size limit")
-	}
-	var body bytes.Buffer
-	w := multipart.NewWriter(&body)
-	_ = w.WriteField("model", o.config.TranscriptionModel)
-	part, err := w.CreateFormFile("file", filepath.Base(name))
-	if err != nil {
-		return "", err
-	}
-	if _, err = part.Write(data); err != nil {
-		return "", err
-	}
-	if err = w.Close(); err != nil {
-		return "", err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.config.BaseURL+"/audio/transcriptions", &body)
-	if err != nil {
-		return "", errors.New("invalid transcription request")
-	}
-	req.Header.Set("Content-Type", w.FormDataContentType())
-	if o.config.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+o.config.APIKey)
-	}
-	var out struct {
-		Text string `json:"text"`
-	}
-	if err := request(ctx, o.client, req, &out, 1<<20); err != nil {
-		return "", err
-	}
-	return out.Text, nil
 }
 
 var _ domain.Model = (*OpenAI)(nil)

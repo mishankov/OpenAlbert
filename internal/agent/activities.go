@@ -22,6 +22,8 @@ type Activities struct {
 	Repo               domain.Repository
 	Knowledge          domain.Knowledge
 	Model              domain.Model
+	STT                domain.SpeechRecognizer
+	STTModel           string
 	Search             domain.Search
 	Logs               domain.LogReader
 	Messenger          domain.Messenger
@@ -146,18 +148,16 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 		text := clip(msg.Text, 16000)
 		images := []string{}
 		for i, attachment := range msg.Attachments {
-			data := attachment.Data
-			if len(data) == 0 && attachment.FileID != "" {
-				data, e = a.Messenger.Download(ctx, attachment.FileID)
-				if e != nil {
+			art, attachmentErr := a.attachmentArtifact(ctx, in, id, i, attachment)
+			if attachmentErr != nil {
+				var unavailable *attachmentDownloadError
+				if errors.As(attachmentErr, &unavailable) {
 					text += "\n[Attachment unavailable]"
 					continue
 				}
+				return out, attachmentErr
 			}
-			art := domain.Artifact{ID: ID(id, fmt.Sprint(i)), ConversationID: conv.ID, Name: attachment.Name, MIME: attachment.MIME, Data: data, CreatedAt: time.Now().UTC()}
-			if e = a.Repo.SaveArtifact(ctx, art); e != nil {
-				return out, e
-			}
+			data := art.Data
 			text += fmt.Sprintf("\n[Attachment: %s; type=%s; artifact_id=%s]", attachment.Name, attachment.MIME, art.ID)
 			if strings.HasPrefix(attachment.MIME, "image/") {
 				small, imageErr := smallImage(data)
@@ -168,16 +168,15 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 				}
 			} else if strings.HasPrefix(attachment.MIME, "text/") || strings.Contains(attachment.MIME, "json") {
 				text += "\n" + clip(string(data), 16000)
-			} else if strings.HasPrefix(attachment.MIME, "audio/") {
-				if transcriber, yes := a.Model.(interface {
-					Transcribe(context.Context, string, []byte) (string, error)
-				}); yes {
-					transcript, transErr := transcriber.Transcribe(ctx, attachment.Name, data)
-					if transErr == nil {
-						text += "\n[Voice transcript]\n" + clip(transcript, 16000)
-					} else {
-						text += "\n[Audio transcription unavailable; ask for text]"
-					}
+			} else if audioAttachment(attachment) {
+				r, found, audioErr := a.loadAudio(ctx, in.SessionID, id, art.ID)
+				if audioErr != nil {
+					return out, audioErr
+				}
+				if found && r.Status == "completed" {
+					text += "\n[Voice transcript; automatically recognized from audio]\n" + clip(r.Text, 16000)
+				} else if found && r.Status == "no_speech" {
+					text += "\n[No speech recognized in audio; ask for clarification]"
 				} else {
 					text += "\n[Audio transcription unavailable; ask for text]"
 				}

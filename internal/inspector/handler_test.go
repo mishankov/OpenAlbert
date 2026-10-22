@@ -13,6 +13,29 @@ import (
 
 type fakeStore struct{}
 
+type audioArtifactStore struct{ fakeStore }
+
+func (audioArtifactStore) Artifact(_ context.Context, scope, id string) (domain.Artifact, bool, error) {
+	if scope != "personal:7" || id != "audio" {
+		return domain.Artifact{}, false, nil
+	}
+	return domain.Artifact{MIME: "audio/ogg", Data: []byte("ogg")}, true, nil
+}
+func TestInspectorAudioUsesSafeMIMEAndSameOriginPolicy(t *testing.T) {
+	mux := http.NewServeMux()
+	Register(mux, fakeStore{}, audioArtifactStore{})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/api/inspect/artifact?conversation_id=personal:7&id=audio", nil))
+	if w.Code != 200 || w.Header().Get("Content-Type") != "audio/ogg" || !strings.Contains(w.Header().Get("Content-Security-Policy"), "media-src 'self'") {
+		t.Fatal("audio playback policy missing")
+	}
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/api/inspect/artifact?conversation_id=other&id=audio", nil))
+	if w.Code != 404 {
+		t.Fatal("audio escaped scope")
+	}
+}
+
 func (fakeStore) InspectSessions(context.Context, Filter) ([]Session, error) { return []Session{}, nil }
 func (fakeStore) InspectSession(context.Context, string, int64) (Detail, bool, error) {
 	return Detail{}, false, nil

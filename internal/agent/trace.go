@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 	"jarvis/internal/domain"
 	"jarvis/internal/telemetry"
 )
@@ -49,6 +50,9 @@ func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any,
 		tr.Output, _ = json.Marshal(output)
 		if err != nil {
 			tr.Status = "failed"
+			if temporal.IsCanceledError(err) || ctx.Err() != nil {
+				tr.Status = "cancelled"
+			}
 			tr.Error = err.Error()
 		}
 		if value, ok := output.(string); ok && tr.Kind == "tool" && ToolFailed(value) {

@@ -317,10 +317,10 @@ func TestTranscriptionUsesConfiguredModelAndMultipart(t *testing.T) {
 		_, _ = io.WriteString(w, `{"text":"Привет"}`)
 	}))
 	defer s.Close()
-	m, _ := NewOpenAI(OpenAIConfig{BaseURL: s.URL, Model: "chat", TranscriptionModel: "speech-model"})
-	text, err := m.Transcribe(context.Background(), "voice.ogg", []byte("audio"))
-	if err != nil || text != "Привет" {
-		t.Fatalf("transcription %q, %v", text, err)
+	m, _ := NewSTT(STTConfig{BaseURL: s.URL, Model: "speech-model", Revision: "v1"})
+	result, err := m.Transcribe(context.Background(), "voice.ogg", []byte("audio"))
+	if err != nil || result.Text != "Привет" {
+		t.Fatalf("transcription %q, %v", result.Text, err)
 	}
 }
 func TestTelegramRejectsOutgoingUnknownRecipient(t *testing.T) {

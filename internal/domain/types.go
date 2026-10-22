@@ -15,12 +15,14 @@ type Conversation struct {
 	Private  bool   `json:"private"`
 }
 type Attachment struct {
-	FileID     string `json:"file_id,omitempty"`
-	Name       string `json:"name"`
-	MIME       string `json:"mime"`
-	Kind       string `json:"kind"`
-	Data       []byte `json:"-"`
-	ArtifactID string `json:"artifact_id,omitempty"`
+	SizeBytes       int64  `json:"size_bytes,omitempty"`
+	DurationSeconds int    `json:"duration_seconds,omitempty"`
+	FileID          string `json:"file_id,omitempty"`
+	Name            string `json:"name"`
+	MIME            string `json:"mime"`
+	Kind            string `json:"kind"`
+	Data            []byte `json:"-"`
+	ArtifactID      string `json:"artifact_id,omitempty"`
 }
 type Incoming struct {
 	AuthorName     string       `json:"author_name,omitempty"`
@@ -119,6 +121,7 @@ type TextEntity struct {
 	Language string `json:"language,omitempty"`
 }
 type Artifact struct {
+	SessionID      string    `json:"session_id,omitempty"`
 	ID             string    `json:"id"`
 	ConversationID string    `json:"conversation_id"`
 	Name           string    `json:"name"`
@@ -154,6 +157,9 @@ type Repository interface {
 	Ping(context.Context) error
 	LoadCheckpoint(context.Context, string) (json.RawMessage, bool, error)
 	SaveCheckpoint(context.Context, string, json.RawMessage) error
+	ClaimTranscription(context.Context, string, string) (SpeechText, bool, bool, error)
+	CompleteTranscription(context.Context, string, string, SpeechText) (bool, error)
+	ReleaseTranscription(context.Context, string, string) error
 	SaveTrace(context.Context, Trace) error
 	AcceptIncoming(context.Context, Incoming, int64) (bool, error)
 	PollOffset(context.Context) (int64, error)

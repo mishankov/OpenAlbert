@@ -42,6 +42,9 @@ const duration = (tr) =>
     ? `${Math.max(0, (new Date(tr.ended_at) - new Date(tr.started_at)) / 1000).toFixed(1)} с`
     : "выполняется";
 const labels = {
+  queued: "В очереди",
+  no_speech: "Речь не распознана",
+  unavailable: "Недоступно",
   message: "Сообщение",
   task: "Задача",
   initiative: "Инициатива",
@@ -195,6 +198,7 @@ async function loadList(more = false, preserve = false) {
 const tabs = [
   ["timeline", "Хронология"],
   ["models", "Модель"],
+  ["audio", "Аудио"],
   ["delivery", "Доставка"],
   ["turns", "Запуски"],
   ["artifacts", "Артефакты"],
@@ -204,6 +208,7 @@ function tabCount(name, d) {
     timeline: d.session.message_count,
     models: d.traces.filter((t) => t.kind === "model" || t.kind === "analysis")
       .length,
+    audio: (d.audio || []).length,
     delivery: d.outgoing.length,
     turns: d.turns.length,
     artifacts: d.artifacts.length,
@@ -238,7 +243,45 @@ function messageText(text, key) {
   if (text.length < 1200) return `<div class="prose">${esc(text)}</div>`;
   return `<details class="long-text" data-open-key="text-${esc(key)}"><summary><span class="prose text-preview">${esc(text)}</span><span class="when-closed">Развернуть ${text.length.toLocaleString("ru-RU")} символов</span><span class="when-open">Свернуть</span></summary><div class="prose">${esc(text)}</div></details>`;
 }
+
+function speechForMessage(row) {
+  return row.message.role === "user" && row.message.source_message_id
+    ? (state.data.audio || []).filter((r) => r.incoming_id === row.message.source_message_id)
+    : [];
+}
+function sourcePlayer(r, prefix) {
+  const artifact = state.data.artifacts.find((a) => a.id === r.artifact_id);
+  if (!artifact) return '<p class="muted">Исходный файл недоступен.</p>';
+  return `<audio id="${prefix}-${esc(r.artifact_id)}" controls preload="none" aria-label="Исходное аудио" aria-keyshortcuts="Space" title="Воспроизведение и пауза · Space при фокусе на плеере" src="${esc(artifactURL(artifact))}"></audio><a class="audio-original" href="${esc(artifactURL(artifact))}" target="_blank" rel="noopener noreferrer" title="Открыть исходное аудио · Enter" aria-keyshortcuts="Enter">Оригинал</a>`;
+}
+function speechNotice(r) {
+  return {
+    queued: "Ожидает распознавания",
+    running: "Распознавание ещё не завершено",
+    no_speech: "Речь не распознана",
+    failed: "Не удалось получить расшифровку",
+    cancelled: "Распознавание отменено",
+    unavailable: "Распознавание недоступно",
+  }[r.status] || "Расшифровка не сохранена";
+}
+function voiceMessageRow(row, results) {
+  const first = results[0], m = row?.message;
+  const source = results.find((r) => r.original_text !== undefined && r.original_text !== null);
+  const timestamp = first.received_at || row?.recorded_at || first.queued_at;
+  const caption = source?.original_text;
+  const key = row ? `event-${row.seq}` : `event-voice-${esc(first.incoming_id)}`;
+  return `<article class="event voice-message" id="${key}" data-incoming="${esc(first.incoming_id)}"><div class="event-meta"><time title="${first.received_at ? "Получено в Telegram: " : "Сохранено: "}${esc(date(timestamp))}">${esc(timeOnly(timestamp))}</time><span class="role role-user">USER ${row ? `<span class="seq">#${row.seq}</span>` : ""}</span></div><div class="event-content"><div class="event-line"><span class="event-name">${esc(m?.author_name || first.author_name || "Пользователь")}</span><span class="voice-badge">Голосовое сообщение</span>${row ? `<span class="row-actions">${recordButton(row.seq)}</span>` : ""}</div>${caption ? messageText(caption, `caption-${first.incoming_id}`) : ""}${results.map((r) => `<div class="voice-attachment">${sourcePlayer(r, "voice-player")}<div class="voice-caption"><span class="muted">${r.duration_seconds ? `${esc(r.duration_seconds.toFixed(1))} с · ` : ""}Автоматическая расшифровка</span>${r.text ? messageText(r.text, `voice-${r.artifact_id}`) : `<p class="muted">${esc(speechNotice(r))}</p>`}</div></div>`).join("")}${!source && m?.content ? `<details class="voice-context" data-open-key="voice-context-${esc(first.incoming_id)}"><summary title="Сохранённый текст сообщения · Enter" aria-keyshortcuts="Enter Space">Сохранённый текст сообщения</summary>${messageText(m.content, `saved-voice-${first.incoming_id}`)}</details>` : ""}</div></article>`;
+}
+function speechRow(r, orphanTrace = null) {
+  const attempts = orphanTrace ? [orphanTrace] : state.data.traces.filter((t) => t.kind === "transcription" && t.call_id === r.artifact_id);
+  const timestamp = r.started_at && !r.started_at.startsWith("0001-") ? r.started_at : r.queued_at;
+  const elapsed = r.ended_at && timestamp && !r.ended_at.startsWith("0001-") ? duration({ started_at: timestamp, ended_at: r.ended_at }) : "";
+  const info = [r.model, r.cached ? "Из кэша · нового вызова STT не было" : elapsed].filter(Boolean).join(" · ");
+  return `<details class="tool-event speech-event" data-open-key="speech-${esc(orphanTrace?.id || r.artifact_id)}"><summary title="Распознавание речи · Enter" aria-keyshortcuts="Enter Space"><span class="event-meta"><time title="${esc(date(timestamp))}">${esc(timeOnly(timestamp))}</time><span class="role role-speech">STT</span></span><span class="tool-summary"><span class="tool-name">Распознавание речи</span><span class="argument-preview">${esc(info)}</span><span class="tool-state">${pill(r.status)}</span><span class="expand-mark" aria-hidden="true">▸</span></span></summary><div class="tool-expanded speech-expanded"><div class="tool-payloads"><section><h4>Результат</h4>${r.text ? messageText(r.text, `speech-${r.artifact_id}`) : `<p class="muted">${esc(speechNotice(r))}</p>`}${r.error_code ? `<p class="error">${esc(r.error_code)}</p>` : ""}${orphanTrace ? '<p class="muted">Результат вложения не сохранён; доступна трасса попытки.</p>' : ""}</section><section><h4>Обработка</h4><p class="muted">${esc(r.model || "Модель не сохранена")}</p>${r.cached ? '<p class="muted">Использована сохранённая расшифровка. Время ниже относится к исходному распознаванию.</p>' : ""}${r.decode_ms !== undefined ? `<p>Декодирование: ${esc(r.decode_ms)} мс</p>` : ""}${r.inference_ms !== undefined ? `<p>STT: ${esc(r.inference_ms)} мс</p>` : ""}${r.duration_seconds ? `<p>Запись: ${esc(r.duration_seconds.toFixed(1))} с</p>` : ""}</section></div><div class="tool-footer"><span class="mono muted">${esc(r.artifact_id)}</span><span class="row-actions">${!orphanTrace ? recordButton(`audio:${r.artifact_id}`, "Данные распознавания") : ""}${attempts.map((t) => traceButton(t.id, `Попытка ${t.attempt} · ${label(t.status)}`)).join("")}</span></div></div></details>`;
+}
 function messageRow(row) {
+  const speech = speechForMessage(row);
+  if (speech.length) return voiceMessageRow(row, speech);
   const m = row.message,
     trace = traceForMessage(row);
   const role = m.role === "user" ? "USER" : m.role === "tool" ? "RESULT" : "AI";
@@ -283,28 +326,39 @@ function timeline(d) {
       );
       if (result) paired.add(result.seq);
     }
+  const represented = new Set();
   const events = d.messages
     .map((row) => {
       if (paired.has(row.seq)) return "";
       const calls = row.message.tool_calls || [];
+      const speech = speechForMessage(row);
+      speech.forEach((r) => represented.add(r.artifact_id));
       return (
         (row.message.content ||
         row.message.reasoning ||
         row.message.images?.length ||
         !calls.length
           ? messageRow(row)
-          : "") + calls.map((call) => toolRow(row, call)).join("")
+          : "") + speech.map((r) => speechRow(r)).join("") + calls.map((call) => toolRow(row, call)).join("")
       );
     })
     .join("");
-  const unfinished = d.traces.filter((t) => t.status === "running");
+  const pending = new Map();
+  for (const r of d.audio || []) {
+    if (represented.has(r.artifact_id)) continue;
+    const group = pending.get(r.incoming_id) || [];
+    group.push(r);pending.set(r.incoming_id, group);
+  }
+  const pendingEvents = [...pending.values()].map((group) => voiceMessageRow(null, group) + group.map((r) => speechRow(r)).join("")).join("");
+  const orphanSpeech = d.traces.filter((t) => t.kind === "transcription" && !(d.audio || []).some((r) => r.artifact_id === t.call_id)).map((t) => speechRow({ artifact_id: t.call_id, model: t.name, status: t.status, started_at: t.started_at, ended_at: t.ended_at }, t)).join("");
+  const unfinished = d.traces.filter((t) => t.status === "running" && t.kind !== "transcription");
   const failures = d.traces.filter(
     (t) =>
       t.kind === "tool" &&
       t.status === "failed" &&
       !d.messages.some((m) => m.message.tool_call_id === t.call_id),
   );
-  return `${unfinished.map((t) => `<div class="activity-line">Нет сохранённого завершения: <strong>${esc(t.name || "модель")}</strong> · ${esc(date(t.started_at))} ${traceButton(t.id, "Подробности")}</div>`).join("")}<div class="timeline">${events || '<div class="empty-panel">Сообщений пока нет.</div>'}${failures.map((t) => `<div class="error">${esc(t.name)}: ${esc(t.error)} ${traceButton(t.id, `Попытка ${t.attempt}`)}</div>`).join("")}</div>${d.next_after ? `<div class="pagination"><span>${d.messages.length} из ${d.session.message_count} записей</span><button id="more-messages" class="button">Загрузить следующие события</button></div>` : ""}`;
+  return `${unfinished.map((t) => `<div class="activity-line">Нет сохранённого завершения: <strong>${esc(t.name || "модель")}</strong> · ${esc(date(t.started_at))} ${traceButton(t.id, "Подробности")}</div>`).join("")}<div class="timeline">${events + pendingEvents + orphanSpeech || '<div class="empty-panel">Сообщений пока нет.</div>'}${failures.map((t) => `<div class="error">${esc(t.name)}: ${esc(t.error)} ${traceButton(t.id, `Попытка ${t.attempt}`)}</div>`).join("")}</div>${d.next_after ? `<div class="pagination"><span>${d.messages.length} из ${d.session.message_count} записей</span><button id="more-messages" class="button">Загрузить следующие события</button></div>` : ""}`;
 }
 function models(d) {
   const rows = d.traces.filter(
@@ -328,6 +382,18 @@ function artifacts(d) {
   return `<ul class="file-list">${d.artifacts.map((a) => `<li><a href="${esc(artifactURL(a))}" target="_blank" rel="noopener noreferrer">${["image/png", "image/jpeg", "image/webp"].includes(a.mime) ? `<img src="${esc(artifactURL(a))}" alt="" loading="lazy">` : '<span class="file-icon">FILE</span>'}<span class="file-name">${esc(a.name)}<span class="mono muted">${esc(a.id)}</span></span><span class="muted">${esc(a.mime)}</span></a></li>`).join("")}</ul>`;
 }
 
+function audio(d) {
+  if (!d.audio?.length)
+    return '<div class="empty-panel">Голосовых сообщений пока нет.</div>';
+  return `<div class="runs">${d.audio.map((r) => {
+    const artifact = d.artifacts.find((a) => a.id === r.artifact_id);
+    const traces = d.traces.filter((t) => t.kind === "transcription" && t.call_id === r.artifact_id);
+    const author = d.messages.find((m) => m.message.source_message_id === r.incoming_id)?.message;
+    const wait = r.started_at && !r.started_at.startsWith("0001-") ? Math.max(0, (new Date(r.started_at) - new Date(r.queued_at)) / 1000).toFixed(1) : null;
+    return `<article class="audio-result"><div class="event-line"><strong>${esc(artifact?.name || "Аудио")}</strong>${pill(r.status)}${r.cached ? '<span class="muted">Из кэша · нового вызова STT не было</span>' : ""}</div><p class="muted">${esc(r.author_name || author?.author_name || r.incoming_id)} · ${esc(r.model)} · ${esc(date(r.queued_at))}</p>${artifact ? `<audio controls preload="none" aria-label="Исходное аудио" aria-keyshortcuts="Space" title="Воспроизведение и пауза · Space при фокусе на плеере" src="${esc(artifactURL(artifact))}"></audio><p><a href="${esc(artifactURL(artifact))}" target="_blank" rel="noopener noreferrer">Открыть исходное аудио</a></p>` : '<p class="muted">Исходный файл недоступен.</p>'}<p class="muted">${wait !== null ? `Ожидание: ${wait} с · ` : ""}${r.duration_seconds ? `Запись: ${r.duration_seconds.toFixed(1)} с · ` : ""}${r.ended_at && r.started_at && !r.started_at.startsWith("0001-") ? `Обработка: ${esc(duration(r))} · ` : ""}${r.cached ? "Время исходного распознавания: " : ""}Декодирование: ${r.decode_ms || 0} мс · STT: ${r.inference_ms || 0} мс</p>${r.text ? `<div class="prose">${esc(r.text)}</div>` : ""}${r.error_code ? `<p class="error">${esc(r.error_code)}</p>` : ""}${traces.map((t) => `<p>${traceButton(t.id, `Попытка ${t.attempt}`)} · ${esc(label(t.status))} · ${esc(duration(t))}</p>`).join("")}</article>`;
+  }).join("")}</div>`;
+}
+
 function render() {
   const d = state.data;
   if (!d) return;
@@ -349,7 +415,7 @@ function render() {
     (n, t) => n + (t.Stats?.InputTokens || 0) + (t.Stats?.OutputTokens || 0),
     0,
   );
-  main.innerHTML = `<div class="session-toolbar"><div id="detail-error" role="alert" class="error hidden"></div><div class="session-heading"><a class="back-link" href="#/">← Сессии</a><h2>${esc(sessionName(s))}</h2>${pill(s.status)}<span class="heading-source">${esc(label(s.trigger))} · ${esc(shortDate(s.created_at))}</span></div><div class="session-meta-line"><span class="mono" title="ID сессии">${esc(s.id)}</span><span>${esc(s.conversation_id)}</span><span>${s.tool_count} tools · ${tokens.toLocaleString("ru-RU")} ток.</span></div><nav class="tabs" role="tablist" aria-label="Разделы сессии">${tabs.map(([key, title]) => `<button class="tab" id="tab-${key}" role="tab" data-tab="${key}" aria-controls="panel" aria-selected="${state.tab === key}" tabindex="${state.tab === key ? 0 : -1}">${title} <small>${tabCount(key, d)}</small></button>`).join("")}</nav></div>${d.traces.some((t) => t.historical) ? '<div class="history-note">В старых записях контекст и время отдельных вызовов не сохранены.</div>' : ""}<section id="panel" role="tabpanel" aria-labelledby="tab-${state.tab}">${{ timeline, models, delivery: deliveries, turns, artifacts }[state.tab](d)}</section>`;
+  main.innerHTML = `<div class="session-toolbar"><div id="detail-error" role="alert" class="error hidden"></div><div class="session-heading"><a class="back-link" href="#/">← Сессии</a><h2>${esc(sessionName(s))}</h2>${pill(s.status)}<span class="heading-source">${esc(label(s.trigger))} · ${esc(shortDate(s.created_at))}</span></div><div class="session-meta-line"><span class="mono" title="ID сессии">${esc(s.id)}</span><span>${esc(s.conversation_id)}</span><span>${s.tool_count} tools · ${tokens.toLocaleString("ru-RU")} ток.</span></div><nav class="tabs" role="tablist" aria-label="Разделы сессии">${tabs.map(([key, title]) => `<button class="tab" id="tab-${key}" role="tab" data-tab="${key}" aria-controls="panel" aria-selected="${state.tab === key}" tabindex="${state.tab === key ? 0 : -1}">${title} <small>${tabCount(key, d)}</small></button>`).join("")}</nav></div>${d.traces.some((t) => t.historical) ? '<div class="history-note">В старых записях контекст и время отдельных вызовов не сохранены.</div>' : ""}<section id="panel" role="tabpanel" aria-labelledby="tab-${state.tab}">${{ timeline, models, audio, delivery: deliveries, turns, artifacts }[state.tab](d)}</section>`;
   for (const el of main.querySelectorAll("details[data-open-key]")) {
     if (openKeys.includes(el.dataset.openKey)) el.open = true;
     const summary = el.querySelector(":scope > summary");
@@ -638,6 +704,9 @@ function openRecord(id, opener) {
     const index = Number(id.slice(5));
     record = state.data.turns[index];
     title = `Запуск ${index + 1}`;
+  } else if (id.startsWith("audio:")) {
+    record = state.data.audio.find((r) => r.artifact_id === id.slice(6));
+    title = "Данные распознавания";
   } else if (id === "analysis") {
     record = state.data.analysis;
     title = "Анализ сессии";
@@ -880,6 +949,7 @@ setInterval(() => {
   if (
     state.view === "sessions" &&
     !document.hidden &&
+    ![...main.querySelectorAll("audio")].some((a) => !a.paused) &&
     !state.busy &&
     $("#drawer").classList.contains("hidden")
   )
