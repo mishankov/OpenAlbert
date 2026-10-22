@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"jarvis/internal/domain"
 )
@@ -19,11 +20,13 @@ func TestProgressEditsOneMessageAndDeletesAfterEveryReplyPart(t *testing.T) {
 	r, repo, conv := deliveryRuntime(t, func(w http.ResponseWriter, req *http.Request) {
 		method := req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:]
 		var body struct {
-			ChatID    int64  `json:"chat_id"`
-			ThreadID  int    `json:"message_thread_id"`
-			MessageID int64  `json:"message_id"`
-			Text      string `json:"text"`
-			Silent    bool   `json:"disable_notification"`
+			ChatID    int64               `json:"chat_id"`
+			ThreadID  int                 `json:"message_thread_id"`
+			MessageID int64               `json:"message_id"`
+			Text      string              `json:"text"`
+			Silent    bool                `json:"disable_notification"`
+			Entities  []domain.TextEntity `json:"entities"`
+			ParseMode string              `json:"parse_mode"`
 			Preview   struct {
 				Disabled bool `json:"is_disabled"`
 			} `json:"link_preview_options"`
@@ -35,6 +38,9 @@ func TestProgressEditsOneMessageAndDeletesAfterEveryReplyPart(t *testing.T) {
 		texts = append(texts, body.Text)
 		if body.ChatID != 7 {
 			t.Error("wrong chat")
+		}
+		if method != "deleteMessage" && (len(body.Entities) != 1 || body.Entities[0].Type != "italic" || body.Entities[0].Offset != 0 || body.Entities[0].Length != len(utf16.Encode([]rune(body.Text))) || body.ParseMode != "") {
+			t.Error("the whole literal status must be italic, including emoji")
 		}
 		if method == "sendMessage" {
 			if !body.Silent || !body.Preview.Disabled || body.ThreadID != 3 {
@@ -64,7 +70,7 @@ func TestProgressEditsOneMessageAndDeletesAfterEveryReplyPart(t *testing.T) {
 	if err := repo.ReportProgress(ctx, "turn", 1, "Нашёл характеристики. Проверяю цены."); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.ReportProgress(ctx, "turn", 2, "Сравниваю найденные цены."); err != nil {
+	if err := repo.ReportProgress(ctx, "turn", 2, "🔎 Сравниваю найденные цены."); err != nil {
 		t.Fatal(err)
 	}
 	tick(89 * time.Second)
@@ -76,7 +82,7 @@ func TestProgressEditsOneMessageAndDeletesAfterEveryReplyPart(t *testing.T) {
 	if err := restarted.ProgressOnce(ctx, start.Add(90*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if len(methods) != 2 || texts[1] != "Сравниваю найденные цены." {
+	if len(methods) != 2 || texts[1] != "🔎 Сравниваю найденные цены." {
 		t.Fatalf("updates not coalesced: %v %v", methods, texts)
 	}
 	tick(150 * time.Second) // Identical text must not cause an API call.
@@ -120,12 +126,16 @@ func TestProgressFailureAndStopStayInSameMessage(t *testing.T) {
 				methods = append(methods, method)
 				if method == "editMessageText" {
 					var body struct {
-						Text string `json:"text"`
-						ID   int    `json:"message_id"`
+						Text     string              `json:"text"`
+						ID       int                 `json:"message_id"`
+						Entities []domain.TextEntity `json:"entities"`
 					}
 					_ = json.NewDecoder(req.Body).Decode(&body)
 					if body.Text != tc.text || body.ID != 42 {
 						t.Error("wrong terminal status")
+					}
+					if len(body.Entities) != 1 || body.Entities[0].Type != "italic" || body.Entities[0].Offset != 0 || body.Entities[0].Length != len(utf16.Encode([]rune(body.Text))) {
+						t.Error("terminal status must remain italic")
 					}
 				}
 				_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":42}}`)
