@@ -4,20 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/activity"
 	"jarvis/internal/domain"
+	"jarvis/internal/telemetry"
 )
 
 // Inspection must not change whether a side effect succeeds. Failed trace writes
 // are operational warnings; the durable tool checkpoints remain authoritative.
-func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any) func(any, error) {
+func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any, event *telemetry.Event) func(any, error) {
 	tr.Attempt = 1
 	if activity.IsActivity(ctx) {
 		tr.Attempt = int(activity.GetInfo(ctx).Attempt)
 	}
 	tr.ID = ID(tr.Kind, tr.TurnID, fmt.Sprint(tr.Step), tr.CallID, fmt.Sprint(tr.Attempt))
+	if event != nil {
+		event.Set("trace_id", tr.ID)
+		base := a.InspectorPublicURL
+		if base == "" {
+			base = "http://localhost:8080/inspect/"
+		}
+		if tr.SessionID != "" {
+			event.Set("inspector_url", strings.TrimRight(base, "/")+"/#/session/"+url.PathEscape(tr.SessionID)+"?"+url.Values{"trace": {tr.ID}}.Encode())
+		}
+	}
 	tr.StartedAt = time.Now().UTC()
 	tr.Status = "running"
 	tr.Input, _ = json.Marshal(input)
@@ -62,9 +75,15 @@ func traceMessages(messages []domain.Message) []domain.Message {
 }
 
 func (a *Activities) analysisModelCall(ctx context.Context, session domain.Session, messages []domain.Message) (out domain.Completion, err error) {
-	finish := a.startTrace(ctx, domain.Trace{SessionID: session.ID, TurnID: "analysis/" + session.ID, Trigger: "analysis", Kind: "analysis", Name: a.ModelName}, map[string]any{"messages": traceMessages(messages)})
+	ctx = telemetry.WithFields(ctx, map[string]any{"session_id": session.ID, "turn_id": "analysis/" + session.ID, "conversation_id": session.ConversationID, "trigger": "analysis"})
+	event := a.event(ctx, "llm.complete")
+	event.Set("model", a.ModelName)
+	finish := a.startTrace(ctx, domain.Trace{SessionID: session.ID, TurnID: "analysis/" + session.ID, Trigger: "analysis", Kind: "analysis", Name: a.ModelName}, map[string]any{"messages": traceMessages(messages)}, event)
 	defer func() {
 		finish(map[string]any{"Message": out.Message, "InputTokens": out.InputTokens, "OutputTokens": out.OutputTokens}, err)
+		event.Set("input_tokens", out.InputTokens)
+		event.Set("output_tokens", out.OutputTokens)
+		event.End(err)
 	}()
 	return a.Model.Complete(domain.WithModelSession(ctx, ID(session.ConversationID)), messages, nil)
 }

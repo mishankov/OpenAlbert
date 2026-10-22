@@ -70,6 +70,7 @@ const state = {
   busy: false,
   listToken: 0,
   detailToken: 0,
+  routeTrace: "",
   drawerOpener: null,
   drawerToken: 0,
   view: "sessions",
@@ -80,6 +81,18 @@ const state = {
   fileBusy: false,
 };
 const main = $("#main");
+const logsURL = new URL(location.href);
+logsURL.port = "9428";
+logsURL.pathname = "/select/vmui/";
+logsURL.search = "";
+logsURL.hash = "/?" + new URLSearchParams({
+  // Legacy UI access logs have status/latency and an incorrectly inferred
+  // ERROR level (from the JSON key "error"). Match HTTP facts before severity.
+  query: 'NOT service:temporal-ui OR http_status:>=400 OR status:>=400 OR duration_ms:>=1000 OR latency:>=1000000000 OR http_error:true OR NOT error:"" OR (status:"" level:in(warn,error,fatal))',
+  "g0.range_input": "1h",
+  "g0.relative_time": "last_1_hour",
+});
+$("#nav-logs").href = logsURL.href;
 const artifactURL = (artifact) =>
   `/api/inspect/artifact?${new URLSearchParams({ conversation_id: artifact.conversation_id, id: artifact.id })}`;
 async function api(path) {
@@ -105,6 +118,7 @@ function setBusy(value) {
   state.busy = value;
   $("#refresh").disabled = value || state.fileBusy;
   $("#refresh").setAttribute("aria-busy", String(value || state.fileBusy));
+  $("#nav-logs").setAttribute("aria-disabled", String(value || state.fileBusy));
 }
 function listRender() {
   const focusedHref = $("#sessions").contains(document.activeElement)
@@ -375,6 +389,8 @@ async function loadDetail(id, append = false) {
     }
     state.data = data;
     render();
+    if (state.routeTrace && $("#drawer").classList.contains("hidden"))
+      openTrace(state.routeTrace);
   } catch (error) {
     if (token !== state.detailToken || id !== state.id) return;
     const box = $("#detail-error");
@@ -420,7 +436,8 @@ function route() {
   }
   if (view === "files") {
     ++state.detailToken;
-    closeDrawer();
+    closeDrawer(false);
+    state.routeTrace = "";
     fileShell();
     loadFiles();
     return;
@@ -430,18 +447,27 @@ function route() {
     state.fileBusy = false;
     setBusy(state.busy);
   }
-  let match = location.hash.match(/^#\/session\/(.+)$/);
+  let match = location.hash.match(/^#\/session\/([^?]+)(?:\?(.*))?$/);
   let id = "";
+  const trace = match ? new URLSearchParams(match[2] || "").get("trace") || "" : "";
   if (match) {
     try {
       id = decodeURIComponent(match[1]);
     } catch {}
   }
-  if (id === state.id && !changedView) return;
+  if (id === state.id && !changedView) {
+    if (trace !== state.routeTrace) {
+      closeDrawer(false);
+      state.routeTrace = trace;
+      if (trace && state.data) openTrace(trace);
+    }
+    return;
+  }
   state.id = id;
   state.data = null;
   state.tab = "timeline";
-  closeDrawer();
+  closeDrawer(false);
+  state.routeTrace = trace;
   document.body.classList.toggle("has-session", !!id);
   listRender();
   if (id) {
@@ -626,6 +652,8 @@ async function openTrace(id, opener) {
   state.drawerFileKey = null;
   state.drawerTraceID = id;
   state.drawerRecordID = null;
+  state.routeTrace = id;
+  history.replaceState(null, "", `#/session/${encodeURIComponent(state.id)}?${new URLSearchParams({ trace: id })}`);
   const token = showDrawer("Вызов", opener);
   $("#drawer-content").innerHTML =
     '<div class="loading-line" role="status">Загрузка…</div>';
@@ -648,7 +676,7 @@ async function openTrace(id, opener) {
   }
 }
 
-function closeDrawer() {
+function closeDrawer(clearRoute = true) {
   $(".workspace").inert = false;
   $(".topbar").inert = false;
   const wasOpen = !$("#drawer").classList.contains("hidden");
@@ -667,11 +695,18 @@ function closeDrawer() {
               ? el.dataset.record === state.drawerRecordID
               : el.dataset.trace === state.drawerTraceID,
         );
-    opener?.focus();
+    (opener || main).focus();
   }
   state.drawerOpener = null;
+  if (clearRoute && state.routeTrace) {
+    state.routeTrace = "";
+    history.replaceState(null, "", `#/session/${encodeURIComponent(state.id)}`);
+  }
 }
 $("#refresh").addEventListener("click", refresh);
+$("#nav-logs").addEventListener("click", (event) => {
+  if (state.busy || state.fileBusy) event.preventDefault();
+});
 $("#more-sessions").addEventListener("click", () => loadList(true));
 let debounce;
 $("#search").addEventListener("input", () => {
@@ -746,13 +781,13 @@ main.addEventListener("keydown", (event) => {
   render();
   $(`#tab-${state.tab}`).focus();
 });
-$("#close-drawer").addEventListener("click", closeDrawer);
-$("#drawer-backdrop").addEventListener("click", closeDrawer);
+$("#close-drawer").addEventListener("click", () => closeDrawer());
+$("#drawer-backdrop").addEventListener("click", () => closeDrawer());
 document.addEventListener("keydown", (event) => {
   if (event.isComposing || event.keyCode === 229 || event.repeat) {
     if (
       (event.key === "Enter" || event.key === " ") &&
-      event.target.closest("button,summary,#download-file")
+      event.target.closest("button,summary,#download-file,#nav-logs")
     )
       event.preventDefault();
     return;
@@ -812,6 +847,16 @@ document.addEventListener("keydown", (event) => {
     }
     $("#search").focus();
     $("#search").select();
+  }
+  if (
+    event.altKey &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    event.code === "KeyL"
+  ) {
+    event.preventDefault();
+    if (!state.busy && !state.fileBusy) $("#nav-logs").click();
   }
   if (
     event.altKey &&

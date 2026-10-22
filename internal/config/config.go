@@ -26,6 +26,8 @@ type Config struct {
 	S3Secure                                                bool
 	BrowserEnabled, BrowserNoSandbox                        bool
 	BrowserExecutable                                       string
+	InspectorPublicURL                                      string
+	VictoriaLogsURL                                         string
 }
 
 func Load() (Config, error) { return load(os.Getenv) }
@@ -41,6 +43,8 @@ func load(get func(string) string) (Config, error) {
 		TelegramBotToken: value("TELEGRAM_BOT_TOKEN", ""), TelegramBaseURL: value("TELEGRAM_BASE_URL", ""), LLMBaseURL: value("LLM_BASE_URL", "https://api.openai.com/v1"), LLMAPIKey: value("LLM_API_KEY", ""), LLMModel: value("LLM_MODEL", ""), LLMTranscriptionModel: value("LLM_TRANSCRIPTION_MODEL", ""),
 		YandexAPIKey: value("YANDEX_API_KEY", ""), YandexEndpoint: value("YANDEX_SEARCH_URL", ""), YandexFolderID: value("YANDEX_FOLDER_ID", ""), KnowledgeDir: value("KNOWLEDGE_DIR", "./container_data/knowledge"), SoulFile: value("SOUL_FILE", ""), HTTPAddr: value("HTTP_ADDR", ":8080"),
 		S3Endpoint: value("S3_ENDPOINT", "localhost:9000"), S3AccessKey: value("S3_ACCESS_KEY", ""), S3SecretKey: value("S3_SECRET_KEY", ""), S3Bucket: value("S3_BUCKET", "jarvis"),
+		InspectorPublicURL: value("INSPECTOR_PUBLIC_URL", "http://localhost:8080/inspect/"),
+		VictoriaLogsURL:    strings.TrimSpace(get("VICTORIALOGS_URL")),
 	}
 	var problems []error
 	required := []struct{ name, value string }{{"DATABASE_URL", c.DatabaseURL}, {"TELEGRAM_BOT_TOKEN", c.TelegramBotToken}, {"LLM_API_KEY", c.LLMAPIKey}, {"LLM_MODEL", c.LLMModel}, {"S3_ACCESS_KEY", c.S3AccessKey}, {"S3_SECRET_KEY", c.S3SecretKey}}
@@ -112,6 +116,14 @@ func load(get func(string) string) (Config, error) {
 	}
 	if u, e := url.Parse(c.DatabaseURL); e != nil || u.Host == "" || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
 		problems = append(problems, errors.New("DATABASE_URL must be a PostgreSQL connection URL"))
+	}
+	if u, e := url.Parse(c.InspectorPublicURL); e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		problems = append(problems, errors.New("INSPECTOR_PUBLIC_URL must be an HTTP(S) URL without credentials, query or fragment"))
+	}
+	if c.VictoriaLogsURL != "" {
+		if u, e := url.Parse(c.VictoriaLogsURL); e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			problems = append(problems, errors.New("VICTORIALOGS_URL must be an HTTP(S) URL without credentials, query or fragment"))
+		}
 	}
 	if strings.Contains(c.S3Endpoint, "://") || strings.ContainsAny(c.S3Endpoint, "/?#@") {
 		problems = append(problems, errors.New("S3_ENDPOINT must be a host[:port], without scheme or credentials"))

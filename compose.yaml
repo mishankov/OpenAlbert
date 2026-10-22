@@ -200,6 +200,8 @@ services:
       TASK_MIN_INTERVAL: "${TASK_MIN_INTERVAL:-5m}"
       INITIATIVE_INTERVAL: "${INITIATIVE_INTERVAL:-30m}"
       HTTP_ADDR: ":8080"
+      INSPECTOR_PUBLIC_URL: "${INSPECTOR_PUBLIC_URL:-http://localhost:8080/inspect/}"
+      VICTORIALOGS_URL: "${VICTORIALOGS_URL-http://victorialogs:9428}"
       S3_ENDPOINT: minio:9000
       S3_ACCESS_KEY: "${S3_ACCESS_KEY:-jarvis-local}"
       S3_SECRET_KEY: "${S3_SECRET_KEY:-jarvis-local-secret}"

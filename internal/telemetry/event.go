@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 )
 
 func New(w io.Writer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})).With("service", "jarvis", "log_schema_version", 3)
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})).With("service", "jarvis", "log_schema_version", 4)
 }
 
 type Event struct {
@@ -91,6 +92,23 @@ func (e *Event) End(err error) {
 			args = append(args, "error_type", fmt.Sprintf("%T", err))
 			diagnostic := Classify(err)
 			args = append(args, "error_code", diagnostic.Code, "error_reason", diagnostic.Reason, "retryable", diagnostic.Retryable)
+			source := strings.SplitN(e.operation, ".", 2)[0]
+			if source == "llm" {
+				source = "model"
+			} else if source == "tool" {
+				source = "agent"
+				switch name, _ := e.fields["tool"].(string); {
+				case strings.HasPrefix(name, "browser_"):
+					source = "browser"
+				case name == "web_read", name == "web_search":
+					source = "web"
+				case name == "send_message", name == "send_group_message", name == "report_progress":
+					source = "telegram"
+				case name == "logs_search":
+					source = "logs"
+				}
+			}
+			args = append(args, "error_source", source, "error_stage", e.operation)
 			if diagnostic.Status != 0 {
 				args = append(args, "http_status", diagnostic.Status)
 			}
@@ -101,10 +119,17 @@ func (e *Event) End(err error) {
 				result, level = "cancelled", slog.LevelWarn
 			}
 		}
-		args = append(args, "operation", e.operation, "result", result, "duration_ms", float64(time.Since(e.start).Microseconds())/1000)
 		elapsed := time.Since(e.start)
-		if ms, ok := e.fields["processing_ms"].(float64); ok {
+		durationMS := float64(elapsed.Microseconds()) / 1000
+		if ms, ok := e.fields["processing_ms"].(float64); ok && e.operation == "turn.complete" {
+			durationMS = ms
 			elapsed = time.Duration(ms * float64(time.Millisecond))
+		}
+		args = append(args, "operation", e.operation, "result", result)
+		// Historical turns may not have a start time. Do not report the time to
+		// construct this summary as the duration of processing the user's request.
+		if _, known := e.fields["processing_ms"]; e.operation != "turn.complete" || known {
+			args = append(args, "duration_ms", durationMS)
 		}
 		e.logger.Log(e.ctx, level, readableMessage(e.operation, result, elapsed, e.fields, Classify(err)), args...)
 	})

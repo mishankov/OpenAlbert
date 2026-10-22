@@ -145,6 +145,91 @@ async function openSession(page) {
   await expect(page.locator("#event-1")).toBeVisible();
 }
 
+test("ссылка из лога открывает нужный вызов, Escape закрывает и сохраняет навигацию", async ({ page }) => {
+  await fixture(page);
+  await page.goto("/inspect/#/session/test-session?trace=trace-tool");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.locator("#drawer-title")).toHaveText("task_find");
+  await expect(page.locator("#drawer-content")).toContainText("Лейкерс");
+  await expect(page.locator("#close-drawer")).toBeFocused();
+  await page.locator("body").dispatchEvent("keydown", { key: "Escape", isComposing: true, bubbles: true });
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(page).toHaveURL(/#\/session\/test-session$/);
+  await page.keyboard.press("Alt+r");
+  await expect(page.locator("#refresh")).toBeEnabled();
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await page.goto("/inspect/#/session/test-session?trace=trace-model");
+  await expect(page.locator("#drawer-title")).toHaveText("configured-model");
+  await page.reload();
+  await expect(page.locator("#drawer-title")).toHaveText("configured-model");
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: "/tmp/jarvis-logging-inspector-mobile.png" });
+  await page.locator("a.back-link").click();
+  await expect(page.locator(".session-link")).toBeVisible();
+});
+
+test("отсутствующий вызов по ссылке показывает ошибку и оставляет сессию доступной", async ({ page }) => {
+  await fixture(page);
+  await page.route("**/api/inspect/trace?**", route => route.fulfill({ status: 404, json: {} }));
+  await page.goto("/inspect/#/session/test-session?trace=missing");
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText("не найдены");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#event-1")).toBeVisible();
+});
+
+test("логи: кнопка и Alt L открывают одинаковый фильтр и сохраняют поиск", async ({ page, context }) => {
+  await context.route("http://127.0.0.1:9428/**", route => route.fulfill({ body: "VMUI fixture", contentType: "text/html" }));
+  await fixture(page);
+  await page.locator("#search").fill("Лейкерс");
+  await expect(page.locator("#nav-logs")).toHaveAttribute("aria-keyshortcuts", "Alt+L");
+  const clicked = page.waitForEvent("popup");
+  await page.locator("#nav-logs").click();
+  const buttonPage = await clicked;
+  await buttonPage.waitForLoadState();
+  const target = buttonPage.url();
+  const query = new URLSearchParams(new URL(target).hash.slice(3)).get("query");
+  expect(query).toContain("NOT service:temporal-ui");
+  expect(query).toContain("http_status:>=400");
+  expect(query).toContain("duration_ms:>=1000");
+  await buttonPage.close();
+  for (const extra of [{ repeat: true }, { isComposing: true }]) {
+    await page.locator("body").dispatchEvent("keydown", { code: "KeyL", key: "д", altKey: true, bubbles: true, ...extra });
+  }
+  expect(context.pages()).toHaveLength(1);
+  const keyboard = page.waitForEvent("popup");
+  await page.locator("body").dispatchEvent("keydown", { code: "KeyL", key: "д", altKey: true, bubbles: true });
+  const keyboardPage = await keyboard;
+  await keyboardPage.waitForLoadState();
+  expect(keyboardPage.url()).toBe(target);
+  await keyboardPage.close();
+  await expect(page.locator("#search")).toHaveValue("Лейкерс");
+  await openSession(page);
+  await page.getByRole("button", { name: "Контекст", exact: true }).first().click();
+  await page.keyboard.press("Alt+l");
+  expect(context.pages()).toHaveLength(1);
+  await page.keyboard.press("Escape");
+});
+
+test("логи: загрузка одинаково блокирует кнопку и сочетание", async ({ page, context }) => {
+  await fixture(page);
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  await page.route("**/api/inspect/sessions?**", async route => {
+    await pending;
+    await route.fulfill({ json: { sessions: [session], next_before: 0 } });
+  });
+  await page.keyboard.press("Alt+r");
+  await expect(page.locator("#nav-logs")).toHaveAttribute("aria-disabled", "true");
+  await page.locator("#nav-logs").dispatchEvent("click");
+  await page.keyboard.press("Alt+l");
+  expect(context.pages()).toHaveLength(1);
+  finish();
+  await expect(page.locator("#nav-logs")).toHaveAttribute("aria-disabled", "false");
+});
+
 test("история, аргументы и результат инструмента, контекст, финальный текст и отсутствие доставки", async ({
   page,
 }) => {

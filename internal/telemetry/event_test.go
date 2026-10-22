@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +36,41 @@ func TestWideEventAccumulatesAndEmitsOnce(t *testing.T) {
 	}
 	if record["operation"] != "agent_turn" || record["result"] != "error" || record["session_id"] != "session-123" || record["duration_ms"] == nil {
 		t.Fatal("event lacks operation context")
+	}
+}
+
+func TestHistoricalTurnDoesNotClaimSummaryConstructionIsProcessingTime(t *testing.T) {
+	var out bytes.Buffer
+	Start(context.Background(), New(&out), "turn.complete").End(nil)
+	var row map[string]any
+	if err := json.Unmarshal(out.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row["duration_ms"] != nil || !strings.Contains(row["msg"].(string), "длительность неизвестна") {
+		t.Fatalf("misleading historical duration: %s", out.String())
+	}
+}
+
+func TestDiagnosticReasonsAreSpecificAndNeverCopyExternalText(t *testing.T) {
+	for message, code := range errorCodes {
+		d := Classify(fmt.Errorf("wrapper with secret: %w", errors.New(message)))
+		if d.Code != code || d.Reason == "" || strings.Contains(d.Reason, "secret") {
+			t.Errorf("%q: %+v, want %s", message, d, code)
+		}
+	}
+	for _, code := range []int{400, 401, 403, 404, 415, 422, 429, 503} {
+		d := Classify(statusError(code))
+		if d.Status != code || d.Reason == "Upstream returned a non-success status" || strings.Contains(d.Reason, "secret") {
+			t.Errorf("HTTP %d: %+v", code, d)
+		}
+	}
+	d := Classify(&net.DNSError{Err: "private detail", Name: "secret.example", IsNotFound: true})
+	if d.Code != "dns_failed" || strings.Contains(d.Reason, "secret") {
+		t.Fatalf("DNS diagnostic: %+v", d)
+	}
+	d = Classify(errors.New("private response with secret"))
+	if d.Code != "operation_failed" || strings.Contains(d.Reason, "secret") {
+		t.Fatalf("unknown error was exposed: %+v", d)
 	}
 }
 

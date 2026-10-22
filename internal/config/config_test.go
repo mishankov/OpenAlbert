@@ -34,7 +34,7 @@ func TestRequiredOwnerAndSecrets(t *testing.T) {
 	}
 }
 func TestInvalidSettingsNeverEchoInput(t *testing.T) {
-	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_BASE_URL", "DATABASE_URL", "S3_SECURE", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX"} {
+	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_BASE_URL", "INSPECTOR_PUBLIC_URL", "VICTORIALOGS_URL", "DATABASE_URL", "S3_SECURE", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX"} {
 		t.Run(key, func(t *testing.T) {
 			env := validEnv()
 			env[key] = "secret-bad-value"
