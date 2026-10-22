@@ -22,7 +22,8 @@ func readableMessage(operation, result string, elapsed time.Duration, fields map
 	action := labels[operation]
 	if operation == "tool.execute" {
 		tools := map[string]string{
-			"web_read": "Прочитана веб-страница", "web_search": "Выполнен поиск в интернете",
+			"logs_search": "Прочитаны операционные логи",
+			"web_read":    "Прочитана веб-страница", "web_search": "Выполнен поиск в интернете",
 			"browser_open": "Открыта страница в Chromium", "browser_navigate": "Выполнен переход в Chromium",
 			"browser_snapshot": "Получено содержимое страницы", "browser_click": "Выполнено нажатие на странице",
 			"browser_fill": "Заполнено поле на странице", "browser_wait": "Завершено ожидание страницы",
@@ -57,6 +58,8 @@ func readableMessage(operation, result string, elapsed time.Duration, fields map
 			switch name {
 			case "web_read":
 				action = "Ошибка чтения веб-страницы"
+			case "logs_search":
+				action = "Ошибка чтения операционных логов"
 			case "browser_open", "browser_navigate":
 				action = "Ошибка открытия страницы в Chromium"
 			case "browser_click":
@@ -86,7 +89,10 @@ func readableMessage(operation, result string, elapsed time.Duration, fields map
 	if model, ok := fields["model"].(string); ok && model != "" {
 		parts = append(parts, model)
 	}
-	if elapsed < time.Millisecond {
+	_, durationKnown := fields["processing_ms"]
+	if operation == "turn.complete" && !durationKnown {
+		parts = append(parts, "длительность неизвестна")
+	} else if elapsed < time.Millisecond {
 		parts = append(parts, "<1 мс")
 	} else if elapsed < time.Second {
 		parts = append(parts, fmt.Sprintf("%d мс", elapsed.Milliseconds()))

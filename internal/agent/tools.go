@@ -112,6 +112,9 @@ type ToolInput struct {
 }
 
 func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
+	if in.Call.Name == "logs_search" {
+		return a.searchLogs(ctx, in)
+	}
 	if strings.HasPrefix(in.Call.Name, "browser_") {
 		return a.executeBrowser(ctx, in)
 	}
@@ -427,6 +430,9 @@ func backgroundPlaceholder(text string) bool {
 
 func (a *Activities) toolDefinitions() []domain.Tool {
 	tools := Definitions()
+	if a.Logs != nil {
+		tools = append(tools, logDefinition())
+	}
 	if a.Browser != nil {
 		tools = append(tools, browserDefinitions()...)
 	}
@@ -445,6 +451,9 @@ func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 	interactive := turn.Input.TaskID == "" && !turn.Input.Initiative
 	filtered := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
+		if tool.Name == "logs_search" && (!a.isOwnerPrivate(turn.Conversation) || !interactive) {
+			continue
+		}
 		if tool.Name == "report_progress" && !interactive {
 			continue
 		}

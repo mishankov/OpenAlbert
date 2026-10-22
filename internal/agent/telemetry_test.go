@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -82,12 +84,64 @@ func TestTurnSummaryMeasuresProcessingNotPersistence(t *testing.T) {
 		if row["operation"] != "turn.complete" {
 			continue
 		}
-		if row["processing_ms"].(float64) < 5000 || row["model_calls"] != float64(2) || row["tool_errors"] != float64(1) || row["delivery_state"] != "queued" || !strings.Contains(row["msg"].(string), "вызовов модели: 2, инструментов: 3") {
+		if row["processing_ms"].(float64) < 5000 || row["duration_ms"] != row["processing_ms"] || row["model_calls"] != float64(2) || row["tool_errors"] != float64(1) || row["delivery_state"] != "queued" || !strings.Contains(row["msg"].(string), "вызовов модели: 2, инструментов: 3") {
 			t.Fatalf("wrong summary: %v", row)
 		}
 		return
 	}
 	t.Fatal("summary missing")
+}
+
+type traceCapture struct {
+	domain.Repository
+	traces map[string]domain.Trace
+}
+
+func (r *traceCapture) SaveTrace(_ context.Context, tr domain.Trace) error {
+	r.traces[tr.ID] = tr
+	return nil
+}
+
+func TestFailureLogsLinkToTheActualPersistedModelAndToolTrace(t *testing.T) {
+	a, repo, _, conv := fixture(t)
+	capture := &traceCapture{Repository: repo, traces: map[string]domain.Trace{}}
+	a.Repo = capture
+	a.InspectorPublicURL = "https://localhost:8443/jarvis/inspect/"
+	a.Model = &testModel{respond: func([]domain.Message) (domain.Message, error) {
+		return domain.Message{}, errors.New("model response truncated by token limit")
+	}}
+	a.Search = rejectedSearch{}
+	var logs bytes.Buffer
+	a.Logger = telemetry.New(&logs)
+	in := ModelInput{Turn: Turn{Input: RunInput{Key: "turn", SessionID: "session", ConversationID: conv.ID}}, Step: 2}
+	if _, err := a.ModelCall(context.Background(), in); err == nil {
+		t.Fatal("expected a model failure")
+	}
+	tool(t, a, conv, "turn", "read", "web_read", `{"url":"https://example.com/private?secret=hidden"}`)
+	if _, err := a.analysisModelCall(context.Background(), domain.Session{ID: "session", ConversationID: conv.ID}, []domain.Message{{Role: "user", Content: "private analysis input"}}); err == nil {
+		t.Fatal("expected an analysis model failure")
+	}
+	if len(capture.traces) != 3 {
+		t.Fatalf("expected model, tool and analysis traces: %v", capture.traces)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		id, _ := row["trace_id"].(string)
+		tr, ok := capture.traces[id]
+		if !ok || tr.Status != "failed" || tr.SessionID != row["session_id"] || tr.TurnID != row["turn_id"] {
+			t.Fatalf("log does not identify its persisted trace: %v %+v", row, tr)
+		}
+		link, err := url.Parse(row["inspector_url"].(string))
+		if err != nil || link.Host != "localhost:8443" || link.Path != "/jarvis/inspect/" || link.Fragment != "/session/session?trace="+id {
+			t.Fatalf("invalid inspector link: %v %v", link, err)
+		}
+		if row["error_code"] == "operation_failed" || row["error_source"] == nil || row["error_stage"] != row["operation"] || strings.Contains(line, "hidden") {
+			t.Fatalf("missing or unsafe diagnostics: %v", row)
+		}
+	}
 }
 
 func TestToolFailureIgnoresErrorTextInsideSuccessfulResult(t *testing.T) {
