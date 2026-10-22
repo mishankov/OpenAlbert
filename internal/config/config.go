@@ -90,7 +90,7 @@ func load(get func(string) string) (Config, error) {
 	c.SessionIdleTimeout = duration("SESSION_IDLE_TIMEOUT", "30m", false)
 	c.TaskMinInterval = duration("TASK_MIN_INTERVAL", "5m", false)
 	c.InitiativeInterval = duration("INITIATIVE_INTERVAL", "30m", true)
-	c.MaxAgentSteps, err = strconv.Atoi(value("MAX_AGENT_STEPS", "20"))
+	c.MaxAgentSteps, err = strconv.Atoi(value("MAX_AGENT_STEPS", "100"))
 	if err != nil || c.MaxAgentSteps < 1 || c.MaxAgentSteps > 200 {
 		problems = append(problems, errors.New("MAX_AGENT_STEPS must be between 1 and 200"))
 	}
