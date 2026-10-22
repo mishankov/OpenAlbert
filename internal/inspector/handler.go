@@ -5,6 +5,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -21,9 +22,12 @@ var assets embed.FS
 
 type ArtifactStore interface {
 	Artifact(context.Context, string, string) (domain.Artifact, bool, error)
+	ListFiles(context.Context, string, string) (domain.StoredFiles, error)
+	OpenFile(context.Context, string) (domain.StoredFile, io.ReadSeekCloser, error)
 }
 
 func Register(mux *http.ServeMux, store Store, artifacts ArtifactStore) {
+	registerFiles(mux, artifacts)
 	files, _ := fs.Sub(assets, "web")
 	mux.Handle("GET /inspect/", local(http.StripPrefix("/inspect/", http.FileServer(http.FS(files)))))
 	mux.Handle("GET /api/inspect/sessions", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -116,7 +116,7 @@ func (s *Store) SaveArtifact(ctx context.Context, art domain.Artifact) error {
 }
 func metadataValue(info minio.ObjectInfo, name string) string {
 	for k, v := range info.UserMetadata {
-		if strings.EqualFold(k, name) {
+		if strings.EqualFold(k, name) || strings.EqualFold(k, "X-Amz-Meta-"+name) {
 			return v
 		}
 	}

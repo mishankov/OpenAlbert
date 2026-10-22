@@ -2,6 +2,8 @@ package inspector
 
 import (
 	"context"
+	"io"
+	"io/fs"
 	"jarvis/internal/domain"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +23,12 @@ func (fakeStore) InspectTrace(context.Context, string, string) (domain.Trace, bo
 func (fakeStore) Artifact(context.Context, string, string) (domain.Artifact, bool, error) {
 	return domain.Artifact{}, false, nil
 }
+func (fakeStore) ListFiles(context.Context, string, string) (domain.StoredFiles, error) {
+	return domain.StoredFiles{Bucket: "jarvis", Files: []domain.StoredFile{}}, nil
+}
+func (fakeStore) OpenFile(context.Context, string) (domain.StoredFile, io.ReadSeekCloser, error) {
+	return domain.StoredFile{}, nil, fs.ErrNotExist
+}
 func TestLocalReadOnlyInspector(t *testing.T) {
 	mux := http.NewServeMux()
 	Register(mux, fakeStore{}, fakeStore{})
@@ -35,6 +43,12 @@ func TestLocalReadOnlyInspector(t *testing.T) {
 		{"GET", "/api/inspect/sessions", "attacker.example:8080", "", 403},
 		{"GET", "/api/inspect/sessions", "localhost:8080", "https://attacker.example", 403},
 		{"GET", "/api/inspect/sessions", "localhost:8080", "http://localhost:8080", 200},
+		{"GET", "/api/inspect/files", "localhost:8080", "", 200},
+		{"GET", "/api/inspect/file?key=missing", "localhost:8080", "", 404},
+		{"GET", "/api/inspect/file", "localhost:8080", "", 400},
+		{"GET", "/api/inspect/file/content?key=missing", "attacker.example", "", 403},
+		{"GET", "/api/inspect/files", "localhost:8080", "https://attacker.example", 403},
+		{"DELETE", "/api/inspect/file?key=notes.txt", "localhost:8080", "", 405},
 	} {
 		t.Run(tc.method+tc.path+tc.host+tc.origin, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "http://"+tc.host+tc.path, nil)

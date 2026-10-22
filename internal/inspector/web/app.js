@@ -72,6 +72,12 @@ const state = {
   detailToken: 0,
   drawerOpener: null,
   drawerToken: 0,
+  view: "sessions",
+  filePrefix: "",
+  files: [],
+  fileNext: "",
+  fileToken: 0,
+  fileBusy: false,
 };
 const main = $("#main");
 const artifactURL = (artifact) =>
@@ -81,7 +87,7 @@ async function api(path) {
   if (!response.ok)
     throw new Error(
       response.status === 404
-        ? "Сессия или событие не найдены."
+        ? "Запись или файл не найдены."
         : `Не удалось получить данные (${response.status}). Повторите обновление.`,
     );
   return response.json();
@@ -97,8 +103,8 @@ function sessionName(s) {
 }
 function setBusy(value) {
   state.busy = value;
-  $("#refresh").disabled = value;
-  $("#refresh").setAttribute("aria-busy", String(value));
+  $("#refresh").disabled = value || state.fileBusy;
+  $("#refresh").setAttribute("aria-busy", String(value || state.fileBusy));
 }
 function listRender() {
   const focusedHref = $("#sessions").contains(document.activeElement)
@@ -354,7 +360,12 @@ async function loadDetail(id, append = false) {
   try {
     const after = append && old?.messages.length ? old.messages.at(-1).seq : 0;
     const data = await api(`sessions/${encodeURIComponent(id)}?after=${after}`);
-    if (token !== state.detailToken || id !== state.id) return;
+    if (
+      token !== state.detailToken ||
+      id !== state.id ||
+      state.view !== "sessions"
+    )
+      return;
     if (append && old) {
       const seen = new Set(old.messages.map((x) => x.seq));
       data.messages = [
@@ -378,19 +389,47 @@ async function loadDetail(id, append = false) {
   }
 }
 async function refresh() {
-  if (state.busy || !$("#drawer").classList.contains("hidden")) return;
+  if (
+    state.busy ||
+    state.fileBusy ||
+    !$("#drawer").classList.contains("hidden")
+  )
+    return;
   setBusy(true);
   try {
-    await Promise.all([
-      loadList(false, true),
-      state.id ? loadDetail(state.id, true) : Promise.resolve(),
-    ]);
+    if (state.view === "files") await loadFiles();
+    else
+      await Promise.all([
+        loadList(false, true),
+        state.id ? loadDetail(state.id, true) : Promise.resolve(),
+      ]);
     announce("Данные обновлены");
   } finally {
     setBusy(false);
   }
 }
 function route() {
+  const view = location.hash === "#/files" ? "files" : "sessions";
+  const changedView = view !== state.view;
+  state.view = view;
+  document.body.classList.toggle("has-files", view === "files");
+  for (const name of ["sessions", "files"]) {
+    const link = $("#nav-" + name);
+    if (view === name) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  if (view === "files") {
+    ++state.detailToken;
+    closeDrawer();
+    fileShell();
+    loadFiles();
+    return;
+  }
+  if (changedView) {
+    ++state.fileToken;
+    state.fileBusy = false;
+    setBusy(state.busy);
+  }
   let match = location.hash.match(/^#\/session\/(.+)$/);
   let id = "";
   if (match) {
@@ -398,7 +437,7 @@ function route() {
       id = decodeURIComponent(match[1]);
     } catch {}
   }
-  if (id === state.id) return;
+  if (id === state.id && !changedView) return;
   state.id = id;
   state.data = null;
   state.tab = "timeline";
@@ -417,6 +456,102 @@ function route() {
   }
 }
 
+const fileContentURL = (key, download = false) =>
+  "/api/inspect/file/content?" +
+  new URLSearchParams({ key, ...(download ? { download: "1" } : {}) });
+const fileSize = (bytes) =>
+  bytes < 1024
+    ? `${bytes} Б`
+    : bytes < 1024 * 1024
+      ? `${(bytes / 1024).toFixed(1)} КБ`
+      : `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
+function fileShell() {
+  document.title = "Файлы · Jarvis Inspector";
+  main.innerHTML = `<div class="session-toolbar files-toolbar"><div class="session-heading"><h2>Файлы MinIO</h2><span id="file-bucket" class="mono muted"></span></div><label for="file-prefix">Префикс ключа</label><div class="search-wrap"><input id="file-prefix" type="search" placeholder="Например, artifacts/" autocomplete="off" value="${esc(state.filePrefix)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div><p class="muted">Объекты настроенного бакета, включая файлы без привязки к сессии.</p></div><div id="files-error" role="alert" class="error hidden"></div><div id="files-list" aria-busy="true"><div class="loading-line" role="status">Загружаем файлы…</div></div><div class="pagination"><span id="files-count" role="status"></span><button id="more-files" class="button hidden" title="Загрузить ещё файлы · Enter" aria-keyshortcuts="Enter">Ещё файлы</button></div>`;
+  if (state.files.length) renderFiles();
+}
+function renderFiles() {
+  const focusedKey = document.activeElement?.dataset.file;
+  $("#files-list").innerHTML = state.files.length
+    ? `<ul class="file-list bucket-files">${state.files.map((f) => `<li><button class="file-row" data-file="${esc(f.key)}" title="Просмотреть файл · Enter" aria-keyshortcuts="Enter"><span class="file-icon" aria-hidden="true">FILE</span><span class="file-name">${esc(f.name)}<span class="mono muted">${esc(f.key)}</span></span><span class="file-facts"><span>${esc(fileSize(f.size))}</span><time>${esc(shortDate(f.modified_at))}</time></span></button></li>`).join("")}</ul>`
+    : `<div class="empty-panel">${state.filePrefix ? "Файлов с таким префиксом нет. Измените или очистите фильтр." : "В бакете пока нет файлов."}</div>`;
+  if (focusedKey)
+    [...main.querySelectorAll("[data-file]")]
+      .find((el) => el.dataset.file === focusedKey)
+      ?.focus({ preventScroll: true });
+  $("#files-count").textContent =
+    `Файлы: ${state.files.length}${state.fileNext ? "+" : ""}`;
+  $("#more-files").classList.toggle("hidden", !state.fileNext);
+}
+async function loadFiles(more = false) {
+  if (state.view !== "files") return;
+  clearTimeout(fileDebounce);
+  const restoreMoreFocus = more && document.activeElement === $("#more-files");
+  const token = ++state.fileToken;
+  state.fileBusy = true;
+  setBusy(state.busy);
+  $("#files-list").setAttribute("aria-busy", "true");
+  $("#more-files").disabled = true;
+  $("#files-error").classList.add("hidden");
+  try {
+    const result = await api(
+      "files?" +
+        new URLSearchParams({
+          prefix: state.filePrefix,
+          after: more ? state.fileNext : "",
+        }),
+    );
+    if (token !== state.fileToken || state.view !== "files") return;
+    state.files = more ? [...state.files, ...result.files] : result.files;
+    state.fileNext = result.next_after || "";
+    $("#file-bucket").textContent = result.bucket;
+    renderFiles();
+  } catch (error) {
+    if (token !== state.fileToken || state.view !== "files") return;
+    $("#files-error").textContent = error.message;
+    $("#files-error").classList.remove("hidden");
+    if (!state.files.length)
+      $("#files-list").innerHTML =
+        '<div class="empty-panel">Не удалось загрузить файлы. Нажмите «Обновить» (Alt+R).</div>';
+  } finally {
+    if (token === state.fileToken && state.view === "files") {
+      state.fileBusy = false;
+      setBusy(state.busy);
+      $("#files-list").setAttribute("aria-busy", "false");
+      $("#more-files").disabled = false;
+      if (restoreMoreFocus && document.activeElement === document.body) {
+        const target = state.fileNext
+          ? $("#more-files")
+          : [...main.querySelectorAll("#files-list .file-row")].at(-1);
+        target?.focus({ preventScroll: true });
+      }
+    }
+  }
+}
+async function openFile(key, opener) {
+  state.drawerFileKey = key;
+  state.drawerTraceID = state.drawerRecordID = null;
+  const token = showDrawer("Файл", opener);
+  $("#drawer-content").innerHTML =
+    '<div class="loading-line" role="status">Загружаем файл…</div>';
+  try {
+    const result = await api("file?" + new URLSearchParams({ key }));
+    if (token !== state.drawerToken) return;
+    const f = result.file;
+    $("#drawer-title").textContent = f.name;
+    $("#drawer-content").innerHTML =
+      `<p class="mono">${esc(f.key)}</p><div class="trace-meta"><span>${esc(f.mime || "Тип неизвестен")}</span><span>${esc(fileSize(f.size))}</span><span>${esc(date(f.modified_at))}</span></div>${f.conversation_id ? `<p class="mono muted">Разговор: ${esc(f.conversation_id)} · Артефакт: ${esc(f.artifact_id)}</p>` : ""}<p><a id="download-file" class="button" href="${esc(fileContentURL(key, true))}" download title="Скачать файл (Alt+Shift+S)" aria-keyshortcuts="Alt+Shift+S">Скачать <kbd>Alt ⇧ S</kbd></a></p>${result.preview_kind === "image" ? `<img class="file-preview" src="${esc(fileContentURL(key))}" alt="${esc(f.name)}"><p id="image-error" class="error hidden" role="alert">Не удалось показать изображение. Скачайте файл или откройте его ещё раз.</p>` : result.preview_kind === "text" ? `${result.truncated ? '<p class="muted">Показаны первые 256 КБ. Полный текст доступен при скачивании.</p>' : ""}<pre class="raw file-text">${esc(result.text)}</pre>` : '<p class="muted">Предпросмотр этого формата недоступен. Скачайте файл, чтобы открыть его.</p>'}`;
+    $(".file-preview", $("#drawer-content"))?.addEventListener("error", () => {
+      if (token === state.drawerToken)
+        $("#image-error").classList.remove("hidden");
+    });
+  } catch (error) {
+    if (token === state.drawerToken)
+      $("#drawer-content").innerHTML =
+        `<div class="error" role="alert">${esc(error.message)}</div><p class="muted">Закройте подробности и откройте файл ещё раз.</p>`;
+  }
+}
+
 function showDrawer(title, opener) {
   state.drawerOpener = opener;
   $(".workspace").inert = true;
@@ -430,6 +565,7 @@ function showDrawer(title, opener) {
   return token;
 }
 function openRecord(id, opener) {
+  state.drawerFileKey = null;
   state.drawerTraceID = null;
   state.drawerRecordID = id;
   let title = "Исходная запись",
@@ -452,6 +588,7 @@ function openRecord(id, opener) {
   $("#drawer-content").innerHTML = json(record);
 }
 async function openTrace(id, opener) {
+  state.drawerFileKey = null;
   state.drawerTraceID = id;
   state.drawerRecordID = null;
   const token = showDrawer("Вызов", opener);
@@ -486,10 +623,14 @@ function closeDrawer() {
   if (wasOpen) {
     const opener = state.drawerOpener?.isConnected
       ? state.drawerOpener
-      : [...main.querySelectorAll("[data-trace],[data-record]")].find((el) =>
-          state.drawerRecordID
-            ? el.dataset.record === state.drawerRecordID
-            : el.dataset.trace === state.drawerTraceID,
+      : [
+          ...main.querySelectorAll("[data-trace],[data-record],[data-file]"),
+        ].find((el) =>
+          state.drawerFileKey
+            ? el.dataset.file === state.drawerFileKey
+            : state.drawerRecordID
+              ? el.dataset.record === state.drawerRecordID
+              : el.dataset.trace === state.drawerTraceID,
         );
     opener?.focus();
   }
@@ -521,10 +662,33 @@ main.addEventListener("click", (event) => {
     openTrace(trace.dataset.trace, trace);
     return;
   }
+  const file = event.target.closest("[data-file]");
+  if (file) {
+    openFile(file.dataset.file, file);
+    return;
+  }
+  if (event.target.closest("#more-files")) {
+    if (!state.fileBusy) loadFiles(true);
+    return;
+  }
   if (event.target.closest("#more-messages")) {
     event.target.disabled = true;
     loadDetail(state.id, true);
   }
+});
+let fileDebounce;
+main.addEventListener("input", (event) => {
+  if (event.target.id !== "file-prefix") return;
+  state.filePrefix = event.target.value;
+  clearTimeout(fileDebounce);
+  ++state.fileToken;
+  state.files = [];
+  state.fileNext = "";
+  $("#files-list").innerHTML =
+    '<div class="loading-line" role="status">Загружаем файлы…</div>';
+  $("#files-count").textContent = "";
+  $("#more-files").classList.add("hidden");
+  fileDebounce = setTimeout(() => loadFiles(), 250);
 });
 main.addEventListener("keydown", (event) => {
   if (
@@ -553,13 +717,26 @@ document.addEventListener("keydown", (event) => {
   if (event.isComposing || event.keyCode === 229 || event.repeat) {
     if (
       (event.key === "Enter" || event.key === " ") &&
-      event.target.closest("button,summary")
+      event.target.closest("button,summary,#download-file")
     )
       event.preventDefault();
     return;
   }
   const drawerOpen = !$("#drawer").classList.contains("hidden");
   if (drawerOpen) {
+    if (
+      event.altKey &&
+      event.shiftKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      event.code === "KeyS"
+    ) {
+      const download = $("#download-file");
+      if (download) {
+        event.preventDefault();
+        download.click();
+      }
+    }
     if (event.key === "Escape") {
       event.preventDefault();
       closeDrawer();
@@ -589,6 +766,11 @@ document.addEventListener("keydown", (event) => {
     event.code === "KeyK"
   ) {
     event.preventDefault();
+    if (state.view === "files") {
+      $("#file-prefix").focus();
+      $("#file-prefix").select();
+      return;
+    }
     if (!$("#search").getClientRects().length) {
       location.hash = "#/";
       route();
@@ -616,6 +798,7 @@ loadList();
 route();
 setInterval(() => {
   if (
+    state.view === "sessions" &&
     !document.hidden &&
     !state.busy &&
     $("#drawer").classList.contains("hidden")
