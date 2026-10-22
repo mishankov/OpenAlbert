@@ -40,6 +40,10 @@ func (f *fakeS3) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/jarvis" || r.URL.Path == "/jarvis/" {
+		if r.URL.Query().Get("list-type") == "2" {
+			f.list(w, r)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		return
 	}

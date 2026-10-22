@@ -12,10 +12,20 @@
   <body>
     <header class="topbar">
       <a href="#/" class="brand">Jarvis <span>/ Инспектор</span></a>
+      <nav class="topnav" aria-label="Разделы инспектора">
+        <a id="nav-sessions" href="#/" aria-current="page">Сессии</a>
+        <a
+          id="nav-files"
+          href="#/files"
+          title="Файлы MinIO · Enter"
+          aria-keyshortcuts="Enter"
+          >Файлы</a
+        >
+      </nav>
       <button
         id="refresh"
         class="button"
-        title="Обновить сессии и текущую сессию (Alt+R)"
+        title="Обновить текущий раздел (Alt+R)"
         aria-keyshortcuts="Alt+R"
       >
         Обновить <kbd>Alt R</kbd>
