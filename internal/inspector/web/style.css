@@ -115,25 +115,93 @@ kbd {
 .files-toolbar .search-wrap {
   max-width: 600px;
 }
+.files-order {
+  color: var(--muted);
+  margin-left: auto;
+  font-size: 11px;
+}
+.file-list.bucket-files {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+.bucket-files li {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+}
 .file-row {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0;
   background: transparent;
   border: 0;
   text-align: left;
   width: 100%;
+  height: 100%;
 }
 .file-row:hover {
   background: var(--soft);
 }
 .file-facts {
   display: flex;
-  gap: 16px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
   color: var(--muted);
   font-size: 11px;
   white-space: nowrap;
+}
+.file-thumbnail {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  background: var(--soft);
+  border-bottom: 1px solid var(--line);
+}
+.bucket-files .file-thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.file-thumbnail-status {
+  position: absolute;
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+.file-thumbnail.is-loaded .file-thumbnail-status,
+.file-thumbnail.is-failed img {
+  display: none;
+}
+.file-type {
+  padding: 14px 18px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--muted);
+  font: 18px var(--mono);
+}
+.file-card-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+}
+.file-card-caption .file-name {
+  font-weight: 550;
+}
+.file-key {
+  font-size: 10px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .file-preview {
   display: block;
@@ -980,8 +1048,10 @@ h4 {
     gap: 10px;
   }
   .file-facts {
-    flex-direction: column;
-    gap: 3px;
+    gap: 4px 12px;
+  }
+  .files-order {
+    margin-left: 0;
   }
   .workspace {
     display: block;

@@ -29,7 +29,11 @@ func registerFiles(mux *http.ServeMux, store ArtifactStore) {
 	mux.Handle("GET /api/inspect/files", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		out, err := store.ListFiles(r.Context(), r.URL.Query().Get("prefix"), r.URL.Query().Get("after"))
 		if err != nil {
-			fail(w, 500)
+			if errors.Is(err, fs.ErrInvalid) {
+				fail(w, 400)
+			} else {
+				fail(w, 500)
+			}
 			return
 		}
 		write(w, out)
