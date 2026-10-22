@@ -13,6 +13,7 @@ export const navigation = [
   ['memory', 'memory.md', 'Память', 'memory'],
   ['personality-and-skills', 'personality-and-skills.md', 'Личность и навыки', 'spark'],
   ['browser', 'browser.md', 'Браузер', 'layers'],
+  ['speech', 'speech.md', 'Голосовые сообщения', 'layers'],
   ['tools', 'tools.md', 'Инструменты', 'tool'],
   ['background', 'background.md', 'Фоновая работа', 'pulse'],
   ['observability', 'observability.md', 'Логирование', 'pulse'],

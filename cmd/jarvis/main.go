@@ -74,9 +74,16 @@ func run() error {
 	if err != nil {
 		return errors.New("knowledge initialization failed")
 	}
-	model, err := integrations.NewOpenAI(integrations.OpenAIConfig{BaseURL: c.LLMBaseURL, APIKey: c.LLMAPIKey, Model: c.LLMModel, TranscriptionModel: c.LLMTranscriptionModel})
+	model, err := integrations.NewOpenAI(integrations.OpenAIConfig{BaseURL: c.LLMBaseURL, APIKey: c.LLMAPIKey, Model: c.LLMModel})
 	if err != nil {
 		return err
+	}
+	var speech domain.SpeechRecognizer
+	if c.STTBaseURL != "" {
+		speech, err = integrations.NewSTT(integrations.STTConfig{BaseURL: c.STTBaseURL, APIKey: c.STTAPIKey, Model: c.STTModel, Revision: c.STTRevision})
+		if err != nil {
+			return err
+		}
 	}
 	search, err := integrations.NewSearch(integrations.YandexConfig{APIKey: c.YandexAPIKey, FolderID: c.YandexFolderID, Endpoint: c.YandexEndpoint})
 	if err != nil {
@@ -100,6 +107,8 @@ func run() error {
 		defer browsers.Close()
 	}
 	activities := &agent.Activities{OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: model, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, ModelName: c.LLMModel}
+	activities.STT = speech
+	activities.STTModel = c.STTModel
 	activities.TaskChanged = func(ctx context.Context, scope, id string) error {
 		err := temporalClient.SignalWorkflow(ctx, orchestration.TaskWorkflowID(id), "", orchestration.TaskSignal, "changed")
 		var missing *serviceerror.NotFound
@@ -114,6 +123,11 @@ func run() error {
 		return errors.New("Temporal worker startup failed")
 	}
 	defer worker.Stop()
+	sttWorker := runtime.STTWorker()
+	if err = sttWorker.Start(); err != nil {
+		return errors.New("STT worker startup failed")
+	}
+	defer sttWorker.Stop()
 	if browsers != nil {
 		for _, w := range runtime.BrowserWorkers() {
 			if err = w.Start(); err != nil {

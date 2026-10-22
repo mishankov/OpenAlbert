@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -115,11 +116,15 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			queue = nil
 			steerInput := turn.Input
 			steerInput.IncomingIDs = newIDs
-			var updated agent.Turn
-			if err := workflow.ExecuteActivity(runctx, "Prepare", steerInput).Get(runctx, &updated); err != nil {
+			// Retain consumed inputs even if preparation is cancelled, so the
+			// dispatcher cannot resurrect them after Finish.
+			allIDs := append(append([]string{}, turn.Input.IncomingIDs...), newIDs...)
+			turn.Input.IncomingIDs = allIDs
+			updated, err := prepareTurn(runctx, steerInput)
+			if err != nil {
 				return err
 			}
-			updated.Input.IncomingIDs = append(turn.Input.IncomingIDs, newIDs...)
+			updated.Input.IncomingIDs = allIDs
 			updated.Stats = turn.Stats
 			if !turn.ReceivedAt.IsZero() && (updated.ReceivedAt.IsZero() || turn.ReceivedAt.Before(updated.ReceivedAt)) {
 				updated.ReceivedAt = turn.ReceivedAt
@@ -145,6 +150,51 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 	return workflow.ExecuteActivity(ctx, "CloseSession", sessionID).Get(ctx, nil)
 }
 
+// Version per turn preserves recorded activity sequences while later turns of
+// existing sessions can adopt independent speech recognition.
+func prepareTurn(ctx workflow.Context, in agent.RunInput) (turn agent.Turn, err error) {
+	turn.Input = in
+	if workflow.GetVersion(ctx, "audio-preparation/"+in.Key, workflow.DefaultVersion, 1) != workflow.DefaultVersion && len(in.IncomingIDs) > 0 {
+		var jobs []agent.AudioInput
+		prepOptions := workflow.GetActivityOptions(ctx)
+		prepOptions.HeartbeatTimeout = 30 * time.Second
+		prepCtx := workflow.WithActivityOptions(ctx, prepOptions)
+		if err = workflow.ExecuteActivity(prepCtx, "PrepareAudio", in).Get(prepCtx, &jobs); err != nil {
+			return
+		}
+		stt := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{TaskQueue: workflow.GetInfo(ctx).TaskQueueName + ".stt", StartToCloseTimeout: 12 * time.Minute, ScheduleToCloseTimeout: 30 * time.Minute, HeartbeatTimeout: 30 * time.Second, WaitForCancellation: true, RetryPolicy: &temporal.RetryPolicy{InitialInterval: 15 * time.Second, MaximumInterval: time.Minute, MaximumAttempts: 5}})
+		for i, job := range jobs {
+			var result domain.AudioResult
+			e := workflow.ExecuteActivity(stt, "TranscribeAudio", job).Get(stt, &result)
+			if e == nil {
+				continue
+			}
+			code := "stt_failed"
+			var app *temporal.ApplicationError
+			if errors.As(e, &app) {
+				code = app.Type()
+			}
+			cleanup := ctx
+			remaining := jobs[i : i+1]
+			if temporal.IsCanceledError(e) {
+				code = "cancelled"
+				cleanup, _ = workflow.NewDisconnectedContext(ctx)
+				remaining = jobs[i:]
+			}
+			for _, pending := range remaining {
+				if saveErr := workflow.ExecuteActivity(cleanup, "RecordAudioFailure", agent.AudioFailure{Input: pending, Code: code}).Get(cleanup, nil); saveErr != nil {
+					return turn, saveErr
+				}
+			}
+			if temporal.IsCanceledError(e) {
+				return turn, e
+			}
+		}
+	}
+	err = workflow.ExecuteActivity(ctx, "Prepare", in).Get(ctx, &turn)
+	return
+}
+
 func runTurn(ctx workflow.Context, in agent.RunInput, maxSteps int, steer ...func(*agent.Turn) error) (out agent.Turn, err error) {
 	if workflow.GetVersion(ctx, "turn-observability-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
 		in.StartedAt = workflow.Now(ctx)
@@ -164,9 +214,9 @@ func runTurn(ctx workflow.Context, in agent.RunInput, maxSteps int, steer ...fun
 			}
 		}
 	}()
-	turn := agent.Turn{Input: in}
-	if err := workflow.ExecuteActivity(ctx, "Prepare", in).Get(ctx, &turn); err != nil {
-		return turn, err
+	turn, prepareErr := prepareTurn(ctx, in)
+	if prepareErr != nil {
+		return turn, prepareErr
 	}
 	if turn.Done {
 		return turn, nil

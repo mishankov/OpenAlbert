@@ -172,10 +172,11 @@ func (t *Telegram) response(ctx context.Context, req *http.Request, out any) err
 }
 
 type telegramFile struct {
-	ID   string `json:"file_id"`
-	Name string `json:"file_name"`
-	MIME string `json:"mime_type"`
-	Size int64  `json:"file_size"`
+	Duration int    `json:"duration"`
+	ID       string `json:"file_id"`
+	Name     string `json:"file_name"`
+	MIME     string `json:"mime_type"`
+	Size     int64  `json:"file_size"`
 }
 type telegramMessage struct {
 	ID       int64  `json:"message_id"`
@@ -244,7 +245,7 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 			if f.MIME != "" {
 				mime = f.MIME
 			}
-			incoming.Attachments = append(incoming.Attachments, domain.Attachment{FileID: f.ID, Name: name, MIME: mime, Kind: kind})
+			incoming.Attachments = append(incoming.Attachments, domain.Attachment{FileID: f.ID, Name: name, MIME: mime, Kind: kind, SizeBytes: f.Size, DurationSeconds: f.Duration})
 		}
 		if len(m.Photo) > 0 {
 			photo := m.Photo[len(m.Photo)-1]

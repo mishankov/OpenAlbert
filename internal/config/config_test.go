@@ -21,6 +21,29 @@ func TestLaunchSettings(t *testing.T) {
 		t.Fatalf("unexpected parsed launch settings")
 	}
 }
+
+func TestSTTConfigurationIsIndependent(t *testing.T) {
+	for _, invalid := range []string{"", "STT_MODEL", "STT_REVISION", "STT_BASE_URL"} {
+		env := validEnv()
+		env["STT_BASE_URL"] = "http://stt:8080/v1"
+		env["STT_MODEL"] = "nemotron"
+		env["STT_REVISION"] = "weights-v1"
+		if invalid != "" {
+			env[invalid] = ""
+			if invalid == "STT_BASE_URL" {
+				env[invalid] = "https://user:PRIVATE@host/v1"
+			}
+		}
+		c, e := load(func(k string) string { return env[k] })
+		if invalid == "" {
+			if e != nil || c.STTAPIKey != "" || c.STTModel != "nemotron" {
+				t.Fatal("optional independent key rejected")
+			}
+		} else if e == nil || strings.Contains(e.Error(), "PRIVATE") {
+			t.Fatal("invalid STT settings accepted or leaked")
+		}
+	}
+}
 func TestRequiredOwnerAndSecrets(t *testing.T) {
 	env := validEnv()
 	env["TELEGRAM_ALLOWED_USER_IDS"] = ""

@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS jarvis_checkpoints (
     id text PRIMARY KEY,
     data jsonb NOT NULL
 );
+CREATE TABLE IF NOT EXISTS jarvis_transcriptions (
+ id text PRIMARY KEY,
+ owner text NOT NULL,
+ lease_until timestamptz NOT NULL,
+ data jsonb
+);
 CREATE TABLE IF NOT EXISTS jarvis_progress (
     id text PRIMARY KEY,
     data jsonb NOT NULL
@@ -74,3 +80,4 @@ CREATE TABLE IF NOT EXISTS jarvis_traces (
 );
 CREATE INDEX IF NOT EXISTS jarvis_traces_session ON jarvis_traces(session_id,started_at,id);
 CREATE INDEX IF NOT EXISTS jarvis_turns_session ON jarvis_checkpoints((data->'Input'->>'SessionID')) WHERE id LIKE 'turn-done/%';
+CREATE INDEX IF NOT EXISTS jarvis_audio_session ON jarvis_checkpoints((data->>'session_id')) WHERE id LIKE 'audio/%';

@@ -12,7 +12,8 @@ test('сборка сохраняет все документы, ссылки и
   const output = await mkdtemp(join(tmpdir(), 'jarvis-docs-test-'));
   t.after(() => rm(output, { recursive: true, force: true }));
   const pages = await build(output);
-  assert.equal(pages.length, 12);
+  assert.equal(pages.length, 13);
+  assert.ok(pages.find((page) => page.id === 'speech')?.html.includes('STT_BASE_URL'));
   const ids = new Set(pages.map((page) => page.id));
   const diagrams = new Set();
   for (const page of pages) {

@@ -43,6 +43,14 @@ func (r *Runtime) Worker() worker.Worker {
 	w.RegisterActivity(r.Activities)
 	return w
 }
+
+// Long audio never occupies chat/tool activity slots. The HTTP adapter also
+// enforces one native call, including across disconnects and worker retries.
+func (r *Runtime) STTWorker() worker.Worker {
+	w := worker.New(r.Client, r.TaskQueue+".stt", worker.Options{MaxConcurrentActivityExecutionSize: 1, WorkerStopTimeout: 15 * time.Second})
+	w.RegisterActivity(r.Activities.TranscribeAudio)
+	return w
+}
 func (r *Runtime) Start(ctx context.Context) {
 	for _, loop := range []func(context.Context){r.poll, r.dispatch, r.deliver, r.typing, r.reapBrowsers} {
 		r.wg.Add(1)

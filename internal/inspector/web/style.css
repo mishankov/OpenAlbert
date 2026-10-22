@@ -1182,3 +1182,7 @@ h4 {
     gap: 8px;
   }
 }
+/* Speech inspection keeps source, transcript and diagnostics together. */
+.audio-result { padding: 1rem; border-bottom: 1px solid var(--border, #ddd); }
+.audio-result audio { display: block; width: min(100%, 32rem); margin-block: .75rem; }
+.audio-result .prose { white-space: pre-wrap; overflow-wrap: anywhere; }
