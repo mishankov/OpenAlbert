@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"jarvis/internal/domain"
+	"jarvis/internal/messagefmt"
 )
 
 func ID(parts ...string) string {
@@ -37,6 +38,8 @@ Background checks do not require notifications. If nothing warrants a message, f
 Examples: unchanged monitoring results need no message; a user asking "Any news?" needs an answer even if there is no news. Send routine status reports only when requested. Never send placeholders or announce a decision to stay silent.
 
 Send once after completing the work. Success means queued delivery and ends the turn after the current tool batch. Do not send a follow-up confirmation.
+
+To send an image or file with a description in one message, supply both text and artifact_id in the same call. Text that fits a 1024 UTF-16-unit caption after Markdown rendering is attached to the artifact. Longer descriptions are sent separately without truncation. Supported images are sent as photos; other artifacts are sent as documents.
 
 Use original Rich Markdown without MarkdownV2 escaping. Limits: 32000 UTF-8 bytes, 500 blocks, 20 table columns, 16 nesting levels. Save larger content as an artifact.`
 
@@ -150,6 +153,18 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 			}
 			if !found {
 				return nil, errors.New("artifact not found in this conversation")
+			}
+			if hasText {
+				caption := messagefmt.Markdown(p.Text)
+				if messagefmt.FitsCaption(caption) {
+					// One durable delivery owns both media and caption, so an
+					// uncertain acknowledgement can never retry just one part.
+					out := domain.Outgoing{ID: key + "/000", Conversation: in.Conversation, Text: caption.Text, Entities: caption.Entities, Formatted: true, ArtifactID: p.ArtifactID, State: "pending", TurnID: in.RunKey, SessionID: in.SessionID, TaskID: in.TaskID, Trigger: in.TriggerName(), StartedAt: in.StartedAt, ReceivedAt: in.ReceivedAt, EnqueuedAt: now, PartCount: 1}
+					if err := a.Repo.EnqueueOutgoing(ctx, out); err != nil {
+						return nil, err
+					}
+					return map[string]string{"delivery_id": key, "state": "queued"}, nil
+				}
 			}
 		}
 		partCount := 0

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"jarvis/internal/domain"
+	"jarvis/internal/messagefmt"
 )
 
 func TestBackgroundPlaceholdersNeverReachOutbox(t *testing.T) {
@@ -32,6 +34,49 @@ func TestBackgroundPlaceholdersNeverReachOutbox(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestAttachmentCaptionPlanningAndRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		combined   bool
+	}{
+		{"formatted", "😀 **RG DS** — [характеристики](https://example.com)", true},
+		{"caption boundary", strings.Repeat("я", 1024), true},
+		{"rendered boundary", "**" + strings.Repeat("я", 1024) + "**", true},
+		{"long description", strings.Repeat("я", 1025), false},
+		{"emoji boundary", strings.Repeat("😀", 512), true},
+		{"long emoji description", strings.Repeat("😀", 513), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, repo, _, conv := fixture(t)
+			ctx := context.Background()
+			if err := repo.SaveArtifact(ctx, domain.Artifact{ID: "photo", ConversationID: conv.ID, Name: "photo.png", MIME: "image/png", Data: []byte("fixture")}); err != nil {
+				t.Fatal(err)
+			}
+			args, _ := json.Marshal(map[string]string{"text": tc.text, "artifact_id": "photo"})
+			for range 2 {
+				if output := tool(t, a, conv, "caption", "send", "send_message", string(args)); ToolFailed(output) {
+					t.Fatal(output)
+				}
+			}
+			rows, err := repo.PendingOutgoing(ctx, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.combined {
+				caption := messagefmt.Markdown(tc.text)
+				if len(rows) != 1 || rows[0].ArtifactID != "photo" || rows[0].Text != caption.Text || !rows[0].Formatted || rows[0].PartCount != 1 || rows[0].PartIndex != 0 {
+					t.Fatalf("caption/image were split or duplicated: %+v", rows)
+				}
+				if len(rows[0].Entities) != len(caption.Entities) {
+					t.Fatal("caption formatting lost")
+				}
+			} else if len(rows) != 2 || rows[0].Text != tc.text || rows[0].ArtifactID != "" || rows[1].ArtifactID != "photo" || rows[1].Text != "" || rows[0].PartCount != 2 || rows[1].PartCount != 2 {
+				t.Fatalf("long description was truncated, lost or duplicated: %+v", rows)
+			}
+		})
 	}
 }
 

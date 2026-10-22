@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -305,6 +308,26 @@ func (t *Telegram) Typing(ctx context.Context, c domain.Conversation) error {
 	return t.api(ctx, "sendChatAction", payload, nil)
 }
 func (t *Telegram) SendFile(ctx context.Context, c domain.Conversation, name string, data []byte) (string, error) {
+	return t.sendUpload(ctx, c, name, data, "document", messagefmt.Message{})
+}
+
+// SendArtifact sends one media message. Choose the method before attempting
+// delivery; never resend as a document after an ambiguous photo acknowledgement.
+func (t *Telegram) SendArtifact(ctx context.Context, c domain.Conversation, artifact domain.Artifact, caption messagefmt.Message) (string, error) {
+	if !messagefmt.FitsCaption(caption) {
+		return "", errors.New("Telegram media caption exceeds size limit or is invalid UTF-8")
+	}
+	field := "document"
+	if len(artifact.Data) <= 10<<20 {
+		config, format, err := image.DecodeConfig(bytes.NewReader(artifact.Data))
+		if err == nil && (format == "jpeg" || format == "png") && config.Width > 0 && config.Height > 0 && config.Width+config.Height <= 10000 && max(config.Width, config.Height) <= 20*min(config.Width, config.Height) {
+			field = "photo"
+		}
+	}
+	return t.sendUpload(ctx, c, artifact.Name, artifact.Data, field, caption)
+}
+
+func (t *Telegram) sendUpload(ctx context.Context, c domain.Conversation, name string, data []byte, field string, caption messagefmt.Message) (string, error) {
 	if !t.allowed(c) {
 		return "", errors.New("Telegram recipient is not allowed")
 	}
@@ -317,7 +340,17 @@ func (t *Telegram) SendFile(ctx context.Context, c domain.Conversation, name str
 	if c.ThreadID > 0 {
 		_ = w.WriteField("message_thread_id", strconv.Itoa(c.ThreadID))
 	}
-	part, err := w.CreateFormFile("document", path.Base(name))
+	if caption.Text != "" {
+		_ = w.WriteField("caption", caption.Text)
+	}
+	if len(caption.Entities) > 0 {
+		entities, err := json.Marshal(caption.Entities)
+		if err != nil {
+			return "", err
+		}
+		_ = w.WriteField("caption_entities", string(entities))
+	}
+	part, err := w.CreateFormFile(field, path.Base(name))
 	if err != nil {
 		return "", err
 	}
@@ -327,7 +360,11 @@ func (t *Telegram) SendFile(ctx context.Context, c domain.Conversation, name str
 	if err = w.Close(); err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.config.BaseURL+"/bot"+t.config.Token+"/sendDocument", &body)
+	method := "sendDocument"
+	if field == "photo" {
+		method = "sendPhoto"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.config.BaseURL+"/bot"+t.config.Token+"/"+method, &body)
 	if err != nil {
 		return "", errors.New("invalid Telegram request")
 	}

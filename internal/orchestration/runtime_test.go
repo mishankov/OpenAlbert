@@ -1,9 +1,12 @@
 package orchestration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -142,6 +145,100 @@ func TestFileFailureDoesNotRepeatAlreadyDeliveredText(t *testing.T) {
 	}
 	if got := strings.Join(repo.states, ","); got != "text:sending,text:sent,file:sending,file:failed" {
 		t.Fatalf("bad file/text states%s", got)
+	}
+}
+
+func TestCaptionedPhotoIsOneDurableDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name, firstResponse, finalState string
+		status, requests                int
+	}{
+		{"success", `{"ok":true,"result":{"message_id":42}}`, "sent", 200, 1},
+		{"lost acknowledgement", `{"ok":true,`, "unknown", 200, 1},
+		{"rejection", `{"ok":false,"error_code":400}`, "failed", 400, 1},
+		{"rate limit", `{"ok":false,"error_code":429}`, "sent", 429, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var photo bytes.Buffer
+			if err := png.Encode(&photo, image.NewRGBA(image.Rect(0, 0, 16, 16))); err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			r, repo, conv := deliveryRuntime(t, func(w http.ResponseWriter, req *http.Request) {
+				attempt := calls.Add(1)
+				if !strings.HasSuffix(req.URL.Path, "/sendPhoto") {
+					t.Errorf("image and caption used another delivery: %s", req.URL.Path)
+				}
+				if err := req.ParseMultipartForm(1 << 20); err != nil {
+					t.Error(err)
+					return
+				}
+				defer req.MultipartForm.RemoveAll()
+				file, header, err := req.FormFile("photo")
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				data, err := io.ReadAll(file)
+				_ = file.Close()
+				if err != nil || !bytes.Equal(data, photo.Bytes()) || header.Filename != "photo.png" {
+					t.Error("image bytes or filename changed")
+				}
+				if req.FormValue("caption") != "😀 RG DS — описание" || req.FormValue("chat_id") != "7" || req.FormValue("message_thread_id") != "3" || req.FormValue("parse_mode") != "" {
+					t.Error("caption or recipient changed")
+				}
+				var entities []domain.TextEntity
+				if err := json.Unmarshal([]byte(req.FormValue("caption_entities")), &entities); err != nil || len(entities) != 1 || entities[0].Type != "bold" || entities[0].Offset != 3 || entities[0].Length != 5 {
+					t.Error("UTF-16 caption entities lost")
+				}
+				if attempt == 1 {
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.firstResponse)
+				} else {
+					_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":42}}`)
+				}
+			})
+			conv.ThreadID = 3
+			ctx := context.Background()
+			if err := repo.SaveArtifact(ctx, domain.Artifact{ID: "photo", ConversationID: conv.ID, Name: "photo.png", MIME: "image/png", Data: photo.Bytes()}); err != nil {
+				t.Fatal(err)
+			}
+			a := agent.Activities{Repo: repo, Logger: r.Logger}
+			input := agent.ToolInput{RunKey: "caption", SessionID: "session", Conversation: conv, Call: domain.ToolCall{ID: "send", Name: "send_message", Arguments: json.RawMessage(`{"text":"😀 **RG DS** — описание","artifact_id":"photo"}`)}}
+			for range 2 {
+				output, err := a.ToolCall(ctx, input)
+				if err != nil || agent.ToolFailed(output) {
+					t.Fatalf("send tool failed: %s %v", output, err)
+				}
+			}
+			rows, err := repo.PendingOutgoing(ctx, 10)
+			if err != nil || len(rows) != 1 || rows[0].PartCount != 1 || rows[0].ArtifactID != "photo" {
+				t.Fatalf("media/caption split or duplicated: %+v %v", rows, err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				deliveryCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+				err := r.DeliverOnce(deliveryCtx)
+				cancel()
+				if tc.status == 429 && attempt == 0 {
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("rate-limit wait ignored shutdown: %v", err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if int(calls.Load()) != tc.requests {
+				t.Fatalf("media repeated or split: %d requests", calls.Load())
+			}
+			id := rows[0].ID
+			want := id + ":sending," + id + ":" + tc.finalState
+			if tc.status == 429 {
+				want = id + ":sending," + id + ":pending," + want
+			}
+			if got := strings.Join(repo.states, ","); got != want {
+				t.Fatalf("wrong atomic delivery states: %s", got)
+			}
+		})
 	}
 }
 

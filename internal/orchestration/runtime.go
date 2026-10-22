@@ -11,6 +11,7 @@ import (
 	"jarvis/internal/agent"
 	"jarvis/internal/domain"
 	"jarvis/internal/integrations"
+	"jarvis/internal/messagefmt"
 	"jarvis/internal/telemetry"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -291,9 +292,14 @@ func (r *Runtime) DeliverOnce(ctx context.Context) error {
 			} else if !ok {
 				err = errors.New("outgoing artifact missing")
 			} else {
-				_, err = r.Telegram.SendFile(ctx, out.Conversation, artifact.Name, artifact.Data)
+				caption := messagefmt.Message{Text: out.Text, Entities: out.Entities}
+				if !out.Formatted {
+					caption = messagefmt.Markdown(out.Text)
+				}
+				_, err = r.Telegram.SendArtifact(ctx, out.Conversation, artifact, caption)
 			}
-			// Artifact and text have separate persistent deliveries; never retry a successful file for a text failure.
+			// Media and caption share one delivery. Legacy and long-text split
+			// deliveries keep their independent states and are never recombined.
 		} else {
 			if out.Formatted {
 				_, err = r.Telegram.SendFormatted(ctx, out.Conversation, out.Text, out.Entities)
