@@ -31,7 +31,7 @@ func schema(properties string, required ...string) json.RawMessage {
 
 const sendMessageDescription = `Send a real Telegram message or saved artifact to the current conversation.
 
-Use for direct answers, clarifications, due reminders, requested results, useful new information, or questions blocking progress.
+Use for direct answers, greetings that need acknowledgement, clarifications, due reminders, requested results, useful new information, or questions blocking progress. An ordinary final assistant response is internal only and is never delivered to Telegram. If the user expects a reply, call this tool with the answer even when no research or other tools are needed.
 
 Background checks do not require notifications. If nothing warrants a message, finish with a final assistant response and no tool calls. It stays in internal history and need not be empty. No special marker or tool is required.
 
