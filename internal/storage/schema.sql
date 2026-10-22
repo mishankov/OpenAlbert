@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS jarvis_checkpoints (
     id text PRIMARY KEY,
     data jsonb NOT NULL
 );
+CREATE TABLE IF NOT EXISTS jarvis_progress (
+    id text PRIMARY KEY,
+    data jsonb NOT NULL
+);
+CREATE INDEX IF NOT EXISTS jarvis_progress_ready ON jarvis_progress(id) WHERE data->'delivery'->>'state'='ready';
+CREATE INDEX IF NOT EXISTS jarvis_outgoing_turn ON jarvis_outgoing((data->>'turn_id'),(data->'conversation'->>'id'));
 
 ALTER TABLE jarvis_messages ADD COLUMN IF NOT EXISTS recorded_at timestamptz;
 CREATE INDEX IF NOT EXISTS jarvis_messages_session_seq ON jarvis_messages(session_id,seq);

@@ -45,6 +45,7 @@ Use original Rich Markdown without MarkdownV2 escaping. Limits: 32000 UTF-8 byte
 
 func Definitions() []domain.Tool {
 	return []domain.Tool{
+		{Name: "report_progress", Description: "Update the single temporary status message for the current interactive request, without finishing the turn. Use during lengthy work at meaningful stage changes: briefly state what you have actually done, what you are doing next, or a concrete obstacle. Plain text, at most 600 characters, in the user's language. Do not invent findings, percentages, completion estimates or activity; do not include internal reasoning. The application delays the first status by 30 seconds, coalesces updates and edits at most once a minute; it may suppress quick requests. This is not a reply or delivery confirmation. Continue working and use send_message for the final answer. Never send intermediate updates via send_message.", Parameters: schema(`"text":{"type":"string"}`, "text")},
 		{Name: "web_search", Description: "Search the public web with Yandex; returns sources. Read sources before asserting facts.", Parameters: schema(`"query":{"type":"string"}`, "query")},
 		{Name: "web_read", Description: "Fetch plain text from a known public HTTP(S) URL. Use for static articles, documentation or plain-text files when only their text is needed. Does not run JavaScript or share browser cookies. HTML extraction discards link destinations and flattens headings, lists and tables; long results may be truncated. For search results, catalogs, following links, structured tables or JavaScript content, use the listed browser tools. An HTTP success may contain a CAPTCHA or an empty page; check that the requested content is actually present. Private network addresses are forbidden.", Parameters: schema(`"url":{"type":"string"}`, "url")},
 		{Name: "send_message", Description: sendMessageDescription, Parameters: schema(`"text":{"type":"string","description":"User-facing Rich Markdown: headings, GFM tables, lists, code, spoilers, formulas and details are supported. Use an empty string for an artifact without a caption."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
@@ -192,6 +193,8 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 			}
 		}
 		return map[string]string{"delivery_id": key, "state": "queued"}, nil
+	case "report_progress":
+		return a.reportProgress(ctx, in, p.Text)
 	case "send_group_message":
 		return a.sendGroupMessage(ctx, in, p, key, now)
 	case "task_create":
@@ -442,6 +445,9 @@ func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 	interactive := turn.Input.TaskID == "" && !turn.Input.Initiative
 	filtered := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
+		if tool.Name == "report_progress" && !interactive {
+			continue
+		}
 		if tool.Name == "participant_update" && turn.Conversation.Private {
 			continue
 		}

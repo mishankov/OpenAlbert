@@ -255,6 +255,11 @@ func (r *Runtime) deliver(ctx context.Context) {
 		if err := r.DeliverOnce(ctx); err != nil {
 			r.record(ctx, "outbox", err)
 		}
+		if ctx.Err() == nil {
+			if err := r.ProgressOnce(ctx, time.Now().UTC()); err != nil {
+				r.record(ctx, "progress", err)
+			}
+		}
 		if !pause(ctx, time.Second) {
 			return
 		}

@@ -59,6 +59,12 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
+	// Creation may have succeeded without returning its message ID. Never create
+	// another status in that case. Editing/deleting a known ID is safe to repeat.
+	if _, err = pool.Exec(ctx, `UPDATE jarvis_progress SET data=jsonb_set(jsonb_set(data,'{delivery,state}',CASE WHEN data->'delivery'->>'message_id'='' THEN '"disabled"'::jsonb ELSE '"ready"'::jsonb END),'{delivery,version}',to_jsonb((data->'delivery'->>'version')::bigint+1)) WHERE data->'delivery'->>'state'='sending'`); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	return s, nil
 }
 func (s *Store) Close()                         { s.pool.Close() }

@@ -103,6 +103,35 @@ func requireWorkflowOK(t *testing.T, env *testsuite.TestWorkflowEnvironment) {
 		t.Fatal(err)
 	}
 }
+
+func TestProgressToolDoesNotEndTheTurn(t *testing.T) {
+	a, repo, _, conv := newFixture(t)
+	model := &scriptedModel{run: func(n int, _ []domain.Message) (domain.Message, error) {
+		if n == 0 {
+			return calls(call("progress", "report_progress", map[string]string{"text": "Проверяю характеристики."}), call("source", "web_read", map[string]string{"url": "https://example.com"})), nil
+		}
+		return reply("Готовое сравнение."), nil
+	}}
+	a.Model = model
+	env := newEnv(a)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
+	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 4})
+	requireWorkflowOK(t, env)
+	if model.count() != 2 {
+		t.Fatal("progress ended the research")
+	}
+	rows, err := repo.PendingOutgoing(context.Background(), 10)
+	if err != nil || len(rows) != 1 || rows[0].Text != "Готовое сравнение." {
+		t.Fatalf("progress mixed with final replies: %+v %v", rows, err)
+	}
+	if err = acknowledgeProgressPart(context.Background(), repo, rows[0].ID, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := repo.DueProgress(context.Background(), time.Now().Add(time.Hour), 10)
+	if err != nil || len(progress) != 1 || progress[0].Outcome != "delivered" || progress[0].Text != "Проверяю характеристики." {
+		t.Fatalf("Finish lost status/delivery state: %+v %v", progress, err)
+	}
+}
 func twoSessions(ctx workflow.Context, in SessionInput) error {
 	for _, id := range []string{"first-session", "second-session"} {
 		child := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: id})

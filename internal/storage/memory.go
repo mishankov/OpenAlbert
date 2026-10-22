@@ -33,13 +33,14 @@ type Memory struct {
 	artifacts     map[string]domain.Artifact
 	checkpoints   map[string]json.RawMessage
 	traces        map[string]domain.Trace
+	progress      map[string]domain.Progress
 }
 
 var _ domain.Repository = (*Memory)(nil)
 
 func NewMemory() *Memory {
 	return &Memory{
-		conversations: map[string]domain.Conversation{}, incoming: map[string]domain.Incoming{}, handled: map[string]bool{}, sessions: map[string]domain.Session{}, analyzed: map[string]bool{}, messages: map[string][]domain.Message{}, messageKeys: map[string]bool{}, tasks: map[string]domain.Task{}, outgoing: map[string]domain.Outgoing{}, artifacts: map[string]domain.Artifact{}, checkpoints: map[string]json.RawMessage{}, traces: map[string]domain.Trace{},
+		conversations: map[string]domain.Conversation{}, incoming: map[string]domain.Incoming{}, handled: map[string]bool{}, sessions: map[string]domain.Session{}, analyzed: map[string]bool{}, messages: map[string][]domain.Message{}, messageKeys: map[string]bool{}, tasks: map[string]domain.Task{}, outgoing: map[string]domain.Outgoing{}, artifacts: map[string]domain.Artifact{}, checkpoints: map[string]json.RawMessage{}, traces: map[string]domain.Trace{}, progress: map[string]domain.Progress{},
 	}
 }
 func (m *Memory) Close()                         {}

@@ -42,8 +42,10 @@ type Update struct {
 	Incoming *domain.Incoming
 }
 type TelegramError struct {
-	Code       int
-	RetryAfter time.Duration
+	Code           int
+	RetryAfter     time.Duration
+	NotModified    bool
+	MessageMissing bool
 }
 
 func (e *TelegramError) HTTPStatus() int { return e.Code }
@@ -136,10 +138,11 @@ func (t *Telegram) response(ctx context.Context, req *http.Request, out any) err
 		return err
 	}
 	var envelope struct {
-		OK         *bool           `json:"ok"`
-		Code       int             `json:"error_code"`
-		Result     json.RawMessage `json:"result"`
-		Parameters struct {
+		OK          *bool           `json:"ok"`
+		Code        int             `json:"error_code"`
+		Description string          `json:"description"`
+		Result      json.RawMessage `json:"result"`
+		Parameters  struct {
 			RetryAfter int `json:"retry_after"`
 		} `json:"parameters"`
 	}
@@ -157,7 +160,10 @@ func (t *Telegram) response(ctx context.Context, req *http.Request, out any) err
 		if code == 0 {
 			code = resp.StatusCode
 		}
-		return &TelegramError{Code: code, RetryAfter: time.Duration(envelope.Parameters.RetryAfter) * time.Second}
+		description := strings.ToLower(envelope.Description)
+		return &TelegramError{Code: code, RetryAfter: time.Duration(envelope.Parameters.RetryAfter) * time.Second,
+			NotModified:    code == 400 && strings.Contains(description, "message is not modified"),
+			MessageMissing: code == 400 && (strings.Contains(description, "message to delete not found") || strings.Contains(description, "message to edit not found"))}
 	}
 	if out != nil && json.Unmarshal(envelope.Result, out) != nil {
 		return errors.New("invalid Telegram result")

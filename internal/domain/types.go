@@ -180,6 +180,11 @@ type Repository interface {
 	EnqueueOutgoing(context.Context, Outgoing) error
 	PendingOutgoing(context.Context, int) ([]Outgoing, error)
 	SetOutgoingState(context.Context, string, string) error
+	StartProgress(context.Context, Progress) error
+	ReportProgress(context.Context, string, int, string) error
+	EndProgress(context.Context, string, string) error
+	DueProgress(context.Context, time.Time, int) ([]Progress, error)
+	SetProgressDelivery(context.Context, string, int64, ProgressDelivery) (Progress, bool, error)
 	SaveArtifact(context.Context, Artifact) error
 	Artifact(context.Context, string, string) (Artifact, bool, error)
 }
