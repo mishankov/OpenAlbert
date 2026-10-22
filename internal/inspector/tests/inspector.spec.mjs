@@ -145,6 +145,98 @@ async function openSession(page) {
   await expect(page.locator("#event-1")).toBeVisible();
 }
 
+const speechResult = {
+  session_id: session.id, conversation_id: conv.id, incoming_id: "voice", artifact_id: "voice-file",
+  model: "nemotron-3.5", author_id: 42, author_name: "Анна", status: "completed",
+  text: "Купить три яблока <script>window.XSS=true</script>", original_text: "Подпись [Voice transcript]",
+  received_at: modelTrace.started_at, queued_at: modelTrace.started_at, started_at: modelTrace.started_at,
+  ended_at: modelTrace.ended_at, duration_seconds: 2, decode_ms: 12, inference_ms: 200, cached: false,
+};
+const speechTrace = { ...modelTrace, id: "speech-trace", kind: "transcription", name: "nemotron-3.5", call_id: "voice-file" };
+function voiceDetail(result = {}) {
+  return { ...detail,
+    audio: [{ ...speechResult, ...result }],
+    messages: [{ ...detail.messages[0], recorded_at: modelTrace.ended_at,
+      message: { role: "user", author_name: "Анна", author_id: 42, source_message_id: "voice", content: "Подпись [Voice transcript]\n[Attachment: voice.ogg; type=audio/ogg; artifact_id=voice-file]\n[Voice transcript; automatically recognized from audio]\n" + speechResult.text } }, ...detail.messages.slice(1)],
+    traces: [...detail.traces, speechTrace],
+    artifacts: [{ id: "voice-file", conversation_id: conv.id, name: "voice.ogg", mime: "audio/ogg" }],
+  };
+}
+async function playableAudio(page) {
+  const wav = Buffer.alloc(44 + 32000 * 10);
+  wav.write("RIFF");wav.writeUInt32LE(wav.length - 8, 4);wav.write("WAVEfmt ", 8);wav.writeUInt32LE(16, 16);wav.writeUInt16LE(1, 20);wav.writeUInt16LE(1, 22);wav.writeUInt32LE(16000, 24);wav.writeUInt32LE(32000, 28);wav.writeUInt16LE(2, 32);wav.writeUInt16LE(16, 34);wav.write("data", 36);wav.writeUInt32LE(wav.length - 44, 40);
+  await page.route("**/api/inspect/artifact?**", (route) => route.fulfill({ contentType: "audio/wav", body: wav }));
+}
+
+test("хронология: голосовое сообщение и отдельная операция распознавания", async ({ page }) => {
+  await fixture(page, voiceDetail());await playableAudio(page);
+  await page.route("**/api/inspect/trace?**", (route) => route.fulfill({ json: { ...speechTrace, input: { artifact_id: "voice-file" }, output: speechResult } }));
+  await openSession(page);
+  const voice = page.locator(".voice-message"), speech = page.locator(".speech-event");
+  await expect(voice).toHaveCount(1);await expect(speech).toHaveCount(1);
+  const order = await page.locator(".timeline > *").evaluateAll((nodes) => nodes.map((n) => n.className));
+  expect(order[0]).toContain("voice-message");expect(order[1]).toContain("speech-event");
+  await expect(voice).toContainText("Голосовое сообщение");await expect(voice).toContainText("Анна");
+  await expect(voice).toContainText("Подпись [Voice transcript]");await expect(voice).toContainText(speechResult.text);
+  await expect(voice).not.toContainText("artifact_id=");await expect(voice).not.toContainText("automatically recognized");
+  await expect(voice.locator("time")).toHaveAttribute("title", /Получено в Telegram/);
+  const player = voice.locator("audio");await player.focus();await page.keyboard.press("Space");
+  await expect.poll(() => player.evaluate((a) => a.paused)).toBe(false);await page.keyboard.press("Space");
+  await expect.poll(() => player.evaluate((a) => a.paused)).toBe(true);
+  const summary = speech.locator(":scope > summary");await summary.focus();await page.keyboard.press("Enter");
+  await expect(speech).toHaveAttribute("open", "");
+  await summary.dispatchEvent("keydown", { key: "Enter", code: "Enter", repeat: true });
+  await summary.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+  await expect(speech).toHaveAttribute("open", "");
+  const data = speech.getByRole("button", { name: "Данные распознавания", exact: true });
+  await data.focus();await page.keyboard.press("Enter");await expect(page.getByRole("dialog")).toContainText("original_text");
+  await page.keyboard.press("Escape");await expect(data).toBeFocused();
+  const attempt = speech.getByRole("button", { name: /Попытка 1/ });await attempt.focus();await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toContainText("Купить три яблока");await page.keyboard.press("Escape");await expect(attempt).toBeFocused();
+  expect(await page.evaluate(() => window.XSS)).toBeUndefined();
+  await page.screenshot({ path: test.info().outputPath("voice-timeline-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(speech.locator(":scope > summary .tool-state")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath("voice-timeline-mobile.png"), fullPage: true });
+});
+
+test("хронология: ожидание сменяется результатом без дублирования голосового", async ({ page }) => {
+  const current = voiceDetail({ status: "running", text: "", ended_at: undefined });
+  current.messages = [];current.traces = [{ ...speechTrace, status: "running", ended_at: undefined }];
+  await fixture(page, current);await page.locator(".session-link").first().click();
+  await expect(page.locator(".voice-message")).toHaveCount(1);await expect(page.locator(".speech-event")).toHaveCount(1);
+  await expect(page.locator(".voice-message")).toContainText("Распознавание ещё не завершено");
+  await expect(page.locator(".activity-line")).toHaveCount(0);
+  const summary = page.locator(".speech-event > summary");await summary.focus();await page.keyboard.press("Enter");
+  Object.assign(current, voiceDetail());await page.keyboard.press("Alt+r");
+  await expect(page.locator("#event-1.voice-message")).toBeVisible();await expect(page.locator(".voice-message")).toHaveCount(1);
+  await expect(page.locator(".speech-event")).toHaveCount(1);await expect(page.locator(".speech-event")).toHaveAttribute("open", "");
+  await expect(page.locator(".speech-event > summary")).toBeFocused();await expect(page.locator(".voice-message")).toContainText(speechResult.text);
+});
+
+test("хронология: кэш и исходы без текста показаны явно", async ({ page }) => {
+  for (const [status, notice] of [["queued", "Ожидает распознавания"], ["failed", "Не удалось получить расшифровку"], ["cancelled", "Распознавание отменено"], ["no_speech", "Речь не распознана"], ["unavailable", "Распознавание недоступно"]]) {
+    await test.step(status, async () => {
+      const d = voiceDetail({ status, text: "", error_code: status === "failed" ? "stt_http_422" : undefined });
+      d.traces = [];await fixture(page, d);await openSession(page);
+      await expect(page.locator(".voice-message")).toContainText(notice);
+      await page.locator(".speech-event > summary").click();await expect(page.locator(".speech-event")).toContainText(notice);
+      if (status === "failed") await expect(page.locator(".speech-event")).toContainText("stt_http_422");
+      await expect(page.locator(".speech-event [data-trace]")).toHaveCount(0);
+    });
+  }
+  const cached = voiceDetail({ cached: true });cached.traces = [];await fixture(page, cached);await openSession(page);
+  await expect(page.locator(".speech-event > summary")).toContainText("Из кэша");await expect(page.locator(".speech-event [data-trace]")).toHaveCount(0);
+});
+
+test("хронология: незавершённая попытка без результата вложения остаётся видна", async ({ page }) => {
+  await fixture(page, { ...detail, traces: [{ ...speechTrace, status: "running", ended_at: undefined }] });await openSession(page);
+  await expect(page.locator(".voice-message")).toHaveCount(0);await expect(page.locator(".speech-event")).toHaveCount(1);
+  await page.locator(".speech-event > summary").click();await expect(page.locator(".speech-event")).toContainText("Результат вложения не сохранён");
+  await expect(page.locator(".speech-event [data-trace]")).toHaveCount(1);await expect(page.locator(".speech-event [data-record]")).toHaveCount(0);
+});
+
 test("аудио: исходник, текст, диагностика и клавиатурная навигация", async ({ page }) => {
   const speech = { session_id: session.id, conversation_id: conv.id, incoming_id: "voice", artifact_id: "voice-file", model: "nemotron-3.5", author_id: 42, author_name: "Анна", status: "completed", text: "Три яблока <script>window.XSS=true</script>", queued_at: modelTrace.started_at, started_at: modelTrace.started_at, ended_at: modelTrace.ended_at, duration_seconds: 2, decode_ms: 12, inference_ms: 200, cached: false };
   const tr = { ...modelTrace, id: "speech-trace", kind: "transcription", name: "nemotron-3.5", call_id: "voice-file" };

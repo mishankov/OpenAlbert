@@ -229,7 +229,45 @@ function messageText(text, key) {
   if (text.length < 1200) return `<div class="prose">${esc(text)}</div>`;
   return `<details class="long-text" data-open-key="text-${esc(key)}"><summary><span class="prose text-preview">${esc(text)}</span><span class="when-closed">Развернуть ${text.length.toLocaleString("ru-RU")} символов</span><span class="when-open">Свернуть</span></summary><div class="prose">${esc(text)}</div></details>`;
 }
+
+function speechForMessage(row) {
+  return row.message.role === "user" && row.message.source_message_id
+    ? (state.data.audio || []).filter((r) => r.incoming_id === row.message.source_message_id)
+    : [];
+}
+function sourcePlayer(r, prefix) {
+  const artifact = state.data.artifacts.find((a) => a.id === r.artifact_id);
+  if (!artifact) return '<p class="muted">Исходный файл недоступен.</p>';
+  return `<audio id="${prefix}-${esc(r.artifact_id)}" controls preload="none" aria-label="Исходное аудио" aria-keyshortcuts="Space" title="Воспроизведение и пауза · Space при фокусе на плеере" src="${esc(artifactURL(artifact))}"></audio><a class="audio-original" href="${esc(artifactURL(artifact))}" target="_blank" rel="noopener noreferrer" title="Открыть исходное аудио · Enter" aria-keyshortcuts="Enter">Оригинал</a>`;
+}
+function speechNotice(r) {
+  return {
+    queued: "Ожидает распознавания",
+    running: "Распознавание ещё не завершено",
+    no_speech: "Речь не распознана",
+    failed: "Не удалось получить расшифровку",
+    cancelled: "Распознавание отменено",
+    unavailable: "Распознавание недоступно",
+  }[r.status] || "Расшифровка не сохранена";
+}
+function voiceMessageRow(row, results) {
+  const first = results[0], m = row?.message;
+  const source = results.find((r) => r.original_text !== undefined && r.original_text !== null);
+  const timestamp = first.received_at || row?.recorded_at || first.queued_at;
+  const caption = source?.original_text;
+  const key = row ? `event-${row.seq}` : `event-voice-${esc(first.incoming_id)}`;
+  return `<article class="event voice-message" id="${key}" data-incoming="${esc(first.incoming_id)}"><div class="event-meta"><time title="${first.received_at ? "Получено в Telegram: " : "Сохранено: "}${esc(date(timestamp))}">${esc(timeOnly(timestamp))}</time><span class="role role-user">USER ${row ? `<span class="seq">#${row.seq}</span>` : ""}</span></div><div class="event-content"><div class="event-line"><span class="event-name">${esc(m?.author_name || first.author_name || "Пользователь")}</span><span class="voice-badge">Голосовое сообщение</span>${row ? `<span class="row-actions">${recordButton(row.seq)}</span>` : ""}</div>${caption ? messageText(caption, `caption-${first.incoming_id}`) : ""}${results.map((r) => `<div class="voice-attachment">${sourcePlayer(r, "voice-player")}<div class="voice-caption"><span class="muted">${r.duration_seconds ? `${esc(r.duration_seconds.toFixed(1))} с · ` : ""}Автоматическая расшифровка</span>${r.text ? messageText(r.text, `voice-${r.artifact_id}`) : `<p class="muted">${esc(speechNotice(r))}</p>`}</div></div>`).join("")}${!source && m?.content ? `<details class="voice-context" data-open-key="voice-context-${esc(first.incoming_id)}"><summary title="Сохранённый текст сообщения · Enter" aria-keyshortcuts="Enter Space">Сохранённый текст сообщения</summary>${messageText(m.content, `saved-voice-${first.incoming_id}`)}</details>` : ""}</div></article>`;
+}
+function speechRow(r, orphanTrace = null) {
+  const attempts = orphanTrace ? [orphanTrace] : state.data.traces.filter((t) => t.kind === "transcription" && t.call_id === r.artifact_id);
+  const timestamp = r.started_at && !r.started_at.startsWith("0001-") ? r.started_at : r.queued_at;
+  const elapsed = r.ended_at && timestamp && !r.ended_at.startsWith("0001-") ? duration({ started_at: timestamp, ended_at: r.ended_at }) : "";
+  const info = [r.model, r.cached ? "Из кэша · нового вызова STT не было" : elapsed].filter(Boolean).join(" · ");
+  return `<details class="tool-event speech-event" data-open-key="speech-${esc(orphanTrace?.id || r.artifact_id)}"><summary title="Распознавание речи · Enter" aria-keyshortcuts="Enter Space"><span class="event-meta"><time title="${esc(date(timestamp))}">${esc(timeOnly(timestamp))}</time><span class="role role-speech">STT</span></span><span class="tool-summary"><span class="tool-name">Распознавание речи</span><span class="argument-preview">${esc(info)}</span><span class="tool-state">${pill(r.status)}</span><span class="expand-mark" aria-hidden="true">▸</span></span></summary><div class="tool-expanded speech-expanded"><div class="tool-payloads"><section><h4>Результат</h4>${r.text ? messageText(r.text, `speech-${r.artifact_id}`) : `<p class="muted">${esc(speechNotice(r))}</p>`}${r.error_code ? `<p class="error">${esc(r.error_code)}</p>` : ""}${orphanTrace ? '<p class="muted">Результат вложения не сохранён; доступна трасса попытки.</p>' : ""}</section><section><h4>Обработка</h4><p class="muted">${esc(r.model || "Модель не сохранена")}</p>${r.cached ? '<p class="muted">Использована сохранённая расшифровка. Время ниже относится к исходному распознаванию.</p>' : ""}${r.decode_ms !== undefined ? `<p>Декодирование: ${esc(r.decode_ms)} мс</p>` : ""}${r.inference_ms !== undefined ? `<p>STT: ${esc(r.inference_ms)} мс</p>` : ""}${r.duration_seconds ? `<p>Запись: ${esc(r.duration_seconds.toFixed(1))} с</p>` : ""}</section></div><div class="tool-footer"><span class="mono muted">${esc(r.artifact_id)}</span><span class="row-actions">${!orphanTrace ? recordButton(`audio:${r.artifact_id}`, "Данные распознавания") : ""}${attempts.map((t) => traceButton(t.id, `Попытка ${t.attempt} · ${label(t.status)}`)).join("")}</span></div></div></details>`;
+}
 function messageRow(row) {
+  const speech = speechForMessage(row);
+  if (speech.length) return voiceMessageRow(row, speech);
   const m = row.message,
     trace = traceForMessage(row);
   const role = m.role === "user" ? "USER" : m.role === "tool" ? "RESULT" : "AI";
@@ -274,28 +312,39 @@ function timeline(d) {
       );
       if (result) paired.add(result.seq);
     }
+  const represented = new Set();
   const events = d.messages
     .map((row) => {
       if (paired.has(row.seq)) return "";
       const calls = row.message.tool_calls || [];
+      const speech = speechForMessage(row);
+      speech.forEach((r) => represented.add(r.artifact_id));
       return (
         (row.message.content ||
         row.message.reasoning ||
         row.message.images?.length ||
         !calls.length
           ? messageRow(row)
-          : "") + calls.map((call) => toolRow(row, call)).join("")
+          : "") + speech.map((r) => speechRow(r)).join("") + calls.map((call) => toolRow(row, call)).join("")
       );
     })
     .join("");
-  const unfinished = d.traces.filter((t) => t.status === "running");
+  const pending = new Map();
+  for (const r of d.audio || []) {
+    if (represented.has(r.artifact_id)) continue;
+    const group = pending.get(r.incoming_id) || [];
+    group.push(r);pending.set(r.incoming_id, group);
+  }
+  const pendingEvents = [...pending.values()].map((group) => voiceMessageRow(null, group) + group.map((r) => speechRow(r)).join("")).join("");
+  const orphanSpeech = d.traces.filter((t) => t.kind === "transcription" && !(d.audio || []).some((r) => r.artifact_id === t.call_id)).map((t) => speechRow({ artifact_id: t.call_id, model: t.name, status: t.status, started_at: t.started_at, ended_at: t.ended_at }, t)).join("");
+  const unfinished = d.traces.filter((t) => t.status === "running" && t.kind !== "transcription");
   const failures = d.traces.filter(
     (t) =>
       t.kind === "tool" &&
       t.status === "failed" &&
       !d.messages.some((m) => m.message.tool_call_id === t.call_id),
   );
-  return `${unfinished.map((t) => `<div class="activity-line">Нет сохранённого завершения: <strong>${esc(t.name || "модель")}</strong> · ${esc(date(t.started_at))} ${traceButton(t.id, "Подробности")}</div>`).join("")}<div class="timeline">${events || '<div class="empty-panel">Сообщений пока нет.</div>'}${failures.map((t) => `<div class="error">${esc(t.name)}: ${esc(t.error)} ${traceButton(t.id, `Попытка ${t.attempt}`)}</div>`).join("")}</div>${d.next_after ? `<div class="pagination"><span>${d.messages.length} из ${d.session.message_count} записей</span><button id="more-messages" class="button">Загрузить следующие события</button></div>` : ""}`;
+  return `${unfinished.map((t) => `<div class="activity-line">Нет сохранённого завершения: <strong>${esc(t.name || "модель")}</strong> · ${esc(date(t.started_at))} ${traceButton(t.id, "Подробности")}</div>`).join("")}<div class="timeline">${events + pendingEvents + orphanSpeech || '<div class="empty-panel">Сообщений пока нет.</div>'}${failures.map((t) => `<div class="error">${esc(t.name)}: ${esc(t.error)} ${traceButton(t.id, `Попытка ${t.attempt}`)}</div>`).join("")}</div>${d.next_after ? `<div class="pagination"><span>${d.messages.length} из ${d.session.message_count} записей</span><button id="more-messages" class="button">Загрузить следующие события</button></div>` : ""}`;
 }
 function models(d) {
   const rows = d.traces.filter(
@@ -629,6 +678,9 @@ function openRecord(id, opener) {
     const index = Number(id.slice(5));
     record = state.data.turns[index];
     title = `Запуск ${index + 1}`;
+  } else if (id.startsWith("audio:")) {
+    record = state.data.audio.find((r) => r.artifact_id === id.slice(6));
+    title = "Данные распознавания";
   } else if (id === "analysis") {
     record = state.data.analysis;
     title = "Анализ сессии";

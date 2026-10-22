@@ -108,7 +108,9 @@ func TestPendingAudioIsVisibleBeforeMessagePreparation(t *testing.T) {
 	defer repo.Close()
 	id := fmt.Sprintf("pending-audio-%d", time.Now().UnixNano())
 	conv := domain.Conversation{ID: id, OwnerID: 42, Private: true}
-	_, e = repo.AcceptIncoming(ctx, domain.Incoming{ID: id, Conversation: conv}, 0)
+	received := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	caption := "Моя подпись [Voice transcript] <script>"
+	_, e = repo.AcceptIncoming(ctx, domain.Incoming{ID: id, Conversation: conv, Text: caption, CreatedAt: received}, 0)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -125,5 +127,28 @@ func TestPendingAudioIsVisibleBeforeMessagePreparation(t *testing.T) {
 	d, ok, e := repo.InspectSession(ctx, id, 0)
 	if e != nil || !ok || len(d.Messages) != 0 || len(d.Audio) != 1 || len(d.Artifacts) != 1 || d.Audio[0].AuthorID != 42 {
 		t.Fatalf("pending audio missing %+v %v", d, e)
+	}
+	if d.Audio[0].OriginalText == nil || *d.Audio[0].OriginalText != caption || d.Audio[0].ReceivedAt == nil || !d.Audio[0].ReceivedAt.Equal(received) {
+		t.Fatal("original caption or Telegram timestamp lost")
+	}
+	// Even a mismatched source ID in a diagnostic projection cannot expose the
+	// caption of another personal/group conversation.
+	other := domain.Conversation{ID: id + "-other", OwnerID: 43, Private: true}
+	_, e = repo.AcceptIncoming(ctx, domain.Incoming{ID: other.ID, Conversation: other, Text: "PRIVATE_OTHER_SCOPE"}, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	raw, _ = json.Marshal(domain.AudioResult{SessionID: id, ConversationID: id, IncomingID: other.ID, ArtifactID: "other-source", Status: "failed"})
+	if e = repo.SaveCheckpoint(ctx, "audio/"+other.ID, raw); e != nil {
+		t.Fatal(e)
+	}
+	d, _, e = repo.InspectSession(ctx, id, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, audio := range d.Audio {
+		if audio.ArtifactID == "other-source" && (audio.OriginalText != nil || audio.ReceivedAt != nil) {
+			t.Fatal("source metadata crossed conversation scope")
+		}
 	}
 }

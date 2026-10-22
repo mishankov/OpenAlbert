@@ -30,15 +30,23 @@ type SavedMessage struct {
 	Message    domain.Message `json:"message"`
 }
 type Detail struct {
-	Audio     []domain.AudioResult `json:"audio"`
-	Analysis  json.RawMessage      `json:"analysis,omitempty"`
-	Session   Session              `json:"session"`
-	Messages  []SavedMessage       `json:"messages"`
-	NextAfter int64                `json:"next_after,omitempty"`
-	Traces    []domain.Trace       `json:"traces"`
-	Turns     []json.RawMessage    `json:"turns"`
-	Outgoing  []domain.Outgoing    `json:"outgoing"`
-	Artifacts []domain.Artifact    `json:"artifacts"`
+	Audio     []AudioResult     `json:"audio"`
+	Analysis  json.RawMessage   `json:"analysis,omitempty"`
+	Session   Session           `json:"session"`
+	Messages  []SavedMessage    `json:"messages"`
+	NextAfter int64             `json:"next_after,omitempty"`
+	Traces    []domain.Trace    `json:"traces"`
+	Turns     []json.RawMessage `json:"turns"`
+	Outgoing  []domain.Outgoing `json:"outgoing"`
+	Artifacts []domain.Artifact `json:"artifacts"`
+}
+
+// Source text is read from the scoped inbox, never reconstructed by stripping
+// markers from the model's prepared context (which may contain the same text).
+type AudioResult struct {
+	domain.AudioResult
+	OriginalText *string    `json:"original_text,omitempty"`
+	ReceivedAt   *time.Time `json:"received_at,omitempty"`
 }
 type Store interface {
 	InspectSessions(context.Context, Filter) ([]Session, error)
