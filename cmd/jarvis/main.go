@@ -93,6 +93,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err = telegram.ConfigureCommands(ctx); err != nil {
+		return fmt.Errorf("Telegram command setup failed: %w", err)
+	}
 	var logs domain.LogReader
 	if c.VictoriaLogsURL != "" {
 		logs, err = integrations.NewVictoriaLogs(c.VictoriaLogsURL, nil)

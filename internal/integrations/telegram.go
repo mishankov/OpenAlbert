@@ -32,10 +32,11 @@ type TelegramConfig struct {
 	MaxFileBytes    int64
 }
 type Telegram struct {
-	config TelegramConfig
-	client *http.Client
-	users  map[int64]bool
-	groups map[int64]bool
+	config   TelegramConfig
+	client   *http.Client
+	users    map[int64]bool
+	groups   map[int64]bool
+	username string // Set by ConfigureCommands before polling starts.
 }
 type Update struct {
 	Offset   int64
@@ -111,6 +112,39 @@ func NewTelegram(c TelegramConfig) (*Telegram, error) {
 	}
 	return t, nil
 }
+
+// ConfigureCommands makes the keyboard commands discoverable in Telegram's
+// command menu. Call before Poll; getMe identifies commands addressed to this bot.
+func (t *Telegram) ConfigureCommands(ctx context.Context) error {
+	var me struct {
+		Username string `json:"username"`
+	}
+	if err := t.api(ctx, "getMe", map[string]any{}, &me); err != nil {
+		return err
+	}
+	if me.Username == "" {
+		return errors.New("Telegram bot username missing")
+	}
+	t.username = me.Username
+	commands := []map[string]string{
+		{"command": "new", "description": "Начать новый диалог"},
+		{"command": "stop", "description": "Остановить текущую работу"},
+	}
+	return t.api(ctx, "setMyCommands", map[string]any{"commands": commands}, nil)
+}
+
+func (t *Telegram) command(text string) (name string, otherBot bool) {
+	text = strings.TrimSpace(text)
+	command, username, directed := strings.Cut(text, "@")
+	if command != "/new" && command != "/stop" {
+		return "", false
+	}
+	if directed && (t.username == "" || !strings.EqualFold(username, t.username)) {
+		return "", true
+	}
+	return strings.TrimPrefix(command, "/"), false
+}
+
 func (t *Telegram) api(ctx context.Context, method string, payload any, out any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -255,6 +289,14 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 		add(m.Voice, "voice", "voice.ogg", "audio/ogg")
 		add(m.Audio, "audio", "audio.mp3", "audio/mpeg")
 		add(m.Video, "video", "video.mp4", "video/mp4")
+		if len(incoming.Attachments) == 0 {
+			command, otherBot := t.command(m.Text)
+			if otherBot {
+				out = append(out, update)
+				continue
+			}
+			incoming.Command = command
+		}
 		if incoming.Text != "" || len(incoming.Attachments) > 0 {
 			update.Incoming = &incoming
 		}

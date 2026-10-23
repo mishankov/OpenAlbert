@@ -146,7 +146,12 @@ def handler_for(state):
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
             method = self.path.rsplit("/", 1)[-1]
-            if method == "getUpdates":
+            if method == "getMe":
+                self.json({"ok": True, "result": {"id": 1, "is_bot": True, "username": "jarvis_smoke_bot"}})
+            elif method == "setMyCommands":
+                assert {item["command"] for item in body["commands"]} == {"new", "stop"}
+                self.json({"ok": True, "result": True})
+            elif method == "getUpdates":
                 offset = body.get("offset", 0)
                 with state.lock:
                     state.offsets.append(offset)

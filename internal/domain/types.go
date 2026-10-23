@@ -25,6 +25,7 @@ type Attachment struct {
 	ArtifactID      string `json:"artifact_id,omitempty"`
 }
 type Incoming struct {
+	Command        string       `json:"command,omitempty"` // Validated transport command, without slash or bot username.
 	AuthorName     string       `json:"author_name,omitempty"`
 	AuthorUsername string       `json:"author_username,omitempty"`
 	ID             string       `json:"id"`

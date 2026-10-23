@@ -24,8 +24,9 @@ type SessionInput struct {
 	MaxSteps       int
 }
 type Event struct {
-	ID   string
-	Stop bool
+	ID         string
+	Stop       bool
+	NewSession bool
 }
 type TaskInput struct {
 	ConversationID string
@@ -45,7 +46,11 @@ func options(ctx workflow.Context) workflow.Context {
 func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 	ctx = options(ctx)
 	sessionID := workflow.GetInfo(ctx).WorkflowExecution.RunID
+	newCommandSeen, sessionStarted := false, false
 	defer func() {
+		if newCommandSeen && !sessionStarted {
+			return // A stale command alone does not create a session to close.
+		}
 		cleanup, _ := workflow.NewDisconnectedContext(ctx)
 		_ = workflow.ExecuteActivity(cleanup, "CloseSession", sessionID).Get(cleanup, nil)
 	}()
@@ -64,12 +69,13 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			}
 			seen[ev.ID] = true
 			queue = append(queue, ev)
-			if ev.Stop && activeCancel != nil {
+			if (ev.Stop || ev.NewSession) && activeCancel != nil {
 				activeCancel()
 			}
 		}
 	})
 	turns := 0
+	transitions := 0
 	for {
 		ready, err := workflow.AwaitWithTimeout(ctx, in.IdleTimeout, func() bool { return len(queue) > 0 })
 		if err != nil {
@@ -80,6 +86,42 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 		}
 		batch := queue
 		queue = nil
+		// Keep the boundary inside this workflow so signals arriving during the
+		// transition cannot be lost or sent back into the previous session.
+		newIndex := -1
+		for i, ev := range batch {
+			if ev.NewSession {
+				newIndex = i
+				break
+			}
+		}
+		if newIndex >= 0 {
+			newCommandSeen = true
+			transitions++
+			ids := []string{}
+			for _, ev := range batch[:newIndex+1] {
+				ids = append(ids, ev.ID)
+			}
+			nextSession := agent.ID(sessionID, "new", batch[newIndex].ID)
+			var started bool
+			if err := workflow.ExecuteActivity(ctx, "StartNewSession", in.ConversationID, sessionID, nextSession, ids).Get(ctx, &started); err != nil {
+				return err
+			}
+			if started {
+				sessionID = nextSession
+				sessionStarted = true
+				queue = append(batch[newIndex+1:], queue...)
+			} else {
+				// Ignore the stale command without discarding adjacent messages.
+				remaining := append([]Event{}, batch[:newIndex]...)
+				remaining = append(remaining, batch[newIndex+1:]...)
+				queue = append(remaining, queue...)
+			}
+			if transitions >= 30 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() || workflow.GetInfo(ctx).GetCurrentHistoryLength() > 12000 {
+				break // Remaining events stay in the durable inbox for dispatch.
+			}
+			continue
+		}
 		ids := []string{}
 		stop := false
 		lastStop := -1
@@ -96,19 +138,21 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			if err := workflow.ExecuteActivity(ctx, "AcknowledgeStop", in.ConversationID, sessionID, ids).Get(ctx, nil); err != nil {
 				return err
 			}
+			sessionStarted = true
 			continue
 		}
 		runctx, cancel := workflow.WithCancel(ctx)
 		activeCancel = cancel
 		key := agent.ID(sessionID, fmt.Sprint(turns))
 		turns++
+		sessionStarted = true
 		turn, runErr := runTurn(runctx, agent.RunInput{Key: key, SessionID: sessionID, ConversationID: in.ConversationID, IncomingIDs: ids}, in.MaxSteps, func(turn *agent.Turn) error {
 			if len(queue) == 0 {
 				return nil
 			}
 			newIDs := []string{}
 			for _, ev := range queue {
-				if ev.Stop {
+				if ev.Stop || ev.NewSession {
 					return temporal.NewCanceledError()
 				}
 				newIDs = append(newIDs, ev.ID)
@@ -146,6 +190,9 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 		if turns >= 30 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() || workflow.GetInfo(ctx).GetCurrentHistoryLength() > 12000 { // Bounded histories; buffered events remain durable in the inbox and will be re-signalled.
 			break
 		}
+	}
+	if newCommandSeen && !sessionStarted {
+		return nil
 	}
 	return workflow.ExecuteActivity(ctx, "CloseSession", sessionID).Get(ctx, nil)
 }
