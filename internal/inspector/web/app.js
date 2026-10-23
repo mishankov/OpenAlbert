@@ -82,6 +82,15 @@ const state = {
   fileNext: "",
   fileToken: 0,
   fileBusy: false,
+  memoryScope: "",
+  memoryQuery: "",
+  memoryKind: "",
+  memories: [],
+  memoryNext: 0,
+  memoryToken: 0,
+  memoryBusy: false,
+  soulBusy: false,
+  soulToken: 0,
 };
 const main = $("#main");
 const logsURL = new URL(location.href);
@@ -119,9 +128,9 @@ function sessionName(s) {
 }
 function setBusy(value) {
   state.busy = value;
-  $("#refresh").disabled = value || state.fileBusy;
-  $("#refresh").setAttribute("aria-busy", String(value || state.fileBusy));
-  $("#nav-logs").setAttribute("aria-disabled", String(value || state.fileBusy));
+  $("#refresh").disabled = value || state.fileBusy || state.memoryBusy || state.soulBusy;
+  $("#refresh").setAttribute("aria-busy", String(value || state.fileBusy || state.memoryBusy || state.soulBusy));
+  $("#nav-logs").setAttribute("aria-disabled", String(value || state.fileBusy || state.memoryBusy || state.soulBusy));
 }
 function listRender() {
   const focusedHref = $("#sessions").contains(document.activeElement)
@@ -474,12 +483,15 @@ async function refresh() {
   if (
     state.busy ||
     state.fileBusy ||
+    state.memoryBusy ||
+    state.soulBusy ||
     !$("#drawer").classList.contains("hidden")
   )
     return;
   setBusy(true);
   try {
-    if (state.view === "files") await loadFiles();
+    if (state.view === "memory") await Promise.all([loadMemory(), loadSoul()]);
+    else if (state.view === "files") await loadFiles();
     else
       await Promise.all([
         loadList(false, true),
@@ -491,14 +503,38 @@ async function refresh() {
   }
 }
 function route() {
-  const view = location.hash === "#/files" ? "files" : "sessions";
+  const view = /^#\/memory(?:\?|$)/.test(location.hash)
+    ? "memory"
+    : location.hash === "#/files" ? "files" : "sessions";
   const changedView = view !== state.view;
   state.view = view;
   document.body.classList.toggle("has-files", view === "files");
-  for (const name of ["sessions", "files"]) {
+  document.body.classList.toggle("has-memory", view === "memory");
+  if (changedView) {
+    clearTimeout(fileDebounce);
+    clearTimeout(memoryDebounce);
+    ++state.fileToken;
+    ++state.memoryToken;
+    ++state.soulToken;
+    state.fileBusy = state.memoryBusy = state.soulBusy = false;
+    setBusy(state.busy);
+  }
+  for (const name of ["sessions", "memory", "files"]) {
     const link = $("#nav-" + name);
     if (view === name) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
+  }
+  if (view === "memory") {
+    ++state.detailToken;
+    closeDrawer(false);
+    state.routeTrace = "";
+    const requested = new URLSearchParams(location.hash.split("?")[1] || "").get("conversation_id");
+    if (requested) state.memoryScope = requested;
+    else if (!state.memoryScope) state.memoryScope = state.data?.session.conversation_id || "";
+    memoryShell();
+    loadSoul();
+    loadMemory();
+    return;
   }
   if (view === "files") {
     ++state.detailToken;
@@ -507,11 +543,6 @@ function route() {
     fileShell();
     loadFiles();
     return;
-  }
-  if (changedView) {
-    ++state.fileToken;
-    state.fileBusy = false;
-    setBusy(state.busy);
   }
   let match = location.hash.match(/^#\/session\/([^?]+)(?:\?(.*))?$/);
   let id = "";
@@ -545,6 +576,137 @@ function route() {
     main.innerHTML =
       '<div class="empty-panel">Выберите сессию в списке. <kbd>⌘K / Ctrl+K</kbd> — поиск.</div>';
     document.title = "Сессии · Jarvis Inspector";
+  }
+}
+
+const memoryKinds = {
+  profile: "Профиль",
+  preference: "Предпочтение",
+  fact: "Факт",
+  episode: "Эпизод",
+  hypothesis: "Предположение",
+};
+function memoryShell() {
+  state.memories = [];
+  state.memoryNext = 0;
+  document.title = "Память · Jarvis Inspector";
+  main.innerHTML = `<div class="session-toolbar memory-toolbar"><div class="session-heading"><h2>Память</h2><span class="muted">Текущие записи · сначала обновлённые</span></div><div class="memory-filters"><label>Разговор<select id="memory-scope"><option value="">Загружаем разговоры…</option></select></label><label>Поиск<div class="search-wrap"><input id="memory-search" type="search" placeholder="Текст, ID, источник или участник…" autocomplete="off" value="${esc(state.memoryQuery)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></label><label>Тип<select id="memory-kind"><option value="">Все типы</option>${Object.entries(memoryKinds).map(([key, title]) => `<option value="${key}" ${state.memoryKind === key ? "selected" : ""}>${title}</option>`).join("")}</select></label></div><p class="memory-hint">Все слова запроса должны встречаться в одной записи. Поиск без учёта регистра.</p></div><div id="memory-error" class="error hidden" role="alert"></div><details id="memory-soul" class="analysis-row"><summary title="Раскрыть или свернуть SOUL.md · Enter" aria-keyshortcuts="Enter">Личность SOUL.md <span class="muted">Имя, характер и правила общения Jarvis · общие для всех разговоров</span></summary><div class="run-body" aria-busy="true"><div id="soul-error" class="error hidden" role="alert"></div><pre class="prose" role="status">Загружаем SOUL.md…</pre></div></details><details id="memory-profile" class="analysis-row hidden"><summary>Профиль USER.md <span class="muted">Контекст новых сессий этого разговора</span></summary><div class="run-body"><pre class="prose"></pre></div></details><div id="memory-list" aria-busy="true"><div class="loading-line" role="status">Загружаем память…</div></div><div class="pagination"><span id="memory-count" role="status"></span><button id="more-memory" class="button hidden" title="Загрузить ещё записи · Enter" aria-keyshortcuts="Enter">Ещё записи</button></div>`;
+}
+async function loadSoul() {
+  if (state.view !== "memory") return;
+  const token = ++state.soulToken;
+  state.soulBusy = true;
+  setBusy(state.busy);
+  $("#memory-soul .run-body").setAttribute("aria-busy", "true");
+  $("#soul-error").classList.add("hidden");
+  try {
+    const { soul } = await api("memory/soul");
+    if (token !== state.soulToken || state.view !== "memory") return;
+    $("#memory-soul pre").textContent = soul || "Файл SOUL.md пуст.";
+  } catch (error) {
+    if (token !== state.soulToken || state.view !== "memory") return;
+    $("#soul-error").textContent = `Не удалось загрузить SOUL.md. ${error.message} Нажмите «Обновить» (Alt+R).`;
+    $("#soul-error").classList.remove("hidden");
+    $("#memory-soul pre").textContent = "";
+  } finally {
+    if (token === state.soulToken && state.view === "memory") {
+      state.soulBusy = false;
+      setBusy(state.busy);
+      $("#memory-soul .run-body").setAttribute("aria-busy", "false");
+    }
+  }
+}
+
+function scheduleMemory() {
+  clearTimeout(memoryDebounce);
+  ++state.memoryToken;
+  state.memories = [];
+  state.memoryNext = 0;
+  state.memoryBusy = true;
+  setBusy(state.busy);
+  $("#memory-list").setAttribute("aria-busy", "true");
+  $("#memory-list").innerHTML = '<div class="loading-line" role="status">Загружаем память…</div>';
+  $("#memory-count").textContent = "";
+  $("#more-memory").classList.add("hidden");
+  $("#memory-profile").classList.add("hidden");
+  $("#memory-error").classList.add("hidden");
+  memoryDebounce = setTimeout(() => loadMemory(), 250);
+}
+async function loadMemory(more = false) {
+  if (state.view !== "memory") return;
+  clearTimeout(memoryDebounce);
+  const restoreMore = more && document.activeElement === $("#more-memory");
+  const token = ++state.memoryToken;
+  state.memoryBusy = true;
+  setBusy(state.busy);
+  $("#memory-list").setAttribute("aria-busy", "true");
+  $("#more-memory").disabled = true;
+  $("#memory-error").classList.add("hidden");
+  try {
+    if (!more) {
+      const { conversations } = await api("memory/conversations");
+      if (token !== state.memoryToken || state.view !== "memory") return;
+      if (!state.memoryScope) state.memoryScope = conversations[0]?.id || "";
+      const choices = [...conversations];
+      // Keep a bookmarked scope accessible even if its conversation metadata is gone.
+      if (state.memoryScope && !choices.some((c) => c.id === state.memoryScope))
+        choices.push({ id: state.memoryScope, title: "Разговор без метаданных" });
+      $("#memory-scope").innerHTML = choices.length
+        ? choices.map((c) => `<option value="${esc(c.id)}" ${c.id === state.memoryScope ? "selected" : ""}>${esc(c.title || (c.private ? "Личный разговор" : "Групповой разговор"))} · ${esc(c.id)}</option>`).join("")
+        : '<option value="">Разговоров пока нет</option>';
+      $("#memory-scope").disabled = !choices.length;
+    }
+    const result = state.memoryScope
+      ? await api("memory?" + new URLSearchParams({
+          conversation_id: state.memoryScope,
+          q: state.memoryQuery,
+          kind: state.memoryKind,
+          after: more ? state.memoryNext : 0,
+        }))
+      : { entries: [], total: 0, next_after: 0, profile: "" };
+    if (token !== state.memoryToken || state.view !== "memory") return;
+    const focusedID = document.activeElement?.dataset.memory;
+    state.memories = more ? [...state.memories, ...result.entries] : result.entries;
+    state.memoryNext = result.next_after || 0;
+    $("#memory-profile").classList.toggle("hidden", !result.profile);
+    $("#memory-profile pre").textContent = result.profile || "";
+    $("#memory-list").innerHTML = state.memories.length
+      ? `<ul class="memory-list">${state.memories.map((e) => `<li><button class="memory-row" data-memory="${esc(e.id)}" title="Просмотреть запись · Enter" aria-keyshortcuts="Enter"><span class="memory-meta"><span>${esc(memoryKinds[e.kind] || e.kind)}</span><time>Обновлено ${esc(date(e.updated_at))}</time>${e.subject_user_id ? `<span>Участник ${esc(e.subject_user_id)}</span>` : ""}</span><span class="prose memory-preview">${esc(e.content)}</span><span class="mono muted">${esc(e.id)}</span></button></li>`).join("")}</ul>`
+      : `<div class="empty-panel">${!state.memoryScope ? "Разговоров пока нет. Память появится после общения с Jarvis." : state.memoryQuery || state.memoryKind ? "Записей с такими условиями нет. Измените или очистите фильтры." : "В этом разговоре пока нет записей памяти."}</div>`;
+    if (focusedID)
+      [...main.querySelectorAll("[data-memory]")].find((el) => el.dataset.memory === focusedID)?.focus({ preventScroll: true });
+    $("#memory-count").textContent = `Записи: ${state.memories.length} из ${result.total}`;
+    $("#more-memory").classList.toggle("hidden", !state.memoryNext);
+  } catch (error) {
+    if (token !== state.memoryToken || state.view !== "memory") return;
+    $("#memory-error").textContent = error.message;
+    $("#memory-error").classList.remove("hidden");
+    if (!state.memories.length)
+      $("#memory-list").innerHTML = '<div class="empty-panel">Не удалось загрузить память. Нажмите «Обновить» (Alt+R).</div>';
+  } finally {
+    if (token === state.memoryToken && state.view === "memory") {
+      state.memoryBusy = false;
+      setBusy(state.busy);
+      $("#memory-list").setAttribute("aria-busy", "false");
+      $("#more-memory").disabled = false;
+      if (restoreMore && document.activeElement === document.body)
+        (state.memoryNext ? $("#more-memory") : [...main.querySelectorAll("[data-memory]")].at(-1))?.focus({ preventScroll: true });
+    }
+  }
+}
+async function openMemory(id, opener) {
+  state.drawerMemoryID = id;
+  state.drawerFileKey = state.drawerTraceID = state.drawerRecordID = null;
+  const token = showDrawer("Запись памяти", opener);
+  $("#drawer-content").innerHTML = '<div class="loading-line" role="status">Загружаем запись…</div>';
+  try {
+    const e = await api("memory/entry?" + new URLSearchParams({ conversation_id: state.memoryScope, id }));
+    if (token !== state.drawerToken) return;
+    const session = e.source?.replace(/^session:/, "");
+    $("#drawer-content").innerHTML = `<div class="trace-meta"><span>${esc(memoryKinds[e.kind] || e.kind)}</span><span>Обновлено ${esc(date(e.updated_at))}</span></div><h3>Содержание</h3><div class="prose">${esc(e.content)}</div><h3>Происхождение</h3><dl class="memory-origin"><dt>ID записи</dt><dd class="mono">${esc(e.id)}</dd><dt>Разговор</dt><dd class="mono">${esc(e.scope)}</dd>${e.subject_user_id ? `<dt>Участник Telegram</dt><dd class="mono">${esc(e.subject_user_id)}</dd>` : ""}<dt>Источник</dt><dd>${session ? `<a href="#/session/${encodeURIComponent(session)}" title="Открыть сессию-источник · Enter" aria-keyshortcuts="Enter">${esc(e.source)}</a>` : "Не сохранён"}</dd>${e.source_message_id ? `<dt>ID сообщения</dt><dd class="mono">${esc(e.source_message_id)}</dd>` : ""}</dl>${e.evidence ? `<h3>Цитата-основание</h3><blockquote class="prose memory-evidence">${esc(e.evidence)}</blockquote>` : ""}<details class="trace-section"><summary>Исходная запись JSON</summary>${json(e)}</details>`;
+  } catch (error) {
+    if (token === state.drawerToken)
+      $("#drawer-content").innerHTML = `<div class="error" role="alert">${esc(error.message)}</div><p class="muted">Закройте подробности и откройте запись ещё раз.</p>`;
   }
 }
 
@@ -656,6 +818,7 @@ async function loadFiles(more = false) {
   }
 }
 async function openFile(key, opener) {
+  state.drawerMemoryID = null;
   state.drawerFileKey = key;
   state.drawerTraceID = state.drawerRecordID = null;
   const token = showDrawer("Файл", opener);
@@ -692,6 +855,7 @@ function showDrawer(title, opener) {
   return token;
 }
 function openRecord(id, opener) {
+  state.drawerMemoryID = null;
   state.drawerFileKey = null;
   state.drawerTraceID = null;
   state.drawerRecordID = id;
@@ -718,6 +882,7 @@ function openRecord(id, opener) {
   $("#drawer-content").innerHTML = json(record);
 }
 async function openTrace(id, opener) {
+  state.drawerMemoryID = null;
   state.drawerFileKey = null;
   state.drawerTraceID = id;
   state.drawerRecordID = null;
@@ -756,9 +921,11 @@ function closeDrawer(clearRoute = true) {
     const opener = state.drawerOpener?.isConnected
       ? state.drawerOpener
       : [
-          ...main.querySelectorAll("[data-trace],[data-record],[data-file]"),
+          ...main.querySelectorAll("[data-trace],[data-record],[data-file],[data-memory]"),
         ].find((el) =>
-          state.drawerFileKey
+          state.drawerMemoryID
+            ? el.dataset.memory === state.drawerMemoryID
+            : state.drawerFileKey
             ? el.dataset.file === state.drawerFileKey
             : state.drawerRecordID
               ? el.dataset.record === state.drawerRecordID
@@ -774,7 +941,7 @@ function closeDrawer(clearRoute = true) {
 }
 $("#refresh").addEventListener("click", refresh);
 $("#nav-logs").addEventListener("click", (event) => {
-  if (state.busy || state.fileBusy) event.preventDefault();
+  if (state.busy || state.fileBusy || state.memoryBusy || state.soulBusy) event.preventDefault();
 });
 $("#more-sessions").addEventListener("click", () => loadList(true));
 let debounce;
@@ -801,6 +968,15 @@ main.addEventListener("click", (event) => {
     openTrace(trace.dataset.trace, trace);
     return;
   }
+  const memory = event.target.closest("[data-memory]");
+  if (memory) {
+    openMemory(memory.dataset.memory, memory);
+    return;
+  }
+  if (event.target.closest("#more-memory")) {
+    if (!state.memoryBusy) loadMemory(true);
+    return;
+  }
   const file = event.target.closest("[data-file]");
   if (file) {
     openFile(file.dataset.file, file);
@@ -815,8 +991,23 @@ main.addEventListener("click", (event) => {
     loadDetail(state.id, true);
   }
 });
-let fileDebounce;
+let fileDebounce, memoryDebounce;
+main.addEventListener("change", (event) => {
+  if (event.target.id === "memory-scope") {
+    state.memoryScope = event.target.value;
+    history.replaceState(null, "", "#/memory?" + new URLSearchParams({ conversation_id: state.memoryScope }));
+    scheduleMemory();
+  } else if (event.target.id === "memory-kind") {
+    state.memoryKind = event.target.value;
+    scheduleMemory();
+  }
+});
 main.addEventListener("input", (event) => {
+  if (event.target.id === "memory-search") {
+    state.memoryQuery = event.target.value;
+    scheduleMemory();
+    return;
+  }
   if (event.target.id !== "file-prefix") return;
   state.filePrefix = event.target.value;
   clearTimeout(fileDebounce);
@@ -856,7 +1047,7 @@ document.addEventListener("keydown", (event) => {
   if (event.isComposing || event.keyCode === 229 || event.repeat) {
     if (
       (event.key === "Enter" || event.key === " ") &&
-      event.target.closest("button,summary,#download-file,#nav-logs")
+      event.target.closest("button,summary,#download-file,#nav-logs,#nav-memory")
     )
       event.preventDefault();
     return;
@@ -905,6 +1096,11 @@ document.addEventListener("keydown", (event) => {
     event.code === "KeyK"
   ) {
     event.preventDefault();
+    if (state.view === "memory") {
+      $("#memory-search").focus();
+      $("#memory-search").select();
+      return;
+    }
     if (state.view === "files") {
       $("#file-prefix").focus();
       $("#file-prefix").select();
@@ -925,7 +1121,7 @@ document.addEventListener("keydown", (event) => {
     event.code === "KeyL"
   ) {
     event.preventDefault();
-    if (!state.busy && !state.fileBusy) $("#nav-logs").click();
+    if (!state.busy && !state.fileBusy && !state.memoryBusy && !state.soulBusy) $("#nav-logs").click();
   }
   if (
     event.altKey &&
