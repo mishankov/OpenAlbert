@@ -156,8 +156,8 @@ func (m *Memory) ConversationHistory(ctx context.Context, scope, query string, b
 	for i := len(m.history) - 1; i >= 0 && len(out) < historyLimit(n); i-- {
 		v := m.history[i]
 		if v.ConversationID == scope && (before == 0 || v.Seq < before) &&
-			(v.Role == "user" || v.Role == "assistant") && v.Content != "" && strings.Contains(strings.ToLower(v.Content), strings.ToLower(query)) {
-			out = append(out, v)
+			(v.Role == "user" || v.Role == "assistant") && (v.Content != "" || len(v.ToolCalls) > 0) && strings.Contains(strings.ToLower(v.Content), strings.ToLower(query)) {
+			out = append(out, clone(v))
 		}
 	}
 	return out, ctx.Err()
@@ -242,7 +242,7 @@ func (m *Memory) AppendMessage(ctx context.Context, session, key string, msg dom
 		m.messageKeys[k] = true
 		m.messages[session] = append(m.messages[session], clone(msg))
 		se := m.sessions[session]
-		m.history = append(m.history, domain.HistoryMessage{Seq: int64(len(m.history) + 1), ConversationID: se.ConversationID, SessionID: session, SessionStartedAt: se.CreatedAt, Role: msg.Role, Content: historyContent(msg), AuthorID: msg.AuthorID, ReplyRequested: msg.Role == "assistant" && len(msg.ToolCalls) > 0})
+		m.history = append(m.history, domain.HistoryMessage{Seq: int64(len(m.history) + 1), ConversationID: se.ConversationID, SessionID: session, SessionStartedAt: se.CreatedAt, Role: msg.Role, Content: historyContent(msg), AuthorID: msg.AuthorID, ToolCalls: historyToolCalls(msg)})
 	}
 	return nil
 }
@@ -358,7 +358,7 @@ func (m *Memory) EnqueueOutgoing(ctx context.Context, o domain.Outgoing) error {
 			m.analyzed[session.ID] = true
 			m.messages[session.ID] = []domain.Message{message}
 			m.messageKeys[taskKey(session.ID, o.ID)] = true
-			m.history = append(m.history, domain.HistoryMessage{Seq: int64(len(m.history) + 1), ConversationID: session.ConversationID, SessionID: session.ID, SessionStartedAt: session.CreatedAt, Role: message.Role, Content: historyContent(message), ReplyRequested: true})
+			m.history = append(m.history, domain.HistoryMessage{Seq: int64(len(m.history) + 1), ConversationID: session.ConversationID, SessionID: session.ID, SessionStartedAt: session.CreatedAt, Role: message.Role, Content: historyContent(message), ToolCalls: historyToolCalls(message)})
 		}
 	}
 	return nil

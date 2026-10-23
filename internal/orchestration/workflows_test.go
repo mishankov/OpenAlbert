@@ -350,8 +350,8 @@ func TestStepBudgetStopsRunAndNotifiesUser(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 2})
 	requireWorkflowOK(t, env)
-	if model.count() != 2 {
-		t.Fatalf("step budget ignored: %d", model.count())
+	if model.count() != 3 {
+		t.Fatalf("research budget plus one finalization call ignored: %d", model.count())
 	}
 	out, _ := repo.PendingOutgoing(context.Background(), 10)
 	if len(out) != 1 || !strings.Contains(out[0].Text, "Не удалось") {
@@ -695,21 +695,24 @@ func TestFinalTextIsSavedWithoutDelivery(t *testing.T) {
 	}
 }
 
-func TestFinalResponseFinishesBackgroundTurnAndPersistsTaskProgress(t *testing.T) {
+func TestBackgroundTaskPersistsProgressAndInitiativePreservesIt(t *testing.T) {
 	for _, initiative := range []bool{false, true} {
 		t.Run(fmt.Sprintf("initiative=%t", initiative), func(t *testing.T) {
 			a, repo, _, conv := newFixture(t)
 			ctx := context.Background()
 			const taskID = "monitor"
 			nextRun := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
-			if _, err := repo.CreateTask(ctx, domain.Task{ID: taskID, ConversationID: conv.ID, Status: "running", Goal: "Check for updates"}); err != nil {
+			if _, err := repo.CreateTask(ctx, domain.Task{ID: taskID, ConversationID: conv.ID, Status: "running", Goal: "Check for updates", Result: "Last useful result"}); err != nil {
 				t.Fatal(err)
 			}
-			model := &scriptedModel{run: func(n int, _ []domain.Message) (domain.Message, error) {
+			model := &scriptedModel{run: func(n int, messages []domain.Message) (domain.Message, error) {
 				switch n {
 				case 0:
 					return calls(call("progress", "task_update", map[string]string{"id": taskID, "status": "waiting", "result": "Checked: unchanged", "next_run_at": nextRun.Format(time.RFC3339)})), nil
 				case 1:
+					if agent.ToolFailed(messages[len(messages)-1].Content) != initiative {
+						t.Fatal("unexpected task update authorization")
+					}
 					return finish("Ничего не отправляю — проверка без новостей."), nil
 				default:
 					t.Fatal("final response did not end the turn")
@@ -728,7 +731,11 @@ func TestFinalResponseFinishesBackgroundTurnAndPersistsTaskProgress(t *testing.T
 			if err := env.GetWorkflowResult(&turn); err != nil {
 				t.Fatal(err)
 			}
-			if turn.Sent || turn.Stats.FinishReason != "no_reply" || turn.Stats.ToolErrors != 0 || turn.Stats.ToolCalls != 1 || model.count() != 2 {
+			wantErrors := 0
+			if initiative {
+				wantErrors = 1
+			}
+			if turn.Sent || turn.Stats.FinishReason != "no_reply" || turn.Stats.ToolErrors != wantErrors || turn.Stats.ToolCalls != 1 || model.count() != 2 {
 				t.Fatalf("silent completion failed: %+v", turn)
 			}
 			outgoing, err := repo.PendingOutgoing(ctx, 10)
@@ -736,12 +743,19 @@ func TestFinalResponseFinishesBackgroundTurnAndPersistsTaskProgress(t *testing.T
 				t.Fatalf("silent check sent a message: %+v %v", outgoing, err)
 			}
 			task, found, err := repo.Task(ctx, conv.ID, taskID)
-			if err != nil || !found || task.Status != "waiting" || task.Result != "Checked: unchanged" || !task.NextRunAt.Equal(nextRun) {
+			if err != nil || !found {
+				t.Fatalf("task missing: %v", err)
+			}
+			if initiative {
+				if task.Status != "running" || task.Result != "Last useful result" || !task.NextRunAt.IsZero() {
+					t.Fatalf("initiative overwrote task progress: %+v", task)
+				}
+			} else if task.Status != "waiting" || task.Result != "Checked: unchanged" || !task.NextRunAt.Equal(nextRun) {
 				t.Fatalf("silent completion lost progress: %+v %v", task, err)
 			}
 			raw, found, err := repo.LoadCheckpoint(ctx, "turn-done/"+in.Key)
 			var saved agent.Turn
-			if err != nil || !found || json.Unmarshal(raw, &saved) != nil || !saved.Done || saved.Sent || saved.Stats.FinishReason != "no_reply" {
+			if err != nil || !found || json.Unmarshal(raw, &saved) != nil || !saved.Done || saved.Sent || saved.Stats.FinishReason != "no_reply" || saved.LastText != turn.LastText || saved.LastText == "" {
 				t.Fatalf("silent completion was not checkpointed: %+v %v", saved, err)
 			}
 		})

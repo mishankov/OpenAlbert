@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"jarvis/internal/agent"
 	"jarvis/internal/domain"
+
+	"go.temporal.io/sdk/workflow"
 )
 
 type diagnosticLogs struct{ calls atomic.Int32 }
@@ -16,6 +19,47 @@ type diagnosticLogs struct{ calls atomic.Int32 }
 func (l *diagnosticLogs) Search(_ context.Context, f domain.LogFilter) (domain.LogSearch, error) {
 	l.calls.Add(1)
 	return domain.LogSearch{ConversationID: f.ConversationID, Summary: []domain.LogCount{{Operation: "turn.complete", Result: "error", ErrorCode: "step_limit", Count: 1}}, Events: []map[string]string{{"operation": "turn.complete", "result": "error", "error_code": "step_limit", "turn_id": "past-turn", "processing_ms": "87000"}}}, nil
+}
+
+func TestScheduledOwnerAuditReadsLogsAndSavesResultSilently(t *testing.T) {
+	a, repo, _, conv := newFixture(t)
+	a.OwnerUserID = conv.OwnerID
+	logs := &diagnosticLogs{}
+	a.Logs = logs
+	const taskID = "night-audit"
+	ctx := context.Background()
+	_, err := repo.CreateTask(ctx, domain.Task{ID: taskID, ConversationID: conv.ID, Title: "Night audit", Goal: "Read logs and save the result without a notification", Status: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Model = &scriptedModel{run: func(n int, messages []domain.Message) (domain.Message, error) {
+		switch n {
+		case 0:
+			return calls(call("logs", "logs_search", map[string]string{"since": "2026-10-22T00:00:00Z", "until": "2026-10-23T00:00:00Z"})), nil
+		case 1:
+			last := messages[len(messages)-1]
+			if last.Role != "tool" || !strings.Contains(last.Content, "step_limit") || strings.Contains(last.Content, "logs_access_denied") {
+				t.Fatal("audit did not receive logs")
+			}
+			return calls(call("save", "task_update", map[string]string{"id": taskID, "result": "One turn reached step_limit", "status": "completed"})), nil
+		default:
+			return finish("Audit saved quietly."), nil
+		}
+	}}
+	env := newEnv(a)
+	env.ExecuteWorkflow(func(wctx workflow.Context) error {
+		turn, err := runTurn(options(wctx), agent.RunInput{Key: "audit-run", SessionID: "audit-session", ConversationID: conv.ID, TaskID: taskID}, 4)
+		if err != nil {
+			return err
+		}
+		return workflow.ExecuteActivity(options(wctx), "Finish", finishInput(turn, nil)).Get(wctx, nil)
+	})
+	requireWorkflowOK(t, env)
+	rows, err := repo.PendingOutgoing(ctx, 10)
+	task, found, taskErr := repo.Task(ctx, conv.ID, taskID)
+	if err != nil || taskErr != nil || len(rows) != 0 || !found || task.Result != "One turn reached step_limit" || logs.calls.Load() != 1 {
+		t.Fatalf("audit failed or notified: %+v %+v %v %v", task, rows, err, taskErr)
+	}
 }
 
 func TestOwnerCanReadDiagnosticsAndReplyWithoutChangingThePastRun(t *testing.T) {

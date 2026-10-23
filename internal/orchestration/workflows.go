@@ -183,8 +183,10 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			return err
 		}
 		if runErr != nil && !temporal.IsCanceledError(runErr) {
-			if err := workflow.ExecuteActivity(ctx, "NotifyFailure", in.ConversationID, key).Get(ctx, nil); err != nil {
-				return err
+			if !turn.Sent || workflow.GetVersion(ctx, "failure-after-reply/"+key, workflow.DefaultVersion, 1) == workflow.DefaultVersion {
+				if err := workflow.ExecuteActivity(ctx, "NotifyFailure", in.ConversationID, key).Get(ctx, nil); err != nil {
+					return err
+				}
 			}
 		}
 		if turns >= 30 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() || workflow.GetInfo(ctx).GetCurrentHistoryLength() > 12000 { // Bounded histories; buffered events remain durable in the inbox and will be re-signalled.
@@ -399,7 +401,70 @@ steps:
 			return turn, nil
 		}
 	}
+	if in.TaskID == "" && !in.Initiative && !turn.Sent && workflow.GetVersion(ctx, "budget-finalization/"+in.Key, workflow.DefaultVersion, 1) != workflow.DefaultVersion {
+		return finalizeBudget(ctx, turn, maxSteps, steer...)
+	}
 	return turn, temporal.NewNonRetryableApplicationError("agent step limit reached", "step_limit", nil)
+}
+
+// One reserved synthesis call can use existing evidence but cannot continue
+// research or mutate task state. The caller retains NotifyFailure as a fallback.
+func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, steer ...func(*agent.Turn) error) (agent.Turn, error) {
+	if len(steer) > 0 {
+		if err := steer[0](&turn); err != nil {
+			return turn, err
+		}
+	}
+	turn.Messages = append(turn.Messages, domain.Message{Role: "user", Content: "The research step budget is exhausted. This is the single reserved finalization step. Stop researching and use send_message now to answer the latest user request from the evidence already collected. Give a useful partial result when possible, clearly mark gaps and uncertainty, and never invent missing facts or claim unfinished work succeeded. If the evidence is insufficient, say what prevented completion. Only send_message is available; do not request other tools."})
+	turn.Messages = agent.CompactContext(turn.Messages)
+	var result agent.ModelOutput
+	turn.Stats.ModelCalls++
+	if err := workflow.ExecuteActivity(ctx, "ModelCall", agent.ModelInput{Turn: turn, Step: step, Finalize: true}).Get(ctx, &result); err != nil {
+		return turn, err
+	}
+	turn.Stats.InputTokens += result.InputTokens
+	turn.Stats.OutputTokens += result.OutputTokens
+	if len(steer) > 0 {
+		before := len(turn.Input.IncomingIDs)
+		if err := steer[0](&turn); err != nil {
+			return turn, err
+		}
+		if len(turn.Input.IncomingIDs) > before {
+			return turn, temporal.NewNonRetryableApplicationError("agent step limit reached after new input", "step_limit", nil)
+		}
+	}
+	message := result.Message
+	turn.Messages = append(turn.Messages, message)
+	if err := workflow.ExecuteActivity(ctx, "PersistMessage", turn.Input.SessionID, fmt.Sprintf("%s/assistant/%d", turn.Input.Key, step), message).Get(ctx, nil); err != nil {
+		return turn, err
+	}
+	for _, call := range message.ToolCalls {
+		// Validate even a forged model response; advertised tools are not a guard.
+		var output string
+		if call.Name != "send_message" || turn.Sent {
+			output = `{"error":"Finalization only permits one successful send_message; no further actions are executed."}`
+		} else {
+			recordTool(&turn, call.Name)
+			if err := workflow.ExecuteActivity(ctx, "ToolCall", toolInput(turn, step, call)).Get(ctx, &output); err != nil {
+				turn.Stats.ToolErrors++
+				return turn, err
+			}
+			if agent.ToolFailed(output) {
+				turn.Stats.ToolErrors++
+			} else {
+				turn.Sent = true
+			}
+		}
+		toolMessage := domain.Message{Role: "tool", Content: output, ToolCallID: call.ID}
+		turn.Messages = append(turn.Messages, toolMessage)
+		if err := workflow.ExecuteActivity(ctx, "PersistMessage", turn.Input.SessionID, fmt.Sprintf("%s/tool/%d/%s", turn.Input.Key, step, call.ID), toolMessage).Get(ctx, nil); err != nil {
+			return turn, err
+		}
+	}
+	if turn.Sent {
+		return turn, nil
+	}
+	return turn, temporal.NewNonRetryableApplicationError("agent finalization did not queue a reply", "step_limit", nil)
 }
 
 func TaskWorkflow(ctx workflow.Context, in TaskInput) error {

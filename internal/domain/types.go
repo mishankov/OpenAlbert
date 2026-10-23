@@ -141,15 +141,22 @@ type Session struct {
 // HistoryMessage is a saved user/assistant message with its original scope.
 // SessionStartedAt is not the individual message's timestamp.
 type HistoryMessage struct {
-	AuthorID         int64     `json:"author_id,omitempty"`
-	ReplyRequested   bool      `json:"reply_requested,omitempty"`
-	Truncated        bool      `json:"truncated,omitempty"`
-	Seq              int64     `json:"seq"`
-	ConversationID   string    `json:"conversation_id"`
-	SessionID        string    `json:"session_id"`
-	SessionStartedAt time.Time `json:"session_started_at"`
-	Role             string    `json:"role"`
-	Content          string    `json:"content"`
+	AuthorID         int64             `json:"author_id,omitempty"`
+	ToolCalls        []HistoryToolCall `json:"tool_calls,omitempty"`
+	Truncated        bool              `json:"truncated,omitempty"`
+	Seq              int64             `json:"seq"`
+	ConversationID   string            `json:"conversation_id"`
+	SessionID        string            `json:"session_id"`
+	SessionStartedAt time.Time         `json:"session_started_at"`
+	Role             string            `json:"role"`
+	Content          string            `json:"content"`
+}
+
+// HistoryToolCall identifies an actual send_message call. Its text is already
+// included in HistoryMessage.Content; full arguments remain in stored messages.
+type HistoryToolCall struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // Repository stores operational state. All mutation keys supplied by callers must be idempotent.

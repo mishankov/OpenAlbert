@@ -95,7 +95,8 @@ func httpDiagnostic(code int) Diagnostic {
 }
 
 var known = map[string]Diagnostic{
-	"logs_access_denied":             {Code: "logs_access_denied", Reason: "Log search requires the owner's interactive private chat"},
+	"initiative_task_update_denied":  {Code: "initiative_task_update_denied", Reason: "Initiative checks cannot modify existing tasks"},
+	"logs_access_denied":             {Code: "logs_access_denied", Reason: "Log search requires the owner's private chat or its scheduled tasks"},
 	"logs_disabled":                  {Code: "logs_disabled", Reason: "VictoriaLogs read access is not configured"},
 	"logs_invalid_response":          {Code: "logs_invalid_response", Reason: "VictoriaLogs returned malformed data or data outside the authorized conversation"},
 	"logs_response_limit":            {Code: "logs_response_limit", Reason: "VictoriaLogs response exceeds the read limit or could not be read"},
@@ -146,8 +147,9 @@ var known = map[string]Diagnostic{
 // Only exact errors authored by this project are translated. Arbitrary error
 // strings, URLs and upstream bodies never become diagnostic log fields.
 var errorCodes = map[string]string{
-	"log search is only available in the owner's interactive private chat": "logs_access_denied",
-	"log search is disabled; VICTORIALOGS_URL is not configured":           "logs_disabled",
+	"initiative checks cannot update existing tasks; read tasks or create a justified new task, and keep the check result in the run history": "initiative_task_update_denied",
+	"log search is only available in the owner's private chat or its scheduled tasks":                                                         "logs_access_denied",
+	"log search is disabled; VICTORIALOGS_URL is not configured":                                                                              "logs_disabled",
 	"invalid log filters":                                                    "invalid_arguments",
 	"log timestamps must be RFC3339 with a timezone":                         "invalid_arguments",
 	"log time range must be positive and at most 24 hours":                   "invalid_arguments",

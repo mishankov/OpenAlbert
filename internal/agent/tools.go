@@ -55,7 +55,7 @@ func Definitions() []domain.Tool {
 		{Name: "task_read", Description: "Read saved task status, result, last update, next check. Reading does not execute it.", Parameters: schema(`"id":{"type":"string"}`, "id")},
 		{Name: "task_update", Description: "Update a task goal, result, status or schedule. Status: queued, running, waiting, paused, completed, cancelled, failed. Completed and cancelled tasks stop. To resume use queued. Use for progress and stop requests.", Parameters: schema(`"id":{"type":"string"},"goal":{"type":"string"},"result":{"type":"string"},"status":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0}`, "id")},
 		{Name: "conversation_list", Description: "List readable saved conversations. In the owner's private chat includes all known groups; elsewhere only the current conversation. Use before recalling group discussions. Does not send messages to those chats.", Parameters: schema(``)},
-		{Name: "conversation_history", Description: "Search or read saved user/assistant messages across sessions, including active sessions. conversation_id defaults to this chat; only the owner's private chat can read groups. Results newest first with original scope, session and sequence. Use for earlier messages and who said what; memory_search is not a complete message log. Optional query is one literal case-insensitive substring of the message, not keywords combined with AND or OR; use a short distinctive fragment. Omit query or use an empty string to read recent messages. Use next_before_seq as before_seq to page backwards. session_started_at is the session start, not the message timestamp. Only messages actually received and processed by this bot are available. reply_requested marks a saved send_message request, not confirmation of delivery.", Parameters: schema(`"conversation_id":{"type":"string"},"query":{"type":"string","description":"One literal substring of a saved message, not a list of keywords. Omit or use an empty string to read recent messages."},"before_seq":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}`)},
+		{Name: "conversation_history", Description: "Search or read saved user/assistant messages across sessions, including active sessions. conversation_id defaults to this chat; only the owner's private chat can read groups. Results newest first with original scope, session and sequence. Use for earlier messages and who said what; memory_search is not a complete message log. Optional query is one literal case-insensitive substring of the message, not keywords combined with AND or OR; use a short distinctive fragment. Omit query or use an empty string to read recent messages. Use next_before_seq as before_seq to page backwards. session_started_at is the session start, not the message timestamp. Only messages actually received and processed by this bot are available. tool_calls lists the IDs and names of actual send_message calls; their text is included in content. An ordinary assistant text without send_message is internal run history. A send_message call is a request to send, not confirmation of delivery.", Parameters: schema(`"conversation_id":{"type":"string"},"query":{"type":"string","description":"One literal substring of a saved message, not a list of keywords. Omit or use an empty string to read recent messages."},"before_seq":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}`)},
 		{Name: "memory_search", Description: "Search saved memory entries by literal, case-insensitive substrings, NOT semantic search. Every whitespace-separated query term must occur in the SAME entry (content, source or kind). Punctuation is literal; commas do not mean OR. No stemming, translation, synonyms, regex or wildcard syntax. Start with one distinctive name or keyword, for example Polka; search unrelated topics in separate calls. After an empty result, shorten the query or try an alternative spelling; adding words narrows the search. An empty query returns up to 50 most recently updated readable entries, not a complete export. An empty result means no matching entries, not that no memories exist. In the owner's private chat searches this chat and saved groups by default; optional conversation_id selects an authorized scope. Results include scope and source; do not attribute group participants' facts to the owner. Use task_find/task_read for assignments and schedules, conversation_history for earlier messages.", Parameters: schema(`"query":{"type":"string","description":"Literal terms that must all match one entry. Prefer a single distinctive term, e.g. Polka. Empty string lists recent entries; do not use comma-separated topics."},"conversation_id":{"type":"string","description":"Optional authorized conversation scope. Omit to search all scopes readable from this chat."}`, "query")},
 		{Name: "memory_read", Description: "Read a memory and its source. For a group result found from the owner's private chat, supply its conversation_id from the result scope.", Parameters: schema(`"id":{"type":"string"},"conversation_id":{"type":"string"}`, "id")},
 		{Name: "memory_update", Description: "Save useful user memory with provenance. Use profile for core user facts (name, home city, timezone), preference only for explicitly stated lasting preferences, fact for contextual facts, episode for past events, hypothesis for uncertain inferences. Profile and preference rebuild USER.md automatically. A one-time request/reminder is task state, not a lasting preference; do not save it as one. Update the same ID for corrections; delete obsolete memory using delete=true.", Parameters: schema(`"id":{"type":"string"},"content":{"type":"string"},"kind":{"type":"string","enum":["profile","fact","preference","episode","hypothesis"]},"delete":{"type":"boolean"}`)},
@@ -109,6 +109,13 @@ type ToolInput struct {
 	Background   bool
 	StartedAt    time.Time
 	ReceivedAt   time.Time
+}
+
+func taskUpdateAccess(in ToolInput) error {
+	if in.Background {
+		return errors.New("initiative checks cannot update existing tasks; read tasks or create a justified new task, and keep the check result in the run history")
+	}
+	return nil
 }
 
 func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
@@ -235,6 +242,9 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 		}
 		return t, nil
 	case "task_update":
+		if err := taskUpdateAccess(in); err != nil {
+			return nil, err
+		}
 		t, found, err := a.Repo.Task(ctx, scope, p.ID)
 		if err != nil {
 			return nil, err
@@ -451,7 +461,10 @@ func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 	interactive := turn.Input.TaskID == "" && !turn.Input.Initiative
 	filtered := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
-		if tool.Name == "logs_search" && (!a.isOwnerPrivate(turn.Conversation) || !interactive) {
+		if tool.Name == "task_update" && turn.Input.Initiative {
+			continue
+		}
+		if tool.Name == "logs_search" && (!a.isOwnerPrivate(turn.Conversation) || turn.Input.Initiative) {
 			continue
 		}
 		if tool.Name == "report_progress" && !interactive {

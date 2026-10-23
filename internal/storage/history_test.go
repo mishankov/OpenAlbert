@@ -68,7 +68,7 @@ func historyContract(t *testing.T, repo domain.Repository) {
 		t.Fatal(err)
 	}
 	rows, err := repo.ConversationHistory(ctx, group.ID, "", 0, 2)
-	if err != nil || len(rows) != 2 || !rows[0].ReplyRequested || !strings.Contains(rows[0].Content, "Ответ команды") {
+	if err != nil || len(rows) != 2 || len(rows[0].ToolCalls) != 1 || rows[0].ToolCalls[0].Name != "send_message" || rows[0].ToolCalls[0].ID != "reply" || !strings.Contains(rows[0].Content, "Ответ команды") {
 		t.Fatalf("first page: %v %v", rows, err)
 	}
 	if rows[1].AuthorID != 7 {
@@ -103,6 +103,49 @@ func historyContract(t *testing.T, repo domain.Repository) {
 	if err != nil || !found {
 		t.Fatal("conversation catalog missing title")
 	}
+	historyCallsContract(t, repo, group.ID, nonce+"active")
+}
+
+func historyCallsContract(t *testing.T, repo domain.Repository, scope, session string) {
+	t.Helper()
+	ctx := context.Background()
+	cases := []struct {
+		key     string
+		message domain.Message
+	}{
+		{"draft", domain.Message{Role: "assistant", Content: "Identical visible text", ToolCalls: []domain.ToolCall{{ID: "find", Name: "task_find", Arguments: json.RawMessage(`{}`)}}}},
+		{"reply", domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "search", Name: "memory_search", Arguments: json.RawMessage(`{"query":"other tool"}`)}, {ID: "actual-send", Name: "send_message", Arguments: json.RawMessage(`{"text":"Identical visible text"}`)}}}},
+		{"artifact", domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "send-file", Name: "send_message", Arguments: json.RawMessage(`{"text":"","artifact_id":"file"}`)}}}},
+	}
+	for _, tc := range cases {
+		if err := repo.AppendMessage(ctx, session, "call-contract-"+tc.key, tc.message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := repo.ConversationHistory(ctx, scope, "Identical visible text", 0, 10)
+	if err != nil || len(rows) != 2 || len(rows[0].ToolCalls) != 1 || rows[0].ToolCalls[0].Name != "send_message" || rows[0].ToolCalls[0].ID != "actual-send" || len(rows[1].ToolCalls) != 0 || rows[0].Content != rows[1].Content {
+		t.Fatalf("actual reply calls not distinguished from internal text: %+v %v", rows, err)
+	}
+	encoded, _ := json.Marshal(rows)
+	var serialized []map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &serialized); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range serialized {
+		if _, exists := row["reply_requested"]; exists {
+			t.Fatal("obsolete flag still emitted")
+		}
+	}
+	// Returned metadata must not alias mutable in-memory storage.
+	rows[0].ToolCalls[0].Name = "mutated"
+	rows, err = repo.ConversationHistory(ctx, scope, "", 0, 1)
+	if err != nil || len(rows) != 1 || rows[0].Content != "" || len(rows[0].ToolCalls) != 1 || rows[0].ToolCalls[0].ID != "send-file" {
+		t.Fatalf("artifact-only send omitted from history: %+v %v", rows, err)
+	}
+	rows, err = repo.ConversationHistory(ctx, scope, "Identical visible text", 0, 10)
+	if err != nil || len(rows) != 2 || len(rows[0].ToolCalls) != 1 || rows[0].ToolCalls[0].Name != "send_message" {
+		t.Fatal("caller mutated stored call metadata")
+	}
 }
 
 func TestGroupOutgoingHistoryContract(t *testing.T) {
@@ -130,7 +173,7 @@ func groupOutgoingContract(t *testing.T, repo domain.Repository) {
 		}
 	}
 	rows, err := repo.ConversationHistory(ctx, out.Conversation.ID, "", 0, 20)
-	if err != nil || len(rows) != 1 || rows[0].Content != out.Text || !rows[0].ReplyRequested {
+	if err != nil || len(rows) != 1 || rows[0].Content != out.Text || len(rows[0].ToolCalls) != 1 || rows[0].ToolCalls[0].Name != "send_message" || rows[0].ToolCalls[0].ID != out.ID {
 		t.Fatalf("wrong group history: %v %v", rows, err)
 	}
 	messages, err := repo.Messages(ctx, rows[0].SessionID)
