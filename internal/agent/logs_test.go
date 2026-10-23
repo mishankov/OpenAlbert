@@ -17,7 +17,7 @@ func (s *logReaderSpy) Search(_ context.Context, f domain.LogFilter) (domain.Log
 	return domain.LogSearch{ConversationID: f.ConversationID, Summary: []domain.LogCount{{Operation: "llm.complete", Result: "error", ErrorCode: "http_400", Count: 2}}, Events: []map[string]string{{"turn_id": f.TurnID, "error_code": "http_400"}}}, nil
 }
 
-func TestLogsAreOnlyAdvertisedAndExecutedInOwnersInteractivePrivateChat(t *testing.T) {
+func TestLogsAreOnlyAvailableInOwnersPrivateChatAndScheduledTasks(t *testing.T) {
 	a, _, _, owner := fixture(t)
 	a.OwnerUserID = owner.OwnerID
 	spy := &logReaderSpy{}
@@ -31,7 +31,10 @@ func TestLogsAreOnlyAdvertisedAndExecutedInOwnersInteractivePrivateChat(t *testi
 	}{
 		{"owner", owner, "", false, true},
 		{"owner initiative", owner, "", true, false},
-		{"owner task", owner, "task", false, false},
+		{"owner task", owner, "task", false, true},
+		{"owner initiative with task", owner, "task", true, false},
+		{"group task", domain.Conversation{ID: "group:1", ChatID: -1, OwnerID: owner.OwnerID}, "task", false, false},
+		{"other private task", domain.Conversation{ID: "personal:8", Private: true, ChatID: 8, OwnerID: 8}, "task", false, false},
 		{"group owned by owner", domain.Conversation{ID: "group:1", ChatID: -1, OwnerID: owner.OwnerID}, "", false, false},
 		{"other private", domain.Conversation{ID: "personal:8", Private: true, ChatID: 8, OwnerID: 8}, "", false, false},
 		{"spoofed owner", domain.Conversation{ID: "personal:8", Private: true, ChatID: 8, OwnerID: owner.OwnerID}, "", false, false},
@@ -113,6 +116,12 @@ func TestCachedLogResultCannotBypassOwnerChecks(t *testing.T) {
 		t.Fatalf("cache bypassed owner check: %s %v", out, err)
 	}
 	in.Conversation = owner
+	in.Background = true
+	out, err = a.ToolCall(context.Background(), in)
+	if err != nil || strings.Contains(out, "private-owner-turn") || !strings.Contains(out, "logs_access_denied") || len(spy.filters) != 1 {
+		t.Fatalf("initiative replayed diagnostics from cache: %s %v", out, err)
+	}
+	in.Background = false
 	a.Logs = nil
 	out, err = a.ToolCall(context.Background(), in)
 	if err != nil || strings.Contains(out, "private-owner-turn") || !strings.Contains(out, "logs_disabled") {
