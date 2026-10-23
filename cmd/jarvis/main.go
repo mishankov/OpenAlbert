@@ -148,6 +148,7 @@ func run() error {
 		}
 	}
 	inspector.Register(mux, repo, artifacts)
+	inspector.RegisterMemory(mux, repo, knowledgeStore)
 	runtime.Start(ctx)
 	defer runtime.Wait()
 	defer cancel()
