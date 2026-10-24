@@ -79,9 +79,14 @@ def main():
     assert config() == config("compose.yaml"), "Default Compose must use the published images"
     current = check_pair({})
     assert current["name"] == "openalbert", "Unexpected Compose project name"
+    assert "stt" in current["services"], "Example settings must enable bundled speech recognition"
     for stt_url in ["", "http://speech.example:8080/v1"]:
         for browser in ["true", "false"]:
             check_pair({"STT_BASE_URL": stt_url, "BROWSER_ENABLED": browser})
+        external = check_pair({"STT_BASE_URL": stt_url, "COMPOSE_PROFILES": ""})
+        assert "stt" not in external["services"], "Disabled bundled speech recognition must not start"
+        dependency = external["services"]["openalbert"].get("depends_on", {}).get("stt")
+        assert dependency is None or dependency.get("required") is False, "External speech recognition still requires the bundled service"
     for logs_url in ["", "http://logs.example:9428"]:
         inspector_url = "https://inspect.example/inspect/"
         release = check_pair({"VICTORIALOGS_URL": logs_url, "INSPECTOR_PUBLIC_URL": inspector_url})

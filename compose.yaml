@@ -18,6 +18,7 @@ x-logging: &logging
 
 services:
   stt:
+    profiles: [local-stt]
     labels:
       compose_service: stt
     image: "${OPENALBERT_IMAGE_PREFIX:?Set OPENALBERT_IMAGE_PREFIX to ghcr.io/owner/repository}/stt:${OPENALBERT_IMAGE_TAG:?Set OPENALBERT_IMAGE_TAG to a published sha tag or master}"
@@ -197,6 +198,7 @@ services:
     depends_on:
       stt:
         condition: service_started
+        required: false
       postgres:
         condition: service_healthy
       temporal:

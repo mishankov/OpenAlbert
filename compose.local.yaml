@@ -17,6 +17,7 @@ x-logging: &logging
 
 services:
   stt:
+    profiles: [local-stt]
     labels:
       compose_service: stt
     build:
@@ -203,6 +204,7 @@ services:
     depends_on:
       stt:
         condition: service_started
+        required: false
       postgres:
         condition: service_healthy
       temporal:

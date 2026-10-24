@@ -86,7 +86,10 @@ class FakeState:
                 self.analyses += 1
             return {"role": "assistant", "content": json.dumps({"summary": self.marker,
                 "memories": [{"content": self.marker + " analyzed preference", "kind": "preference"}]})}
-        last_user = max(i for i, message in enumerate(messages) if message["role"] == "user")
+        # Background notification rules follow the actual task as another user
+        # message. Select the task, while retaining subsequent tool results.
+        last_user = max(i for i, message in enumerate(messages)
+                        if message["role"] == "user" and not str(message["content"]).startswith("Complete the background work."))
         user_text = messages[last_user]["content"]
         if not isinstance(user_text, str):
             user_text = " ".join(item.get("text", "") for item in user_text)
@@ -110,7 +113,7 @@ class FakeState:
                       "result": self.marker + " task persisted"}, "task_done"),
                      self.call("send_message", {"text": self.marker + ": completed"}, "notify_done")]
         else:
-            assert self.marker in user_text, "unexpected model request"
+            assert self.marker in user_text, f"unexpected model request: {user_text[:500]!r}"
             later = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=5)).isoformat()
             calls = [self.call("memory_update", {"content": self.marker + " preference", "kind": "preference"}, "memory"),
                      self.call("task_create", {"title": self.marker, "goal": self.marker,
