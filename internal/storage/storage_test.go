@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,8 @@ func repositoryContract(t *testing.T, r domain.Repository) {
 	other := nonce + ":group"
 	conv := domain.Conversation{ID: scope, ChatID: 123, OwnerID: 321, Private: true}
 	incoming := domain.Incoming{ID: nonce + ":in", Conversation: conv, Text: "hello", Attachments: []domain.Attachment{{Name: "image.png", Data: []byte("image bytes")}}}
+	incoming.ReplyTo = &domain.ReplyContext{MessageID: 42, AuthorID: 7, AuthorName: "Альберт", AuthorIsBot: true, Text: "Исходное сообщение", MediaKinds: []string{"image"}}
+	incoming.Quote = &domain.MessageQuote{Text: "сообщение", Position: 9, IsManual: true}
 	accepted, err := r.AcceptIncoming(ctx, incoming, 101)
 	if err != nil || !accepted {
 		t.Fatalf("accept: %v %v", accepted, err)
@@ -62,6 +65,9 @@ func repositoryContract(t *testing.T, r domain.Repository) {
 	got, ok, err := r.Incoming(ctx, incoming.ID)
 	if err != nil || !ok || got.Text != "hello" || len(got.Attachments) != 1 || string(got.Attachments[0].Data) != "image bytes" {
 		t.Fatalf("incoming %#v %v %v", got, ok, err)
+	}
+	if !reflect.DeepEqual(got.ReplyTo, incoming.ReplyTo) || !reflect.DeepEqual(got.Quote, incoming.Quote) {
+		t.Fatalf("durable inbox lost reply/quote: reply=%+v quote=%+v", got.ReplyTo, got.Quote)
 	}
 	pending, err := r.PendingIncoming(ctx, 1000)
 	if err != nil {
