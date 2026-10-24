@@ -18,6 +18,14 @@ import (
 const MessageSignal = "incoming"
 const TaskSignal = "changed"
 
+// QueueHandoffSignal is used only by an explicit deployment maintenance worker.
+const QueueHandoffSignal = "deployment-queue-handoff"
+
+type QueueHandoff struct {
+	Queue    string
+	ResumeAt time.Time
+}
+
 type SessionInput struct {
 	ConversationID string
 	IdleTimeout    time.Duration
@@ -87,6 +95,8 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 		_ = workflow.ExecuteActivity(cleanup, "CloseSession", sessionID).Get(cleanup, nil)
 	}()
 	channel := workflow.GetSignalChannel(ctx, MessageSignal)
+	handoffChannel := workflow.GetSignalChannel(ctx, QueueHandoffSignal)
+	var handoff QueueHandoff
 	var activeCancel workflow.CancelFunc
 	accept := func(ev Event) {
 		if seen[ev.ID] {
@@ -120,6 +130,10 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			SessionStarted: sessionStarted, NewCommandSeen: newCommandSeen,
 			IdleDeadline: workflow.Now(ctx).Add(in.IdleTimeout),
 		}
+		if handoff.Queue != "" {
+			in.Continuation.IdleDeadline = handoff.ResumeAt
+			ctx = workflow.WithWorkflowTaskQueue(ctx, handoff.Queue)
+		}
 		err := workflow.NewContinueAsNewError(ctx, SessionWorkflow, in)
 		continuing = workflow.IsContinueAsNewError(err)
 		return err
@@ -142,10 +156,16 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 		}
 		var err error
 		if !ready {
-			ready, err = workflow.AwaitWithTimeout(ctx, wait, func() bool { return len(queue) > 0 })
+			ready, err = workflow.AwaitWithTimeout(ctx, wait, func() bool {
+				handoffChannel.ReceiveAsync(&handoff)
+				return len(queue) > 0 || handoff.Queue != ""
+			})
 		}
 		if err != nil {
 			return err
+		}
+		if handoff.Queue != "" {
+			return continueSession()
 		}
 		if !ready {
 			break

@@ -33,6 +33,45 @@ func continuedSessionInput(t *testing.T, env *testsuite.TestWorkflowEnvironment)
 	return in
 }
 
+func TestDeploymentQueueHandoffPreservesOpenConversation(t *testing.T) {
+	a, repo, _, conv := newFixture(t)
+	a.Model = &scriptedModel{run: func(int, []domain.Message) (domain.Message, error) { return reply("Saved reply"), nil }}
+	env := newEnv(a)
+	start := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	env.SetStartTime(start)
+	deadline := start.Add(30 * time.Minute)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(QueueHandoffSignal, QueueHandoff{Queue: "new-queue", ResumeAt: deadline}) }, time.Minute)
+	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: 30 * time.Minute, MaxSteps: 2})
+	in := continuedSessionInput(t, env)
+	var continued *workflow.ContinueAsNewError
+	if !errors.As(env.GetWorkflowError(), &continued) || continued.TaskQueueName != "new-queue" {
+		t.Fatal("queue not changed")
+	}
+	state := in.Continuation
+	if state.NextTurn != 1 || !state.SessionStarted || len(state.SeenIDs) != 1 || state.SeenIDs[0] != "first" || !state.IdleDeadline.Equal(deadline) {
+		t.Fatalf("conversation state lost: %+v", state)
+	}
+	active, _ := repo.ActiveSessions(context.Background())
+	if len(active) != 1 || active[0].ID != state.SessionID {
+		t.Fatal("handoff closed the original session")
+	}
+	// Resume with a replay of the old input. It must neither send another reply
+	// nor create a session with the new Temporal run ID, and must close on time.
+	next := newEnv(a)
+	next.SetStartTime(start.Add(2 * time.Minute))
+	next.RegisterDelayedCallback(func() { next.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Second)
+	next.ExecuteWorkflow(SessionWorkflow, in)
+	requireWorkflowOK(t, next)
+	if !next.Now().Equal(deadline) || a.Model.(*scriptedModel).count() != 1 {
+		t.Fatal("handoff reset the idle deadline or repeated model work")
+	}
+	history, _ := repo.Messages(context.Background(), state.SessionID)
+	if len(history) == 0 {
+		t.Fatal("conversation history lost")
+	}
+}
+
 func TestSessionHistoryLimitsContinueWithoutClosingConversation(t *testing.T) {
 	for _, limit := range []string{"suggested", "event-count", "turn-count"} {
 		t.Run(limit, func(t *testing.T) {

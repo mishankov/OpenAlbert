@@ -235,6 +235,13 @@ func migrateS3(ctx context.Context, sourcePrefix string) error {
 	if from == "" || to == "" || from == to {
 		return errors.New("distinct source and target buckets required")
 	}
+	versioning, err := source.GetBucketVersioning(ctx, from)
+	if err != nil {
+		return err
+	}
+	if versioning.Status != "" {
+		return errors.New("versioned source buckets require a separate full-version migration")
+	}
 	exists, err := target.BucketExists(ctx, to)
 	if err != nil {
 		return err

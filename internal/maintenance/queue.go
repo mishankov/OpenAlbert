@@ -18,12 +18,9 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-const handoffSignal = "deployment-queue-handoff"
+const handoffSignal = orchestration.QueueHandoffSignal
 
-type handoff struct {
-	Queue    string
-	ResumeAt time.Time
-}
+type handoff = orchestration.QueueHandoff
 
 type queueInterceptor struct {
 	interceptor.WorkerInterceptorBase
@@ -40,6 +37,11 @@ func (*queueInterceptor) InterceptWorkflow(_ workflow.Context, next interceptor.
 // maintenance signal can end it; no application activities are registered by
 // the maintenance worker. Histories and workflow IDs remain in the same chain.
 func (q *queueInbound) ExecuteWorkflow(ctx workflow.Context, input *interceptor.ExecuteWorkflowInput) (any, error) {
+	if workflow.GetInfo(ctx).WorkflowType.Name == "SessionWorkflow" {
+		// SessionWorkflow exports its own continuation, including deduplication,
+		// pending messages and turn counter; original arguments alone are insufficient.
+		return q.Next.ExecuteWorkflow(ctx, input)
+	}
 	var result any
 	var runErr error
 	done := false
@@ -99,11 +101,15 @@ func ReplayFile(path string) error {
 	return nil
 }
 
-func timerDeadline(h *historypb.History) (time.Time, error) {
-	timers := map[string]time.Time{}
+func timerDeadline(h *historypb.History, session bool) (time.Time, error) {
+	type timer struct {
+		deadline time.Time
+		event    int64
+	}
+	timers := map[string]timer{}
 	for _, e := range h.Events {
 		if a := e.GetTimerStartedEventAttributes(); a != nil {
-			timers[a.TimerId] = e.EventTime.AsTime().Add(a.StartToFireTimeout.AsDuration())
+			timers[a.TimerId] = timer{e.EventTime.AsTime().Add(a.StartToFireTimeout.AsDuration()), e.EventId}
 		}
 		if a := e.GetTimerFiredEventAttributes(); a != nil {
 			delete(timers, a.TimerId)
@@ -112,13 +118,18 @@ func timerDeadline(h *historypb.History) (time.Time, error) {
 			delete(timers, a.TimerId)
 		}
 	}
-	if len(timers) != 1 {
+	if len(timers) == 0 || (!session && len(timers) != 1) {
 		return time.Time{}, fmt.Errorf("expected one idle timer, found %d", len(timers))
 	}
-	for _, deadline := range timers {
-		return deadline, nil
+	// AwaitWithTimeout can leave earlier timers in history when an incoming
+	// message ends the wait. The latest active timer is the current idle wait.
+	var latest timer
+	for _, value := range timers {
+		if value.event > latest.event {
+			latest = value
+		}
 	}
-	panic("unreachable")
+	return latest.deadline, nil
 }
 
 // HandoffQueue requires all application workers on source to be stopped.
@@ -145,7 +156,7 @@ func HandoffQueue(ctx context.Context, c client.Client, namespace, source, targe
 		}
 		id, run := info.Execution.WorkflowId, info.Execution.RunId
 		name := info.Type.Name
-		if name != "TaskWorkflow" && name != "InitiativeWorkflow" {
+		if name != "TaskWorkflow" && name != "InitiativeWorkflow" && name != "SessionWorkflow" {
 			return fmt.Errorf("%s is not an idle schedulable workflow", name)
 		}
 		description, err := c.DescribeWorkflowExecution(ctx, id, run)
@@ -164,7 +175,7 @@ func HandoffQueue(ctx context.Context, c client.Client, namespace, source, targe
 			}
 			history.Events = append(history.Events, event)
 		}
-		deadline, err := timerDeadline(history)
+		deadline, err := timerDeadline(history, name == "SessionWorkflow")
 		if err != nil {
 			return fmt.Errorf("%s: %w", id, err)
 		}
@@ -192,7 +203,7 @@ func HandoffQueue(ctx context.Context, c client.Client, namespace, source, targe
 	}
 	defer w.Stop()
 	for _, item := range candidates {
-		if err = c.SignalWorkflow(ctx, item.id, item.run, handoffSignal, handoff{target, item.resume}); err != nil {
+		if err = c.SignalWorkflow(ctx, item.id, item.run, handoffSignal, handoff{Queue: target, ResumeAt: item.resume}); err != nil {
 			return err
 		}
 		for {
