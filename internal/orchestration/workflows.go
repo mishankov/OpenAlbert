@@ -18,14 +18,6 @@ import (
 const MessageSignal = "incoming"
 const TaskSignal = "changed"
 
-// QueueHandoffSignal is used only by an explicit deployment maintenance worker.
-const QueueHandoffSignal = "deployment-queue-handoff"
-
-type QueueHandoff struct {
-	Queue    string
-	ResumeAt time.Time
-}
-
 type SessionInput struct {
 	ConversationID string
 	IdleTimeout    time.Duration
@@ -58,8 +50,6 @@ type InitiativeInput struct {
 	ConversationID string
 	Interval       time.Duration
 	MaxSteps       int
-	// ResumeAt preserves the next check when moving an idle execution to a new queue.
-	ResumeAt time.Time `json:",omitempty"`
 }
 
 func options(ctx workflow.Context) workflow.Context {
@@ -95,8 +85,6 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 		_ = workflow.ExecuteActivity(cleanup, "CloseSession", sessionID).Get(cleanup, nil)
 	}()
 	channel := workflow.GetSignalChannel(ctx, MessageSignal)
-	handoffChannel := workflow.GetSignalChannel(ctx, QueueHandoffSignal)
-	var handoff QueueHandoff
 	var activeCancel workflow.CancelFunc
 	accept := func(ev Event) {
 		if seen[ev.ID] {
@@ -130,10 +118,6 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			SessionStarted: sessionStarted, NewCommandSeen: newCommandSeen,
 			IdleDeadline: workflow.Now(ctx).Add(in.IdleTimeout),
 		}
-		if handoff.Queue != "" {
-			in.Continuation.IdleDeadline = handoff.ResumeAt
-			ctx = workflow.WithWorkflowTaskQueue(ctx, handoff.Queue)
-		}
 		err := workflow.NewContinueAsNewError(ctx, SessionWorkflow, in)
 		continuing = workflow.IsContinueAsNewError(err)
 		return err
@@ -156,16 +140,10 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 		}
 		var err error
 		if !ready {
-			ready, err = workflow.AwaitWithTimeout(ctx, wait, func() bool {
-				handoffChannel.ReceiveAsync(&handoff)
-				return len(queue) > 0 || handoff.Queue != ""
-			})
+			ready, err = workflow.AwaitWithTimeout(ctx, wait, func() bool { return len(queue) > 0 })
 		}
 		if err != nil {
 			return err
-		}
-		if handoff.Queue != "" {
-			return continueSession()
 		}
 		if !ready {
 			break
@@ -617,11 +595,7 @@ func InitiativeWorkflow(ctx workflow.Context, in InitiativeInput) error {
 		return nil
 	}
 	for i := 0; i < 20; i++ {
-		delay := in.Interval
-		if i == 0 && !in.ResumeAt.IsZero() {
-			delay = in.ResumeAt.Sub(workflow.Now(ctx))
-		}
-		if err := workflow.Sleep(ctx, delay); err != nil {
+		if err := workflow.Sleep(ctx, in.Interval); err != nil {
 			return err
 		}
 		session := agent.ID("initiative", in.ConversationID, workflow.GetInfo(ctx).WorkflowExecution.RunID, fmt.Sprint(i))
@@ -633,7 +607,6 @@ func InitiativeWorkflow(ctx workflow.Context, in InitiativeInput) error {
 			return err
 		}
 	}
-	in.ResumeAt = time.Time{}
 	return workflow.NewContinueAsNewError(ctx, InitiativeWorkflow, in)
 }
 
