@@ -22,6 +22,19 @@ type SessionInput struct {
 	ConversationID string
 	IdleTimeout    time.Duration
 	MaxSteps       int
+	Continuation   *SessionContinuation `json:",omitempty"`
+}
+
+// Only workflow bookkeeping crosses a ContinueAsNew boundary. Conversation
+// messages and tool results remain in the repository under the same SessionID.
+type SessionContinuation struct {
+	SessionID      string
+	NextTurn       int
+	Pending        []Event
+	SeenIDs        []string
+	SessionStarted bool
+	NewCommandSeen bool
+	IdleDeadline   time.Time
 }
 type Event struct {
 	ID         string
@@ -47,43 +60,95 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 	ctx = options(ctx)
 	sessionID := workflow.GetInfo(ctx).WorkflowExecution.RunID
 	newCommandSeen, sessionStarted := false, false
+	queue := []Event{}
+	seen := map[string]bool{}
+	seenIDs := []string{}
+	nextTurn := 0
+	var idleDeadline time.Time
+	if state := in.Continuation; state != nil {
+		sessionID, nextTurn = state.SessionID, state.NextTurn
+		newCommandSeen, sessionStarted = state.NewCommandSeen, state.SessionStarted
+		queue, seenIDs, idleDeadline = state.Pending, state.SeenIDs, state.IdleDeadline
+		for _, id := range seenIDs {
+			seen[id] = true
+		}
+	}
+	continuing := false
 	defer func() {
+		if continuing {
+			return // A technical rollover keeps the conversation and browser alive.
+		}
 		if newCommandSeen && !sessionStarted {
 			return // A stale command alone does not create a session to close.
 		}
 		cleanup, _ := workflow.NewDisconnectedContext(ctx)
 		_ = workflow.ExecuteActivity(cleanup, "CloseSession", sessionID).Get(cleanup, nil)
 	}()
-	queue := []Event{}
-	seen := map[string]bool{}
 	channel := workflow.GetSignalChannel(ctx, MessageSignal)
 	var activeCancel workflow.CancelFunc
+	accept := func(ev Event) {
+		if seen[ev.ID] {
+			return
+		}
+		seen[ev.ID] = true
+		seenIDs = append(seenIDs, ev.ID)
+		queue = append(queue, ev)
+		if (ev.Stop || ev.NewSession) && activeCancel != nil {
+			activeCancel()
+		}
+	}
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		for {
 			var ev Event
 			if !channel.Receive(ctx, &ev) {
 				return
 			}
-			if seen[ev.ID] {
-				continue
-			}
-			seen[ev.ID] = true
-			queue = append(queue, ev)
-			if (ev.Stop || ev.NewSession) && activeCancel != nil {
-				activeCancel()
-			}
+			accept(ev)
 		}
 	})
+	continueSession := func() error {
+		// Drain signals without yielding before handing off the queue. Signals
+		// already consumed by the receiver are included in queue as well.
+		var ev Event
+		for channel.ReceiveAsync(&ev) {
+			accept(ev)
+		}
+		in.Continuation = &SessionContinuation{
+			SessionID: sessionID, NextTurn: nextTurn, Pending: queue, SeenIDs: seenIDs,
+			SessionStarted: sessionStarted, NewCommandSeen: newCommandSeen,
+			IdleDeadline: workflow.Now(ctx).Add(in.IdleTimeout),
+		}
+		err := workflow.NewContinueAsNewError(ctx, SessionWorkflow, in)
+		continuing = workflow.IsContinueAsNewError(err)
+		return err
+	}
 	turns := 0
 	transitions := 0
 	for {
-		ready, err := workflow.AwaitWithTimeout(ctx, in.IdleTimeout, func() bool { return len(queue) > 0 })
+		wait := in.IdleTimeout
+		ready := false
+		if !idleDeadline.IsZero() {
+			var ev Event
+			for channel.ReceiveAsync(&ev) {
+				accept(ev)
+			}
+			wait = max(0, idleDeadline.Sub(workflow.Now(ctx)))
+			ready = len(queue) > 0
+			if !ready && wait == 0 {
+				break
+			}
+		}
+		var err error
+		if !ready {
+			ready, err = workflow.AwaitWithTimeout(ctx, wait, func() bool { return len(queue) > 0 })
+		}
 		if err != nil {
 			return err
 		}
 		if !ready {
 			break
 		}
+		idleDeadline = time.Time{}
 		batch := queue
 		queue = nil
 		// Keep the boundary inside this workflow so signals arriving during the
@@ -118,7 +183,10 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 				queue = append(remaining, queue...)
 			}
 			if transitions >= 30 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() || workflow.GetInfo(ctx).GetCurrentHistoryLength() > 12000 {
-				break // Remaining events stay in the durable inbox for dispatch.
+				if workflow.GetVersion(ctx, "session-continuation-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
+					return continueSession()
+				}
+				break // Preserve the closing sequence of historical executions.
 			}
 			continue
 		}
@@ -143,7 +211,8 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 		}
 		runctx, cancel := workflow.WithCancel(ctx)
 		activeCancel = cancel
-		key := agent.ID(sessionID, fmt.Sprint(turns))
+		key := agent.ID(sessionID, fmt.Sprint(nextTurn))
+		nextTurn++
 		turns++
 		sessionStarted = true
 		turn, runErr := runTurn(runctx, agent.RunInput{Key: key, SessionID: sessionID, ConversationID: in.ConversationID, IncomingIDs: ids}, in.MaxSteps, func(turn *agent.Turn) error {
@@ -189,7 +258,10 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 				}
 			}
 		}
-		if turns >= 30 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() || workflow.GetInfo(ctx).GetCurrentHistoryLength() > 12000 { // Bounded histories; buffered events remain durable in the inbox and will be re-signalled.
+		if turns >= 30 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() || workflow.GetInfo(ctx).GetCurrentHistoryLength() > 12000 {
+			if workflow.GetVersion(ctx, "session-continuation-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
+				return continueSession()
+			}
 			break
 		}
 	}
