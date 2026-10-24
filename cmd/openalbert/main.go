@@ -93,6 +93,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err = telegram.ConfigureCommands(ctx); err != nil {
+		return fmt.Errorf("Telegram command setup failed: %w", err)
+	}
+	var logs domain.LogReader
+	if c.VictoriaLogsURL != "" {
+		logs, err = integrations.NewVictoriaLogs(c.VictoriaLogsURL, nil)
+		if err != nil {
+			return err
+		}
+	}
 	temporalClient, err := client.DialContext(ctx, client.Options{HostPort: c.TemporalAddress, Namespace: c.TemporalNamespace, Logger: sdkLogger{logger}})
 	if err != nil {
 		return errors.New("Temporal connection failed")
@@ -106,7 +116,8 @@ func run() error {
 		}
 		defer browsers.Close()
 	}
-	activities := &agent.Activities{OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: model, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, ModelName: c.LLMModel}
+	activities := &agent.Activities{OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: model, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, ModelName: c.LLMModel, InspectorPublicURL: c.InspectorPublicURL}
+	activities.Logs = logs
 	activities.STT = speech
 	activities.STTModel = c.STTModel
 	activities.TaskChanged = func(ctx context.Context, scope, id string) error {
@@ -137,6 +148,7 @@ func run() error {
 		}
 	}
 	inspector.Register(mux, repo, artifacts)
+	inspector.RegisterMemory(mux, repo, knowledgeStore)
 	runtime.Start(ctx)
 	defer runtime.Wait()
 	defer cancel()
@@ -144,6 +156,7 @@ func run() error {
 	event := telemetry.Start(ctx, logger, "application.started")
 	event.Set("model", c.LLMModel)
 	event.Set("web_search_enabled", c.YandexAPIKey != "")
+	event.Set("log_search_enabled", logs != nil)
 	event.Set("browser_enabled", c.BrowserEnabled)
 	event.Set("browser_limit", 5)
 	event.Set("namespace", c.TemporalNamespace)

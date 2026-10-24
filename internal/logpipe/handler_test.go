@@ -106,3 +106,34 @@ func TestPlainInfrastructureLogsHaveServiceAndLevel(t *testing.T) {
 		}
 	}
 }
+
+func TestTemporalHTTPLogsRemainQueryableWithoutEmbeddingRequestJSON(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		latency float64
+		level   string
+	}{{200, 44000000, "info"}, {200, 1500000000, "info"}, {404, 1000000, "warn"}, {503, 2000000, "error"}} {
+		for _, encoded := range []bool{false, true} {
+			line := map[string]any{"method": "GET", "uri": "/api/v1/namespaces?token=private-secret", "status": tc.status, "latency": tc.latency, "error": "", "user_agent": "private-secret", "host": "forged"}
+			var input any = line
+			if encoded {
+				raw, _ := json.Marshal(line)
+				input = string(raw)
+			} else {
+				// Match the numeric types produced by the gateway's decoder.
+				line["status"] = float64(tc.status)
+			}
+			row, err := Normalize(map[string]any{"time": json.Number("1792479900"), "host": "docker-host", "event": map[string]any{"line": input, "attrs": map[string]any{"compose_service": "temporal-ui"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row["http_status"] != tc.status || row["level"] != tc.level || row["duration_ms"] != tc.latency/1e6 || row["http_path"] != "/api/v1/namespaces" || row["host"] != "docker-host" {
+				t.Fatalf("wrong HTTP metadata: %v", row)
+			}
+			raw, _ := json.Marshal(row)
+			if strings.Contains(string(raw), "private-secret") || strings.Contains(row["_msg"].(string), "{") {
+				t.Fatalf("raw request JSON retained: %s", raw)
+			}
+		}
+	}
+}

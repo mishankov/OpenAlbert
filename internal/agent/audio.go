@@ -233,7 +233,7 @@ func (a *Activities) TranscribeAudio(ctx context.Context, in AudioInput) (out do
 	if err = a.saveAudio(c, out); err != nil {
 		return
 	}
-	finish := a.startTrace(c, domain.Trace{SessionID: in.Run.SessionID, TurnID: in.Run.Key, Trigger: "message", Kind: "transcription", Name: a.STTModel, CallID: in.ArtifactID}, map[string]any{"incoming_id": in.IncomingID, "artifact_id": in.ArtifactID, "profile": ID(a.STT.Profile()), "queued_at": in.QueuedAt, "size_bytes": len(art.Data)})
+	finish := a.startTrace(c, domain.Trace{SessionID: in.Run.SessionID, TurnID: in.Run.Key, Trigger: "message", Kind: "transcription", Name: a.STTModel, CallID: in.ArtifactID}, map[string]any{"incoming_id": in.IncomingID, "artifact_id": in.ArtifactID, "profile": ID(a.STT.Profile()), "queued_at": in.QueuedAt, "size_bytes": len(art.Data)}, nil)
 	defer func() { finish(out, err) }()
 	out.SpeechText, err = a.STT.Transcribe(c, art.Name, art.Data)
 	if err != nil {

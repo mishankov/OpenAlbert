@@ -411,6 +411,31 @@ func (s *Store) Search(ctx context.Context, scope, q string) ([]domain.MemoryEnt
 	}
 	return out, nil
 }
+
+// ListMemory returns every current entry for a local inspector, newest first.
+// The agent-facing Search keeps its independent result limit.
+func (s *Store) ListMemory(ctx context.Context, scope string) ([]domain.MemoryEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := nonempty(scope); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := s.all(scope)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].UpdatedAt.Equal(entries[j].UpdatedAt) {
+			return entries[i].ID < entries[j].ID
+		}
+		return entries[i].UpdatedAt.After(entries[j].UpdatedAt)
+	})
+	return entries, nil
+}
+
 func (s *Store) Update(ctx context.Context, e domain.MemoryEntry) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -211,6 +211,18 @@ func historyContent(m domain.Message) string {
 	return strings.Join(parts, "\n")
 }
 
+func historyToolCalls(m domain.Message) []domain.HistoryToolCall {
+	var calls []domain.HistoryToolCall
+	if m.Role == "assistant" {
+		for _, call := range m.ToolCalls {
+			if call.Name == "send_message" {
+				calls = append(calls, domain.HistoryToolCall{ID: call.ID, Name: call.Name})
+			}
+		}
+	}
+	return calls
+}
+
 func historyLimit(n int) int {
 	if n <= 0 || n > 50 {
 		return 20
@@ -232,7 +244,10 @@ func (s *Store) ConversationHistory(ctx context.Context, scope, query string, be
  WHERE s.conversation_id=$1 AND ($3::bigint=0 OR m.seq<$3)
  AND m.data->>'role' IN ('user','assistant')
 )
-SELECT seq,id,session_data,message_data FROM history WHERE content<>''
+SELECT seq,id,session_data,message_data FROM history WHERE (content<>'' OR EXISTS (
+ SELECT 1 FROM jsonb_array_elements(COALESCE(message_data->'tool_calls','[]')) call
+ WHERE message_data->>'role'='assistant' AND call->>'name'='send_message'
+))
 AND ($2='' OR strpos(lower(content),lower($2))>0)
 ORDER BY seq DESC LIMIT $4`, scope, query, before, historyLimit(n))
 	if err != nil {
@@ -257,7 +272,7 @@ ORDER BY seq DESC LIMIT $4`, scope, query, before, historyLimit(n))
 		item.ConversationID, item.SessionStartedAt = scope, session.CreatedAt
 		item.AuthorID = message.AuthorID
 		item.Role, item.Content = message.Role, historyContent(message)
-		item.ReplyRequested = len(message.ToolCalls) > 0 && message.Role == "assistant"
+		item.ToolCalls = historyToolCalls(message)
 		out = append(out, item)
 	}
 	return out, rows.Err()

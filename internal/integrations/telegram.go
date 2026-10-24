@@ -32,10 +32,11 @@ type TelegramConfig struct {
 	MaxFileBytes    int64
 }
 type Telegram struct {
-	config TelegramConfig
-	client *http.Client
-	users  map[int64]bool
-	groups map[int64]bool
+	config   TelegramConfig
+	client   *http.Client
+	users    map[int64]bool
+	groups   map[int64]bool
+	username string // Set by ConfigureCommands before polling starts.
 }
 type Update struct {
 	Offset   int64
@@ -111,6 +112,39 @@ func NewTelegram(c TelegramConfig) (*Telegram, error) {
 	}
 	return t, nil
 }
+
+// ConfigureCommands makes the keyboard commands discoverable in Telegram's
+// command menu. Call before Poll; getMe identifies commands addressed to this bot.
+func (t *Telegram) ConfigureCommands(ctx context.Context) error {
+	var me struct {
+		Username string `json:"username"`
+	}
+	if err := t.api(ctx, "getMe", map[string]any{}, &me); err != nil {
+		return err
+	}
+	if me.Username == "" {
+		return errors.New("Telegram bot username missing")
+	}
+	t.username = me.Username
+	commands := []map[string]string{
+		{"command": "new", "description": "Начать новый диалог"},
+		{"command": "stop", "description": "Остановить текущую работу"},
+	}
+	return t.api(ctx, "setMyCommands", map[string]any{"commands": commands}, nil)
+}
+
+func (t *Telegram) command(text string) (name string, otherBot bool) {
+	text = strings.TrimSpace(text)
+	command, username, directed := strings.Cut(text, "@")
+	if command != "/new" && command != "/stop" {
+		return "", false
+	}
+	if directed && (t.username == "" || !strings.EqualFold(username, t.username)) {
+		return "", true
+	}
+	return strings.TrimPrefix(command, "/"), false
+}
+
 func (t *Telegram) api(ctx context.Context, method string, payload any, out any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -179,12 +213,15 @@ type telegramFile struct {
 	Size     int64  `json:"file_size"`
 }
 type telegramMessage struct {
-	ID       int64  `json:"message_id"`
-	ThreadID int    `json:"message_thread_id"`
-	Date     int64  `json:"date"`
-	Text     string `json:"text"`
-	Caption  string `json:"caption"`
-	From     *struct {
+	ID          int64                `json:"message_id"`
+	ThreadID    int                  `json:"message_thread_id"`
+	Date        int64                `json:"date"`
+	Text        string               `json:"text"`
+	Caption     string               `json:"caption"`
+	ReplyTo     *telegramMessage     `json:"reply_to_message"`
+	Quote       *domain.MessageQuote `json:"quote"`
+	RichMessage json.RawMessage      `json:"rich_message"`
+	From        *struct {
 		ID        int64  `json:"id"`
 		FirstName string `json:"first_name"`
 		LastName  string `json:"last_name"`
@@ -201,6 +238,41 @@ type telegramMessage struct {
 	Voice    *telegramFile  `json:"voice"`
 	Audio    *telegramFile  `json:"audio"`
 	Video    *telegramFile  `json:"video"`
+}
+
+func telegramReplyContext(m *telegramMessage) *domain.ReplyContext {
+	if m == nil {
+		return nil
+	}
+	reply := &domain.ReplyContext{MessageID: m.ID, Text: m.Text}
+	if reply.Text == "" {
+		reply.Text = m.Caption
+	}
+	// Our own sendRichMessage replies may have blocks instead of a text field.
+	if reply.Text == "" && len(m.RichMessage) > 0 && string(m.RichMessage) != "null" {
+		reply.Text = "[Rich message blocks]\n" + string(m.RichMessage)
+	}
+	if m.From != nil {
+		reply.AuthorID = m.From.ID
+		reply.AuthorName = strings.TrimSpace(m.From.FirstName + " " + m.From.LastName)
+		reply.AuthorUsername = m.From.Username
+		reply.AuthorIsBot = m.From.IsBot
+	}
+	for _, media := range []struct {
+		kind    string
+		present bool
+	}{
+		{"image", len(m.Photo) > 0},
+		{"document", m.Document != nil},
+		{"voice", m.Voice != nil},
+		{"audio", m.Audio != nil},
+		{"video", m.Video != nil},
+	} {
+		if media.present {
+			reply.MediaKinds = append(reply.MediaKinds, media.kind)
+		}
+	}
+	return reply
 }
 
 func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
@@ -235,6 +307,8 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 		if incoming.Text == "" {
 			incoming.Text = m.Caption
 		}
+		incoming.ReplyTo = telegramReplyContext(m.ReplyTo)
+		incoming.Quote = m.Quote
 		add := func(f *telegramFile, kind, name, mime string) {
 			if f == nil {
 				return
@@ -255,6 +329,14 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 		add(m.Voice, "voice", "voice.ogg", "audio/ogg")
 		add(m.Audio, "audio", "audio.mp3", "audio/mpeg")
 		add(m.Video, "video", "video.mp4", "video/mp4")
+		if len(incoming.Attachments) == 0 {
+			command, otherBot := t.command(m.Text)
+			if otherBot {
+				out = append(out, update)
+				continue
+			}
+			incoming.Command = command
+		}
 		if incoming.Text != "" || len(incoming.Attachments) > 0 {
 			update.Incoming = &incoming
 		}

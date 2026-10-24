@@ -50,8 +50,9 @@ Workflow `.github/workflows/ci.yml` работает на pull request, push в 
 
 1. Проверка workflow через actionlint и обоих Compose: соответствие сервисов,
    обязательные переменные, отсутствие исходников на сервере, отключённый/внешний STT.
-2. `gofmt`, `go vet`, `go test -race` с временной PostgreSQL, настоящим Chromium
-   и FFmpeg. Telegram, платные LLM и скачивание весов для тестов не нужны.
+2. `gofmt`, `go vet`, `go test -race` с временными PostgreSQL и VictoriaLogs,
+   настоящим Chromium и FFmpeg. Проверяется и реальный контракт поиска логов.
+   Telegram, платные LLM и скачивание весов для тестов не нужны.
 3. `npm ci`, тесты и сборка документации, Playwright-тесты документации и инспектора,
    включая существующие проверки сочетаний клавиш, IME и русской раскладки.
 

@@ -55,6 +55,9 @@ func toolMetadata(ev *telemetry.Event, in ToolInput) {
 
 func toolResultMetadata(ev *telemetry.Event, result any) {
 	switch v := result.(type) {
+	case domain.LogSearch:
+		ev.Set("result_count", len(v.Events))
+		ev.Set("observation_truncated", v.Truncated || v.SummaryTruncated)
 	case map[string]string:
 		if target := v["conversation_id"]; target != "" {
 			ev.Set("target_conversation_id", target)

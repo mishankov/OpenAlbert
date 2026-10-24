@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -120,8 +121,21 @@ func Normalize(envelope map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("missing Docker event")
 	}
 	attrs, _ := event["attrs"].(map[string]any)
+	service, _ := attrs["compose_service"].(string)
+	// Some Docker events contain JSON as a string instead of an object.
+	if service == "temporal-ui" {
+		if line, ok := event["line"].(string); ok {
+			var decoded map[string]any
+			d := json.NewDecoder(strings.NewReader(line))
+			d.UseNumber()
+			if d.Decode(&decoded) == nil && decoded != nil {
+				event["line"] = decoded
+			}
+		}
+	}
 	row := map[string]any{}
 	message := ""
+	inferRawLevel := true
 	switch line := event["line"].(type) {
 	case map[string]any:
 		for k, v := range line {
@@ -136,15 +150,21 @@ func Normalize(envelope map[string]any) (map[string]any, error) {
 		if message == "" {
 			b, _ := json.Marshal(line)
 			message = string(b)
+			// JSON property names such as "error" do not express severity.
+			inferRawLevel = false
 		}
 	case string:
 		message = line
 	default:
 		return nil, fmt.Errorf("missing Docker line")
 	}
-	service, _ := attrs["compose_service"].(string)
 	if service == "" {
 		service = "unknown"
+	}
+	if service == "temporal-ui" {
+		if normalized, text, ok := temporalHTTP(row); ok {
+			row, message = normalized, text
+		}
 	}
 	container, _ := event["tag"].(string)
 	project, _ := attrs["com.docker.compose.project"].(string)
@@ -152,7 +172,7 @@ func Normalize(envelope map[string]any) (map[string]any, error) {
 	if level == "" {
 		level, _ = row["severity"].(string)
 	}
-	if level == "" {
+	if level == "" && inferRawLevel {
 		level = rawLevel.FindString(message)
 	}
 	level = strings.ToLower(level)
@@ -197,4 +217,59 @@ func Normalize(envelope map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("missing timestamp")
 	}
 	return row, nil
+}
+
+// Temporal UI's access logger has no message field. Normalize its HTTP events
+// without copying query strings, headers, user agents or arbitrary error bodies.
+// All requests are retained; filtering happens at query time.
+func temporalHTTP(fields map[string]any) (map[string]any, string, bool) {
+	method, _ := fields["method"].(string)
+	switch method {
+	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE":
+	default:
+		return nil, "", false
+	}
+	number := func(key string) (float64, bool) {
+		switch v := fields[key].(type) {
+		case json.Number:
+			n, err := v.Float64()
+			return n, err == nil
+		case float64:
+			return v, true
+		default:
+			return 0, false
+		}
+	}
+	status, ok := number("status")
+	if !ok || status < 100 || status > 599 {
+		return nil, "", false
+	}
+	path := ""
+	if uri, ok := fields["uri"].(string); ok {
+		if u, err := url.Parse(uri); err == nil {
+			path = u.EscapedPath()
+		}
+	}
+	level := "info"
+	if supplied, _ := fields["level"].(string); supplied != "" {
+		switch strings.ToLower(supplied) {
+		case "warn", "warning":
+			level = "warn"
+		case "error", "fatal", "panic":
+			level = "error"
+		}
+	}
+	errorText, _ := fields["error"].(string)
+	if status >= 500 || errorText != "" {
+		level = "error"
+	} else if status >= 400 {
+		level = "warn"
+	}
+	row := map[string]any{"operation": "http.request", "http_method": method, "http_path": path, "http_status": int(status), "level": level, "http_error": errorText != ""}
+	text := fmt.Sprintf("%s %s · HTTP %d", method, path, int(status))
+	if latency, ok := number("latency"); ok && latency >= 0 {
+		row["duration_ms"] = latency / float64(time.Millisecond)
+		text += fmt.Sprintf(" · %.1f мс", row["duration_ms"])
+	}
+	return row, text, true
 }

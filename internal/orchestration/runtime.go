@@ -195,7 +195,8 @@ func (r *Runtime) DispatchOnce(ctx context.Context) error {
 	for _, in := range incoming {
 		text := strings.ToLower(strings.TrimSpace(in.Text))
 		stop := text == "/stop" || text == "стоп" || text == "stop"
-		_, err = r.Client.SignalWithStartWorkflow(ctx, SessionWorkflowID(in.Conversation.ID), MessageSignal, Event{ID: in.ID, Stop: stop}, workflowOptions(SessionWorkflowID(in.Conversation.ID), r.TaskQueue), SessionWorkflow, SessionInput{ConversationID: in.Conversation.ID, IdleTimeout: r.IdleTimeout, MaxSteps: r.MaxSteps})
+		newSession := len(in.Attachments) == 0 && (in.Command == "new" || text == "/new")
+		_, err = r.Client.SignalWithStartWorkflow(ctx, SessionWorkflowID(in.Conversation.ID), MessageSignal, Event{ID: in.ID, Stop: stop || in.Command == "stop", NewSession: newSession}, workflowOptions(SessionWorkflowID(in.Conversation.ID), r.TaskQueue), SessionWorkflow, SessionInput{ConversationID: in.Conversation.ID, IdleTimeout: r.IdleTimeout, MaxSteps: r.MaxSteps})
 		if err != nil {
 			return err
 		}

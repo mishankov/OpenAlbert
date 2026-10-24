@@ -22,10 +22,24 @@ type SessionInput struct {
 	ConversationID string
 	IdleTimeout    time.Duration
 	MaxSteps       int
+	Continuation   *SessionContinuation `json:",omitempty"`
+}
+
+// Only workflow bookkeeping crosses a ContinueAsNew boundary. Conversation
+// messages and tool results remain in the repository under the same SessionID.
+type SessionContinuation struct {
+	SessionID      string
+	NextTurn       int
+	Pending        []Event
+	SeenIDs        []string
+	SessionStarted bool
+	NewCommandSeen bool
+	IdleDeadline   time.Time
 }
 type Event struct {
-	ID   string
-	Stop bool
+	ID         string
+	Stop       bool
+	NewSession bool
 }
 type TaskInput struct {
 	ConversationID string
@@ -45,41 +59,137 @@ func options(ctx workflow.Context) workflow.Context {
 func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 	ctx = options(ctx)
 	sessionID := workflow.GetInfo(ctx).WorkflowExecution.RunID
+	newCommandSeen, sessionStarted := false, false
+	queue := []Event{}
+	seen := map[string]bool{}
+	seenIDs := []string{}
+	nextTurn := 0
+	var idleDeadline time.Time
+	if state := in.Continuation; state != nil {
+		sessionID, nextTurn = state.SessionID, state.NextTurn
+		newCommandSeen, sessionStarted = state.NewCommandSeen, state.SessionStarted
+		queue, seenIDs, idleDeadline = state.Pending, state.SeenIDs, state.IdleDeadline
+		for _, id := range seenIDs {
+			seen[id] = true
+		}
+	}
+	continuing := false
 	defer func() {
+		if continuing {
+			return // A technical rollover keeps the conversation and browser alive.
+		}
+		if newCommandSeen && !sessionStarted {
+			return // A stale command alone does not create a session to close.
+		}
 		cleanup, _ := workflow.NewDisconnectedContext(ctx)
 		_ = workflow.ExecuteActivity(cleanup, "CloseSession", sessionID).Get(cleanup, nil)
 	}()
-	queue := []Event{}
-	seen := map[string]bool{}
 	channel := workflow.GetSignalChannel(ctx, MessageSignal)
 	var activeCancel workflow.CancelFunc
+	accept := func(ev Event) {
+		if seen[ev.ID] {
+			return
+		}
+		seen[ev.ID] = true
+		seenIDs = append(seenIDs, ev.ID)
+		queue = append(queue, ev)
+		if (ev.Stop || ev.NewSession) && activeCancel != nil {
+			activeCancel()
+		}
+	}
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		for {
 			var ev Event
 			if !channel.Receive(ctx, &ev) {
 				return
 			}
-			if seen[ev.ID] {
-				continue
-			}
-			seen[ev.ID] = true
-			queue = append(queue, ev)
-			if ev.Stop && activeCancel != nil {
-				activeCancel()
-			}
+			accept(ev)
 		}
 	})
+	continueSession := func() error {
+		// Drain signals without yielding before handing off the queue. Signals
+		// already consumed by the receiver are included in queue as well.
+		var ev Event
+		for channel.ReceiveAsync(&ev) {
+			accept(ev)
+		}
+		in.Continuation = &SessionContinuation{
+			SessionID: sessionID, NextTurn: nextTurn, Pending: queue, SeenIDs: seenIDs,
+			SessionStarted: sessionStarted, NewCommandSeen: newCommandSeen,
+			IdleDeadline: workflow.Now(ctx).Add(in.IdleTimeout),
+		}
+		err := workflow.NewContinueAsNewError(ctx, SessionWorkflow, in)
+		continuing = workflow.IsContinueAsNewError(err)
+		return err
+	}
 	turns := 0
+	transitions := 0
 	for {
-		ready, err := workflow.AwaitWithTimeout(ctx, in.IdleTimeout, func() bool { return len(queue) > 0 })
+		wait := in.IdleTimeout
+		ready := false
+		if !idleDeadline.IsZero() {
+			var ev Event
+			for channel.ReceiveAsync(&ev) {
+				accept(ev)
+			}
+			wait = max(0, idleDeadline.Sub(workflow.Now(ctx)))
+			ready = len(queue) > 0
+			if !ready && wait == 0 {
+				break
+			}
+		}
+		var err error
+		if !ready {
+			ready, err = workflow.AwaitWithTimeout(ctx, wait, func() bool { return len(queue) > 0 })
+		}
 		if err != nil {
 			return err
 		}
 		if !ready {
 			break
 		}
+		idleDeadline = time.Time{}
 		batch := queue
 		queue = nil
+		// Keep the boundary inside this workflow so signals arriving during the
+		// transition cannot be lost or sent back into the previous session.
+		newIndex := -1
+		for i, ev := range batch {
+			if ev.NewSession {
+				newIndex = i
+				break
+			}
+		}
+		if newIndex >= 0 {
+			newCommandSeen = true
+			transitions++
+			ids := []string{}
+			for _, ev := range batch[:newIndex+1] {
+				ids = append(ids, ev.ID)
+			}
+			nextSession := agent.ID(sessionID, "new", batch[newIndex].ID)
+			var started bool
+			if err := workflow.ExecuteActivity(ctx, "StartNewSession", in.ConversationID, sessionID, nextSession, ids).Get(ctx, &started); err != nil {
+				return err
+			}
+			if started {
+				sessionID = nextSession
+				sessionStarted = true
+				queue = append(batch[newIndex+1:], queue...)
+			} else {
+				// Ignore the stale command without discarding adjacent messages.
+				remaining := append([]Event{}, batch[:newIndex]...)
+				remaining = append(remaining, batch[newIndex+1:]...)
+				queue = append(remaining, queue...)
+			}
+			if transitions >= 30 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() || workflow.GetInfo(ctx).GetCurrentHistoryLength() > 12000 {
+				if workflow.GetVersion(ctx, "session-continuation-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
+					return continueSession()
+				}
+				break // Preserve the closing sequence of historical executions.
+			}
+			continue
+		}
 		ids := []string{}
 		stop := false
 		lastStop := -1
@@ -96,19 +206,22 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			if err := workflow.ExecuteActivity(ctx, "AcknowledgeStop", in.ConversationID, sessionID, ids).Get(ctx, nil); err != nil {
 				return err
 			}
+			sessionStarted = true
 			continue
 		}
 		runctx, cancel := workflow.WithCancel(ctx)
 		activeCancel = cancel
-		key := agent.ID(sessionID, fmt.Sprint(turns))
+		key := agent.ID(sessionID, fmt.Sprint(nextTurn))
+		nextTurn++
 		turns++
+		sessionStarted = true
 		turn, runErr := runTurn(runctx, agent.RunInput{Key: key, SessionID: sessionID, ConversationID: in.ConversationID, IncomingIDs: ids}, in.MaxSteps, func(turn *agent.Turn) error {
 			if len(queue) == 0 {
 				return nil
 			}
 			newIDs := []string{}
 			for _, ev := range queue {
-				if ev.Stop {
+				if ev.Stop || ev.NewSession {
 					return temporal.NewCanceledError()
 				}
 				newIDs = append(newIDs, ev.ID)
@@ -139,13 +252,21 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			return err
 		}
 		if runErr != nil && !temporal.IsCanceledError(runErr) {
-			if err := workflow.ExecuteActivity(ctx, "NotifyFailure", in.ConversationID, key).Get(ctx, nil); err != nil {
-				return err
+			if !turn.Sent || workflow.GetVersion(ctx, "failure-after-reply/"+key, workflow.DefaultVersion, 1) == workflow.DefaultVersion {
+				if err := workflow.ExecuteActivity(ctx, "NotifyFailure", in.ConversationID, key).Get(ctx, nil); err != nil {
+					return err
+				}
 			}
 		}
-		if turns >= 30 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() || workflow.GetInfo(ctx).GetCurrentHistoryLength() > 12000 { // Bounded histories; buffered events remain durable in the inbox and will be re-signalled.
+		if turns >= 30 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() || workflow.GetInfo(ctx).GetCurrentHistoryLength() > 12000 {
+			if workflow.GetVersion(ctx, "session-continuation-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
+				return continueSession()
+			}
 			break
 		}
+	}
+	if newCommandSeen && !sessionStarted {
+		return nil
 	}
 	return workflow.ExecuteActivity(ctx, "CloseSession", sessionID).Get(ctx, nil)
 }
@@ -352,7 +473,70 @@ steps:
 			return turn, nil
 		}
 	}
+	if in.TaskID == "" && !in.Initiative && !turn.Sent && workflow.GetVersion(ctx, "budget-finalization/"+in.Key, workflow.DefaultVersion, 1) != workflow.DefaultVersion {
+		return finalizeBudget(ctx, turn, maxSteps, steer...)
+	}
 	return turn, temporal.NewNonRetryableApplicationError("agent step limit reached", "step_limit", nil)
+}
+
+// One reserved synthesis call can use existing evidence but cannot continue
+// research or mutate task state. The caller retains NotifyFailure as a fallback.
+func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, steer ...func(*agent.Turn) error) (agent.Turn, error) {
+	if len(steer) > 0 {
+		if err := steer[0](&turn); err != nil {
+			return turn, err
+		}
+	}
+	turn.Messages = append(turn.Messages, domain.Message{Role: "user", Content: "The research step budget is exhausted. This is the single reserved finalization step. Stop researching and use send_message now to answer the latest user request from the evidence already collected. Give a useful partial result when possible, clearly mark gaps and uncertainty, and never invent missing facts or claim unfinished work succeeded. If the evidence is insufficient, say what prevented completion. Only send_message is available; do not request other tools."})
+	turn.Messages = agent.CompactContext(turn.Messages)
+	var result agent.ModelOutput
+	turn.Stats.ModelCalls++
+	if err := workflow.ExecuteActivity(ctx, "ModelCall", agent.ModelInput{Turn: turn, Step: step, Finalize: true}).Get(ctx, &result); err != nil {
+		return turn, err
+	}
+	turn.Stats.InputTokens += result.InputTokens
+	turn.Stats.OutputTokens += result.OutputTokens
+	if len(steer) > 0 {
+		before := len(turn.Input.IncomingIDs)
+		if err := steer[0](&turn); err != nil {
+			return turn, err
+		}
+		if len(turn.Input.IncomingIDs) > before {
+			return turn, temporal.NewNonRetryableApplicationError("agent step limit reached after new input", "step_limit", nil)
+		}
+	}
+	message := result.Message
+	turn.Messages = append(turn.Messages, message)
+	if err := workflow.ExecuteActivity(ctx, "PersistMessage", turn.Input.SessionID, fmt.Sprintf("%s/assistant/%d", turn.Input.Key, step), message).Get(ctx, nil); err != nil {
+		return turn, err
+	}
+	for _, call := range message.ToolCalls {
+		// Validate even a forged model response; advertised tools are not a guard.
+		var output string
+		if call.Name != "send_message" || turn.Sent {
+			output = `{"error":"Finalization only permits one successful send_message; no further actions are executed."}`
+		} else {
+			recordTool(&turn, call.Name)
+			if err := workflow.ExecuteActivity(ctx, "ToolCall", toolInput(turn, step, call)).Get(ctx, &output); err != nil {
+				turn.Stats.ToolErrors++
+				return turn, err
+			}
+			if agent.ToolFailed(output) {
+				turn.Stats.ToolErrors++
+			} else {
+				turn.Sent = true
+			}
+		}
+		toolMessage := domain.Message{Role: "tool", Content: output, ToolCallID: call.ID}
+		turn.Messages = append(turn.Messages, toolMessage)
+		if err := workflow.ExecuteActivity(ctx, "PersistMessage", turn.Input.SessionID, fmt.Sprintf("%s/tool/%d/%s", turn.Input.Key, step, call.ID), toolMessage).Get(ctx, nil); err != nil {
+			return turn, err
+		}
+	}
+	if turn.Sent {
+		return turn, nil
+	}
+	return turn, temporal.NewNonRetryableApplicationError("agent finalization did not queue a reply", "step_limit", nil)
 }
 
 func TaskWorkflow(ctx workflow.Context, in TaskInput) error {

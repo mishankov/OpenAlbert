@@ -25,13 +25,34 @@ type Attachment struct {
 	ArtifactID      string `json:"artifact_id,omitempty"`
 }
 type Incoming struct {
-	AuthorName     string       `json:"author_name,omitempty"`
-	AuthorUsername string       `json:"author_username,omitempty"`
-	ID             string       `json:"id"`
-	Conversation   Conversation `json:"conversation"`
-	Text           string       `json:"text"`
-	Attachments    []Attachment `json:"attachments,omitempty"`
-	CreatedAt      time.Time    `json:"created_at"`
+	Command        string        `json:"command,omitempty"` // Validated transport command, without slash or bot username.
+	AuthorName     string        `json:"author_name,omitempty"`
+	AuthorUsername string        `json:"author_username,omitempty"`
+	ID             string        `json:"id"`
+	Conversation   Conversation  `json:"conversation"`
+	Text           string        `json:"text"`
+	ReplyTo        *ReplyContext `json:"reply_to,omitempty"`
+	Quote          *MessageQuote `json:"quote,omitempty"`
+	Attachments    []Attachment  `json:"attachments,omitempty"`
+	CreatedAt      time.Time     `json:"created_at"`
+}
+
+// ReplyContext is a snapshot supplied by Telegram, not another incoming message.
+// MessageID is scoped to the current Telegram chat, unlike Incoming.ID (an update ID).
+type ReplyContext struct {
+	MessageID      int64    `json:"message_id"`
+	AuthorID       int64    `json:"author_id,omitempty"`
+	AuthorName     string   `json:"author_name,omitempty"`
+	AuthorUsername string   `json:"author_username,omitempty"`
+	AuthorIsBot    bool     `json:"author_is_bot,omitempty"`
+	Text           string   `json:"text,omitempty"`
+	MediaKinds     []string `json:"media_kinds,omitempty"`
+}
+
+type MessageQuote struct {
+	Text     string `json:"text"`
+	Position int    `json:"position"` // Approximate UTF-16 code unit offset; do not slice UTF-8 text with it.
+	IsManual bool   `json:"is_manual,omitempty"`
 }
 type ToolCall struct {
 	ID        string          `json:"id"`
@@ -140,15 +161,22 @@ type Session struct {
 // HistoryMessage is a saved user/assistant message with its original scope.
 // SessionStartedAt is not the individual message's timestamp.
 type HistoryMessage struct {
-	AuthorID         int64     `json:"author_id,omitempty"`
-	ReplyRequested   bool      `json:"reply_requested,omitempty"`
-	Truncated        bool      `json:"truncated,omitempty"`
-	Seq              int64     `json:"seq"`
-	ConversationID   string    `json:"conversation_id"`
-	SessionID        string    `json:"session_id"`
-	SessionStartedAt time.Time `json:"session_started_at"`
-	Role             string    `json:"role"`
-	Content          string    `json:"content"`
+	AuthorID         int64             `json:"author_id,omitempty"`
+	ToolCalls        []HistoryToolCall `json:"tool_calls,omitempty"`
+	Truncated        bool              `json:"truncated,omitempty"`
+	Seq              int64             `json:"seq"`
+	ConversationID   string            `json:"conversation_id"`
+	SessionID        string            `json:"session_id"`
+	SessionStartedAt time.Time         `json:"session_started_at"`
+	Role             string            `json:"role"`
+	Content          string            `json:"content"`
+}
+
+// HistoryToolCall identifies an actual send_message call. Its text is already
+// included in HistoryMessage.Content; full arguments remain in stored messages.
+type HistoryToolCall struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // Repository stores operational state. All mutation keys supplied by callers must be idempotent.

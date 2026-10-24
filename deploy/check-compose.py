@@ -82,6 +82,12 @@ def main():
     for stt_url in ["", "http://speech.example:8080/v1"]:
         for browser in ["true", "false"]:
             check_pair({"STT_BASE_URL": stt_url, "BROWSER_ENABLED": browser})
+    for logs_url in ["", "http://logs.example:9428"]:
+        inspector_url = "https://inspect.example/inspect/"
+        release = check_pair({"VICTORIALOGS_URL": logs_url, "INSPECTOR_PUBLIC_URL": inspector_url})
+        app = release["services"]["openalbert"]["environment"]
+        assert app["VICTORIALOGS_URL"] == logs_url, "Explicit logs endpoint/disable setting was lost"
+        assert app["INSPECTOR_PUBLIC_URL"] == inspector_url, "Public inspector links were lost"
     for variable in TEST_ENV:
         result = render("compose.yaml", overrides={variable: ""}, env_file=".env.release.example")
         assert result.returncode and variable in result.stderr, f"{variable}: release should reject an empty required value"

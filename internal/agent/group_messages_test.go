@@ -33,7 +33,7 @@ func TestOwnerQueuesGroupPostOnceAndOnlyPublicTextEntersGroupHistory(t *testing.
 		t.Fatalf("wrong destination or trace: %+v", out)
 	}
 	history, err := repo.ConversationHistory(ctx, group.ID, "", 0, 20)
-	if err != nil || len(history) != 1 || history[0].Content != out.Text || !history[0].ReplyRequested {
+	if err != nil || len(history) != 1 || history[0].Content != out.Text || len(history[0].ToolCalls) != 1 || history[0].ToolCalls[0].Name != "send_message" {
 		t.Fatalf("group history wrong: %v %v", history, err)
 	}
 	analyses, err := repo.PendingAnalysis(ctx, 20)
