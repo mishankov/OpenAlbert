@@ -4,7 +4,7 @@
 !.env.release.example
 /data/
 /knowledge/
-/container_data/
+/container_data
 /bin/
 /coverage.out
 *.test
