@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestProgressValidationAndIdempotentDeletion(t *testing.T) {

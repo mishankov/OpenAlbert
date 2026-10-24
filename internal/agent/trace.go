@@ -10,8 +10,8 @@ import (
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
-	"jarvis/internal/domain"
-	"jarvis/internal/telemetry"
+	"openalbert/internal/domain"
+	"openalbert/internal/telemetry"
 )
 
 // Inspection must not change whether a side effect succeeds. Failed trace writes

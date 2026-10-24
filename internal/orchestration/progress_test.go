@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestProgressEditsOneMessageAndDeletesAfterEveryReplyPart(t *testing.T) {

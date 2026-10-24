@@ -15,7 +15,7 @@ func TestTelegramCommandMenuAndKeyboardInput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/getMe"):
-			_, _ = io.WriteString(w, `{"ok":true,"result":{"username":"JarvisBot"}}`)
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"username":"OpenAlbertBot"}}`)
 		case strings.HasSuffix(r.URL.Path, "/setMyCommands"):
 			var payload struct {
 				Commands []struct{ Command, Description string }
@@ -31,7 +31,7 @@ func TestTelegramCommandMenuAndKeyboardInput(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
 			_, _ = io.WriteString(w, `{"ok":true,"result":[
 				{"update_id":1,"message":{"from":{"id":7},"chat":{"id":7,"type":"private"},"text":"/new"}},
-				{"update_id":2,"message":{"from":{"id":8},"chat":{"id":-20,"type":"supergroup"},"message_thread_id":3,"text":"/new@jarvisbot"}},
+				{"update_id":2,"message":{"from":{"id":8},"chat":{"id":-20,"type":"supergroup"},"message_thread_id":3,"text":"/new@openalbertbot"}},
 				{"update_id":3,"message":{"from":{"id":8},"chat":{"id":-20,"type":"supergroup"},"text":"/new@OtherBot"}},
 				{"update_id":4,"message":{"from":{"id":7},"chat":{"id":7,"type":"private"},"text":"/newspaper"}},
 				{"update_id":5,"message":{"from":{"id":7},"chat":{"id":7,"type":"private"},"caption":"/new","document":{"file_id":"doc"}}},

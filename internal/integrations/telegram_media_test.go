@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/messagefmt"
+	"openalbert/internal/domain"
+	"openalbert/internal/messagefmt"
 )
 
 func TestArtifactMediaMethodAndCaptionValidation(t *testing.T) {

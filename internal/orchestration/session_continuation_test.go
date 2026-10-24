@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/agent"
-	"jarvis/internal/domain"
+	"openalbert/internal/agent"
+	"openalbert/internal/domain"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/converter"

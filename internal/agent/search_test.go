@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/integrations"
+	"openalbert/internal/domain"
+	"openalbert/internal/integrations"
 )
 
 func TestDisabledSearchIsHiddenAndCannotBeInvoked(t *testing.T) {

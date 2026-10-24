@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/chromedp/chromedp"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestProxyRejectsPrivateDestinationsAndConnectPorts(t *testing.T) {
@@ -52,9 +52,9 @@ func TestProxyRejectsPrivateDestinationsAndConnectPorts(t *testing.T) {
 	}
 }
 func TestChromiumIntegration(t *testing.T) {
-	binary := os.Getenv("JARVIS_TEST_CHROMIUM")
+	binary := os.Getenv("OPENALBERT_TEST_CHROMIUM")
 	if binary == "" {
-		t.Skip("set JARVIS_TEST_CHROMIUM to run real browser tests")
+		t.Skip("set OPENALBERT_TEST_CHROMIUM to run real browser tests")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
@@ -80,7 +80,7 @@ func TestChromiumIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer proxy.Close()
-	cfg := Config{Executable: binary, NoSandbox: os.Getenv("JARVIS_TEST_NO_SANDBOX") == "true", validate: func(ctx context.Context, raw string) error {
+	cfg := Config{Executable: binary, NoSandbox: os.Getenv("OPENALBERT_TEST_NO_SANDBOX") == "true", validate: func(ctx context.Context, raw string) error {
 		u, err := url.Parse(raw)
 		if err != nil || u.Scheme != "http" || u.Host != "public.test" {
 			return errors.New("not a public test URL")

@@ -142,7 +142,7 @@ func (w *WebReader) Read(ctx context.Context, raw string) (string, error) {
 	if err != nil {
 		return "", errors.New("invalid web URL")
 	}
-	req.Header.Set("User-Agent", "Jarvis/1.0 (+public-page-reader)")
+	req.Header.Set("User-Agent", "OpenAlbert/1.0 (+public-page-reader)")
 	req.Header.Set("Accept", "text/html, text/plain;q=0.9")
 	resp, err := w.client.Do(req)
 	if err != nil {

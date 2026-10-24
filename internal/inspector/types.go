@@ -3,7 +3,7 @@ package inspector
 import (
 	"context"
 	"encoding/json"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 	"time"
 )
 

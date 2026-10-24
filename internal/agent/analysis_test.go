@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/storage"
+	"openalbert/internal/domain"
+	"openalbert/internal/storage"
 )
 
 func closedAnalysisSession(t *testing.T, a *Activities, repo *storage.Memory, scope string, messages ...domain.Message) domain.Session {

@@ -3,7 +3,7 @@ package agent
 import (
 	"encoding/json"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func incomingText(msg domain.Incoming) string {

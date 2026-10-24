@@ -1,7 +1,7 @@
 flowchart TD
-    accTitle: Браузеры сессий Jarvis
+    accTitle: Браузеры сессий OpenAlbert
     accDescr: В одном контейнере BrowserManager выделяет до пяти независимых Chromium. Фоновые запуски занимают максимум четыре. Интерактивный браузер закрывается вместе с сессией, фоновый в конце запуска.
-    subgraph Container["Контейнер Jarvis"]
+    subgraph Container["Контейнер OpenAlbert"]
       Core["Go · агентский цикл и Temporal workers"] --> UI["Очередь browser-ui"]
       Core --> BG["Очередь browser-bg"]
       UI --> Pool["BrowserManager<br/>Всего 5 · фоновых не более 4"]

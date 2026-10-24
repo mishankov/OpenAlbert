@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestLegacyRichHTMLPreservesLiteralCodeUnicodeAndOverlappingStyles(t *testing.T) {

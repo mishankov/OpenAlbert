@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 	"strings"
 	"testing"
 	"time"

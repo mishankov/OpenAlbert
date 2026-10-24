@@ -12,7 +12,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"

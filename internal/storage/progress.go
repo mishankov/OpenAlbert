@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func newProgress(p domain.Progress) domain.Progress {
@@ -26,10 +26,10 @@ func validProgressStatus(status string) bool {
 // complete the owner's reply and cannot cause a private status to disappear.
 const progressOutcomeSQL = `CASE
  WHEN p.data->>'status' IN ('failed','cancelled') THEN p.data->>'status'
- WHEN p.data->>'status'='active' THEN CASE WHEN EXISTS(SELECT 1 FROM jarvis_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id') THEN 'waiting' ELSE 'active' END
- WHEN EXISTS(SELECT 1 FROM jarvis_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id' AND o.state IN ('failed','unknown')) THEN 'delivery_failed'
- WHEN EXISTS(SELECT 1 FROM jarvis_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id')
- AND NOT EXISTS(SELECT 1 FROM jarvis_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id' AND o.state<>'sent') THEN 'delivered'
+ WHEN p.data->>'status'='active' THEN CASE WHEN EXISTS(SELECT 1 FROM openalbert_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id') THEN 'waiting' ELSE 'active' END
+ WHEN EXISTS(SELECT 1 FROM openalbert_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id' AND o.state IN ('failed','unknown')) THEN 'delivery_failed'
+ WHEN EXISTS(SELECT 1 FROM openalbert_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id')
+ AND NOT EXISTS(SELECT 1 FROM openalbert_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id' AND o.state<>'sent') THEN 'delivered'
  ELSE 'waiting' END`
 
 func (s *Store) StartProgress(ctx context.Context, p domain.Progress) error {
@@ -43,12 +43,12 @@ func (s *Store) StartProgress(ctx context.Context, p domain.Progress) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO jarvis_progress(id,data) VALUES($1,$2) ON CONFLICT DO NOTHING`, p.TurnID, raw)
+	_, err = s.pool.Exec(ctx, `INSERT INTO openalbert_progress(id,data) VALUES($1,$2) ON CONFLICT DO NOTHING`, p.TurnID, raw)
 	return err
 }
 
 func (s *Store) ReportProgress(ctx context.Context, id string, step int, text string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE jarvis_progress SET data=data||jsonb_build_object('step',$2::int,'text',$3::text) WHERE id=$1 AND data->>'status'='active' AND (data->>'step')::int<=$2`, id, step, text)
+	_, err := s.pool.Exec(ctx, `UPDATE openalbert_progress SET data=data||jsonb_build_object('step',$2::int,'text',$3::text) WHERE id=$1 AND data->>'status'='active' AND (data->>'step')::int<=$2`, id, step, text)
 	return err
 }
 
@@ -56,12 +56,12 @@ func (s *Store) EndProgress(ctx context.Context, id, status string) error {
 	if !validProgressStatus(status) {
 		return errors.New("invalid progress status")
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE jarvis_progress SET data=jsonb_set(data,'{status}',to_jsonb($2::text)) WHERE id=$1 AND data->>'status'='active'`, id, status)
+	_, err := s.pool.Exec(ctx, `UPDATE openalbert_progress SET data=jsonb_set(data,'{status}',to_jsonb($2::text)) WHERE id=$1 AND data->>'status'='active'`, id, status)
 	return err
 }
 
 func (s *Store) DueProgress(ctx context.Context, now time.Time, n int) ([]domain.Progress, error) {
-	return selectJSON[domain.Progress](ctx, s.pool, `WITH candidates AS (SELECT p.data||jsonb_build_object('outcome',`+progressOutcomeSQL+`) AS data FROM jarvis_progress p WHERE p.data->'delivery'->>'state'='ready')
+	return selectJSON[domain.Progress](ctx, s.pool, `WITH candidates AS (SELECT p.data||jsonb_build_object('outcome',`+progressOutcomeSQL+`) AS data FROM openalbert_progress p WHERE p.data->'delivery'->>'state'='ready')
  SELECT data FROM candidates WHERE data->>'outcome'<>'waiting' AND (data->'delivery'->>'retry_at')::timestamptz<=$1
  AND (data->>'outcome'<>'active' OR ((data->>'started_at')::timestamptz<=$2 AND (data->'delivery'->>'updated_at')::timestamptz<=$3))
  ORDER BY data->>'started_at',data->>'turn_id' LIMIT $4`, now, now.Add(-domain.ProgressDelay), now.Add(-domain.ProgressInterval), limitValue(n))
@@ -75,7 +75,7 @@ func (s *Store) SetProgressDelivery(ctx context.Context, id string, version int6
 	if err != nil {
 		return domain.Progress{}, false, err
 	}
-	return oneJSON[domain.Progress](ctx, s.pool, `UPDATE jarvis_progress p SET data=jsonb_set(data,'{delivery}',$3::jsonb) WHERE id=$1 AND (data->'delivery'->>'version')::bigint=$2 RETURNING p.data||jsonb_build_object('outcome',`+progressOutcomeSQL+`)`, id, version, raw)
+	return oneJSON[domain.Progress](ctx, s.pool, `UPDATE openalbert_progress p SET data=jsonb_set(data,'{delivery}',$3::jsonb) WHERE id=$1 AND (data->'delivery'->>'version')::bigint=$2 RETURNING p.data||jsonb_build_object('outcome',`+progressOutcomeSQL+`)`, id, version, raw)
 }
 
 func (m *Memory) StartProgress(ctx context.Context, p domain.Progress) error {

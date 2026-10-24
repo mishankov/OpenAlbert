@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestVictoriaLogsContract(t *testing.T) {
-	base := os.Getenv("JARVIS_TEST_VICTORIALOGS_URL")
+	base := os.Getenv("OPENALBERT_TEST_VICTORIALOGS_URL")
 	if base == "" {
-		t.Skip("set JARVIS_TEST_VICTORIALOGS_URL to a disposable VictoriaLogs instance")
+		t.Skip("set OPENALBERT_TEST_VICTORIALOGS_URL to a disposable VictoriaLogs instance")
 	}
 	reader, err := NewVictoriaLogs(base, nil)
 	if err != nil {
@@ -30,13 +30,13 @@ func TestVictoriaLogsContract(t *testing.T) {
 	stamp := until.Add(-time.Minute).Format(time.RFC3339Nano)
 	quoted := `past" OR * | fields _msg`
 	rows := []map[string]any{
-		{"service": "jarvis", "conversation_id": scope, "turn_id": "past-turn", "operation": "llm.complete", "result": "error", "error_code": "http_400", "_msg": "Request rejected", "_time": stamp},
-		{"service": "jarvis", "conversation_id": scope, "turn_id": "past-turn", "operation": "telegram.deliver", "result": "success", "delivery_state": "sent", "_msg": "Reply delivered", "_time": stamp},
-		{"service": "jarvis", "conversation_id": scope, "turn_id": quoted, "operation": "tool.execute", "result": "error", "error_code": "http_404", "_msg": "Quoted identifier", "_time": stamp},
-		{"service": "jarvis", "conversation_id": scope + "-foreign", "turn_id": "past-turn", "operation": "llm.complete", "result": "error", "_msg": "FOREIGN_PRIVATE_CONTENT", "_time": stamp},
+		{"service": "openalbert", "conversation_id": scope, "turn_id": "past-turn", "operation": "llm.complete", "result": "error", "error_code": "http_400", "_msg": "Request rejected", "_time": stamp},
+		{"service": "openalbert", "conversation_id": scope, "turn_id": "past-turn", "operation": "telegram.deliver", "result": "success", "delivery_state": "sent", "_msg": "Reply delivered", "_time": stamp},
+		{"service": "openalbert", "conversation_id": scope, "turn_id": quoted, "operation": "tool.execute", "result": "error", "error_code": "http_404", "_msg": "Quoted identifier", "_time": stamp},
+		{"service": "openalbert", "conversation_id": scope + "-foreign", "turn_id": "past-turn", "operation": "llm.complete", "result": "error", "_msg": "FOREIGN_PRIVATE_CONTENT", "_time": stamp},
 		{"service": "postgres", "conversation_id": scope, "turn_id": "past-turn", "operation": "llm.complete", "result": "error", "_msg": "OTHER_SERVICE_CONTENT", "_time": stamp},
-		{"service": "jarvis", "turn_id": "past-turn", "operation": "llm.complete", "result": "error", "_msg": "UNSCOPED_CONTENT", "_time": stamp},
-		{"service": "jarvis", "conversation_id": scope, "turn_id": "past-turn", "operation": "llm.complete", "result": "error", "_msg": "OLD_CONTENT", "_time": until.Add(-time.Hour).Format(time.RFC3339Nano)},
+		{"service": "openalbert", "turn_id": "past-turn", "operation": "llm.complete", "result": "error", "_msg": "UNSCOPED_CONTENT", "_time": stamp},
+		{"service": "openalbert", "conversation_id": scope, "turn_id": "past-turn", "operation": "llm.complete", "result": "error", "_msg": "OLD_CONTENT", "_time": until.Add(-time.Hour).Format(time.RFC3339Nano)},
 	}
 	var body bytes.Buffer
 	for _, row := range rows {
@@ -60,7 +60,9 @@ func TestVictoriaLogsContract(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Events) == 2 {
+		// The summary and event sample are separate queries. Ingestion can become
+		// visible between them, so wait until both observe the fixture batch.
+		if len(result.Events) == 2 && len(result.Summary) == 2 {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)

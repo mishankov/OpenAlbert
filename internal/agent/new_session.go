@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 // StartNewSession is retried with stable session, inbox and outbox IDs. The

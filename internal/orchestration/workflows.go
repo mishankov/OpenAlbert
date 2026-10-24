@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"jarvis/internal/agent"
-	"jarvis/internal/domain"
-	"jarvis/internal/telemetry"
+	"openalbert/internal/agent"
+	"openalbert/internal/domain"
+	"openalbert/internal/telemetry"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
@@ -50,6 +50,8 @@ type InitiativeInput struct {
 	ConversationID string
 	Interval       time.Duration
 	MaxSteps       int
+	// ResumeAt preserves the next check when moving an idle execution to a new queue.
+	ResumeAt time.Time `json:",omitempty"`
 }
 
 func options(ctx workflow.Context) workflow.Context {
@@ -595,7 +597,11 @@ func InitiativeWorkflow(ctx workflow.Context, in InitiativeInput) error {
 		return nil
 	}
 	for i := 0; i < 20; i++ {
-		if err := workflow.Sleep(ctx, in.Interval); err != nil {
+		delay := in.Interval
+		if i == 0 && !in.ResumeAt.IsZero() {
+			delay = in.ResumeAt.Sub(workflow.Now(ctx))
+		}
+		if err := workflow.Sleep(ctx, delay); err != nil {
 			return err
 		}
 		session := agent.ID("initiative", in.ConversationID, workflow.GetInfo(ctx).WorkflowExecution.RunID, fmt.Sprint(i))
@@ -607,6 +613,7 @@ func InitiativeWorkflow(ctx workflow.Context, in InitiativeInput) error {
 			return err
 		}
 	}
+	in.ResumeAt = time.Time{}
 	return workflow.NewContinueAsNewError(ctx, InitiativeWorkflow, in)
 }
 

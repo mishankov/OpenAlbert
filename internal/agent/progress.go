@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func (a *Activities) reportProgress(ctx context.Context, in ToolInput, text string) (any, error) {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestTaskUpdatesRespectInitiativeAndExecutorBoundaries(t *testing.T) {

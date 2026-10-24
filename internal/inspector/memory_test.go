@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/knowledge"
+	"openalbert/internal/domain"
+	"openalbert/internal/knowledge"
 )
 
 type memoryConversations struct{}
@@ -127,7 +127,7 @@ func TestSoulInspectorReadsConfiguredFileAndRemainsLocalReadOnly(t *testing.T) {
 				path = filepath.Join(t.TempDir(), "owner.md")
 				soulFile = path
 			}
-			content := "# Jarvis\n\nИмя и характер <script>текст</script>"
+			content := "# OpenAlbert\n\nИмя и характер <script>текст</script>"
 			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 				t.Fatal(err)
 			}

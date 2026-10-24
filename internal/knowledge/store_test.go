@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestKnowledgePersistenceAndIsolation(t *testing.T) {
@@ -74,7 +74,7 @@ func TestKnowledgePersistenceAndIsolation(t *testing.T) {
 		t.Fatal("deleted preference retained")
 	}
 	// Existing owner-edited files must survive process restarts.
-	custom := "# My Jarvis\nCalm and concise.\n"
+	custom := "# My OpenAlbert\nCalm and concise.\n"
 	if err = os.WriteFile(filepath.Join(root, "SOUL.md"), []byte(custom), 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/agent"
-	"jarvis/internal/domain"
-	"jarvis/internal/storage"
+	"openalbert/internal/agent"
+	"openalbert/internal/domain"
+	"openalbert/internal/storage"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
@@ -166,7 +166,7 @@ func TestDispatchRecognizesOnlyExplicitNewCommands(t *testing.T) {
 	repo := storage.NewMemory()
 	conv := domain.Conversation{ID: "personal:7", OwnerID: 7, ChatID: 7, Private: true}
 	inputs := []domain.Incoming{
-		{Text: "/new"}, {Text: "/new@JarvisBot", Command: "new"},
+		{Text: "/new"}, {Text: "/new@OpenAlbertBot", Command: "new"},
 		{Text: "explain /new"}, {Text: "/newspaper"},
 		{Text: "/new", Attachments: []domain.Attachment{{FileID: "doc"}}},
 	}

@@ -8,7 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func (a *Activities) sendGroupMessage(ctx context.Context, in ToolInput, p toolArgs, key string, now time.Time) (any, error) {

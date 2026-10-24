@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 var ErrSearchDisabled = errors.New("web_search API tool is disabled; use listed browser tools to find sources or web_read for a known public URL")

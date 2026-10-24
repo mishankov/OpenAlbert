@@ -2,9 +2,9 @@
 """Actual Compose MVP smoke. Uses local fake APIs; never contacts real Telegram/LLM/Yandex.
 With --with-browser, Chromium visits public example.com.
 
-Requires the local development infrastructure from compose.yaml and a built jarvis image.
+Requires the local development infrastructure from compose.local.yaml and a built openalbert image.
 Creates an isolated application DB, knowledge volume and artifact bucket, then removes them.
-Does not alter the documentation server or stop infrastructure. Refuses a running Jarvis.
+Does not alter the documentation server or stop infrastructure. Refuses a running OpenAlbert.
 """
 import argparse
 import base64
@@ -86,7 +86,10 @@ class FakeState:
                 self.analyses += 1
             return {"role": "assistant", "content": json.dumps({"summary": self.marker,
                 "memories": [{"content": self.marker + " analyzed preference", "kind": "preference"}]})}
-        last_user = max(i for i, message in enumerate(messages) if message["role"] == "user")
+        # Background notification rules follow the actual task as another user
+        # message. Select the task, while retaining subsequent tool results.
+        last_user = max(i for i, message in enumerate(messages)
+                        if message["role"] == "user" and not str(message["content"]).startswith("Complete the background work."))
         user_text = messages[last_user]["content"]
         if not isinstance(user_text, str):
             user_text = " ".join(item.get("text", "") for item in user_text)
@@ -110,7 +113,7 @@ class FakeState:
                       "result": self.marker + " task persisted"}, "task_done"),
                      self.call("send_message", {"text": self.marker + ": completed"}, "notify_done")]
         else:
-            assert self.marker in user_text, "unexpected model request"
+            assert self.marker in user_text, f"unexpected model request: {user_text[:500]!r}"
             later = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=5)).isoformat()
             calls = [self.call("memory_update", {"content": self.marker + " preference", "kind": "preference"}, "memory"),
                      self.call("task_create", {"title": self.marker, "goal": self.marker,
@@ -147,7 +150,7 @@ def handler_for(state):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
             method = self.path.rsplit("/", 1)[-1]
             if method == "getMe":
-                self.json({"ok": True, "result": {"id": 1, "is_bot": True, "username": "jarvis_smoke_bot"}})
+                self.json({"ok": True, "result": {"id": 1, "is_bot": True, "username": "openalbert_smoke_bot"}})
             elif method == "setMyCommands":
                 assert {item["command"] for item in body["commands"]} == {"new", "stop"}
                 self.json({"ok": True, "result": True})
@@ -197,12 +200,16 @@ def main():
     args = parser.parse_args()
     env = dict(os.environ)
     env.setdefault("POSTGRES_PORT", "15432")
-    compose = ["docker", "compose"]
-    if run(compose + ["ps", "-q", "jarvis"], env):
-        raise SystemExit("Stop your Jarvis container before running isolated smoke; it will not be replaced.")
+    compose = ["docker", "compose", "-f", "compose.local.yaml"]
+    settings = json.loads(run(compose + ["config", "--format", "json"], env))
+    postgres = settings["services"]["postgres"]["environment"]
+    postgres_user = postgres["POSTGRES_USER"]
+    postgres_password = postgres["POSTGRES_PASSWORD"]
+    if run(compose + ["ps", "-q", "openalbert"], env):
+        raise SystemExit("Stop your OpenAlbert container before running isolated smoke; it will not be replaced.")
     marker = "mvp-smoke-" + uuid.uuid4().hex[:12]
     db = marker.replace("-", "_")
-    volume = "jarvis_" + db
+    volume = "openalbert_" + db
     bucket = marker
     # Every external key/endpoint is replaced. No dotenv secret is read by fake APIs.
     env.update(TELEGRAM_BOT_TOKEN="smoke-token", TELEGRAM_ALLOWED_USER_IDS="42", TELEGRAM_OWNER_USER_ID="42",
@@ -221,48 +228,47 @@ def main():
     created = False
     app_created = False
     try:
-        run(compose + ["exec", "-T", "postgres", "psql", "-U", "jarvis", "-d", "postgres", "-c", f'CREATE DATABASE "{db}"'], env)
+        run(compose + ["exec", "-T", "postgres", "psql", "-U", postgres_user, "-d", "postgres", "-c", f'CREATE DATABASE "{db}"'], env)
         created = True
         run(compose + ["run", "--rm", "--no-deps", "-e", "S3_BUCKET=" + bucket, "minio-init"], env)
-        with tempfile.TemporaryDirectory(prefix="jarvis-smoke-") as temp:
+        with tempfile.TemporaryDirectory(prefix="openalbert-smoke-") as temp:
             # JSON is also valid YAML. Overrides only the application service, no infrastructure recreation.
-            password = env.get("POSTGRES_PASSWORD", "jarvis-local-dev")
-            override = {"services": {"jarvis": {"labels": {"jarvis.smoke": marker},
-                "environment": {"DATABASE_URL": f"postgres://jarvis:{urllib.parse.quote(password, safe='')}@postgres:5432/{db}?sslmode=disable", "S3_BUCKET": bucket},
+            override = {"services": {"openalbert": {"labels": {"openalbert.smoke": marker},
+                "environment": {"DATABASE_URL": f"postgres://{urllib.parse.quote(postgres_user, safe='')}:{urllib.parse.quote(postgres_password, safe='')}@postgres:5432/{db}?sslmode=disable", "S3_BUCKET": bucket},
                 "volumes": [{"type": "volume", "source": "smoke_knowledge", "target": "/data/knowledge"}]}},
                 "volumes": {"smoke_knowledge": {"name": volume}}}
             path = Path(temp) / "override.json"
             path.write_text(json.dumps(override))
-            cmd = compose + ["-f", "compose.yaml", "-f", str(path)]
+            cmd = compose + ["-f", str(path)]
             def sql(query):
-                return run(compose + ["exec", "-T", "postgres", "psql", "-U", "jarvis", "-d", db, "-Atc", query], env)
+                return run(compose + ["exec", "-T", "postgres", "psql", "-U", postgres_user, "-d", db, "-Atc", query], env)
             def health():
                 with urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2) as response:
                     return json.load(response).get("status") == "ok"
-            print("Starting isolated Jarvis container with local fake APIs", flush=True)
+            print("Starting isolated OpenAlbert container with local fake APIs", flush=True)
             app_created = True
-            run(cmd + ["up", "-d", "--no-deps", "--no-build", "jarvis"], env)
+            run(cmd + ["up", "-d", "--no-deps", "--no-build", "openalbert"], env)
             wait_until("application health", health)
             wait_until("two Telegram replies", lambda: len(state.sent) >= 2)
-            wait_until("closed sessions analyzed", lambda: sql("SELECT count(*) > 0 AND bool_and(analyzed) FROM jarvis_sessions") == "t")
-            assert sql("SELECT count(*) FROM jarvis_incoming WHERE handled") == "1", "incoming message not persisted exactly once"
-            assert sql("SELECT count(*) FROM jarvis_tasks WHERE data->>'status'='completed'") == "1", "task not completed"
-            assert sql("SELECT count(*) FROM jarvis_artifacts WHERE octet_length(content)=0") == str(2 if args.with_browser else 1), "artifact body should live in S3"
+            wait_until("closed sessions analyzed", lambda: sql("SELECT count(*) > 0 AND bool_and(analyzed) FROM openalbert_sessions") == "t")
+            assert sql("SELECT count(*) FROM openalbert_incoming WHERE handled") == "1", "incoming message not persisted exactly once"
+            assert sql("SELECT count(*) FROM openalbert_tasks WHERE data->>'status'='completed'") == "1", "task not completed"
+            assert sql("SELECT count(*) FROM openalbert_artifacts WHERE octet_length(content)=0") == str(2 if args.with_browser else 1), "artifact body should live in S3"
             assert len(state.sent) == 2 and all(str(message["chat_id"]) == "42" for message in state.sent), "unexpected deliveries"
             assert state.searches == (0 if args.without_search else 1), "Yandex adapter was not called exactly once"
             assert state.analyses > 0, "post-session analysis did not run"
-            knowledge = run(cmd + ["exec", "-T", "jarvis", "sh", "-c", "find /data/knowledge -type f -exec cat {} \\;"], env)
+            knowledge = run(cmd + ["exec", "-T", "openalbert", "sh", "-c", "find /data/knowledge -type f -exec cat {} \\;"], env)
             assert marker + " preference" in knowledge, "automatic memory not saved"
             # Read the actual object from the isolated bucket through mc; no direct API shortcuts.
             objects = run(compose + ["run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "minio-init", "-c",
                           'mc alias set local http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null && mc find "$1"', "sh", "local/" + bucket], env).splitlines()
             assert len(objects) == (2 if args.with_browser else 1), "unexpected artifact object count"
-            document_id = sql("SELECT id FROM jarvis_artifacts WHERE data->>'name'='smoke.txt'")
+            document_id = sql("SELECT id FROM openalbert_artifacts WHERE data->>'name'='smoke.txt'")
             document_key = "local/" + bucket + "/artifacts/" + hashlib.sha256(b"personal:42").hexdigest() + "/" + hashlib.sha256(document_id.encode()).hexdigest()
             assert document_key in objects, "document object not found"
             if args.with_browser:
-                assert sql("SELECT count(*) FROM jarvis_artifacts WHERE data->>'mime'='image/png'") == "1", "browser screenshot metadata missing"
-                processes = run(cmd + ["exec", "-T", "jarvis", "sh", "-c", "ps -o comm"], env).splitlines()
+                assert sql("SELECT count(*) FROM openalbert_artifacts WHERE data->>'mime'='image/png'") == "1", "browser screenshot metadata missing"
+                processes = run(cmd + ["exec", "-T", "openalbert", "sh", "-c", "ps -o comm"], env).splitlines()
                 assert not any(name.strip() in ("chromium", "chrome") for name in processes), "Chromium survived closed session"
             content = run(compose + ["run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "minio-init", "-c",
                           'mc alias set local http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null && mc cat "$1"', "sh", document_key], env)
@@ -272,15 +278,15 @@ def main():
             with state.lock:
                 state.replay_once = True
                 state.offsets = []
-            print("Restarting Jarvis and replaying the same Telegram update", flush=True)
-            run(cmd + ["restart", "jarvis"], env)
+            print("Restarting OpenAlbert and replaying the same Telegram update", flush=True)
+            run(cmd + ["restart", "openalbert"], env)
             wait_until("health after restart", health)
             wait_until("persisted Telegram offset after restart", lambda: len(state.offsets) > 2 and min(state.offsets) >= state.update_id + 1)
             time.sleep(4)
             assert len(state.sent) == 2, "restart duplicated Telegram delivery"
             assert state.completions == old_completions and state.analyses == old_analyses, "restart repeated finished model work"
-            assert sql("SELECT count(*) FROM jarvis_incoming") == "1", "duplicate incoming inserted"
-            knowledge = run(cmd + ["exec", "-T", "jarvis", "sh", "-c", "find /data/knowledge -type f -exec cat {} \\;"], env)
+            assert sql("SELECT count(*) FROM openalbert_incoming") == "1", "duplicate incoming inserted"
+            knowledge = run(cmd + ["exec", "-T", "openalbert", "sh", "-c", "find /data/knowledge -type f -exec cat {} \\;"], env)
             assert marker + " preference" in knowledge, "memory did not survive restart"
             def logs_for(expression, limit=100):
                 query = urllib.parse.urlencode({"query": expression, "limit": str(limit)})
@@ -290,8 +296,8 @@ def main():
                 return logs_for(f'task_queue:"{marker}" operation:application.started', 10)
             events = wait_until("application wide events in VictoriaLogs", lambda: logged() if len(logged()) >= 2 else None, timeout=20)
             assert all(event["result"] == "success" and "duration_ms" in event for event in events)
-            assert all(event.get("service") == "jarvis" for event in events), "container service metadata missing"
-            turn_id = sql("SELECT data->>'turn_id' FROM jarvis_outgoing WHERE data->>'trigger'='message' LIMIT 1")
+            assert all(event.get("service") == "openalbert" for event in events), "container service metadata missing"
+            turn_id = sql("SELECT data->>'turn_id' FROM openalbert_outgoing WHERE data->>'trigger'='message' LIMIT 1")
             assert turn_id, "reply trace missing from persistent outbox"
             def traced():
                 rows = logs_for(f'turn_id:"{turn_id}"')
@@ -301,22 +307,22 @@ def main():
             summary = next(row for row in traced_events if row.get("operation") == "turn.complete")
             assert float(summary["processing_ms"]) > 0 and int(summary["model_calls"]) >= 2
             assert summary["delivery_state"] == "queued", "processing claimed actual delivery"
-            assert all(row.get("_msg", "").startswith("[jarvis]") and row.get("level") in ("info", "warn", "error") for row in traced_events), "normalized message or level missing"
+            assert all(row.get("_msg", "").startswith("[openalbert]") and row.get("level") in ("info", "warn", "error") for row in traced_events), "normalized message or level missing"
             print(json.dumps({"result": "passed", "incoming": 1, "deliveries": 2, "task": "completed", "search_requests": state.searches,
                               "session_analyses": state.analyses, "s3_document": "verified", "memory": "survived restart",
                               "duplicate_delivery": False, "browser": "page, screenshot and process cleanup verified" if args.with_browser else "not exercised", "wide_events": len(events), "traced_events": len(traced_events), "telegram_format": "rich_markdown"}, ensure_ascii=False), flush=True)
     except Exception:
         if app_created:
-            print(run(compose + ["logs", "--tail=60", "jarvis"], env), flush=True)
+            print(run(compose + ["logs", "--tail=60", "openalbert"], env), flush=True)
         raise
     finally:
         if app_created:
-            subprocess.run(compose + ["stop", "jarvis"], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(compose + ["rm", "-f", "jarvis"], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(compose + ["stop", "openalbert"], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(compose + ["rm", "-f", "openalbert"], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         server.shutdown()
         server.server_close()
         if created:
-            run(compose + ["exec", "-T", "postgres", "psql", "-U", "jarvis", "-d", "postgres", "-c", f'DROP DATABASE "{db}" WITH (FORCE)'], env)
+            run(compose + ["exec", "-T", "postgres", "psql", "-U", postgres_user, "-d", "postgres", "-c", f'DROP DATABASE "{db}" WITH (FORCE)'], env)
         subprocess.run(["docker", "volume", "rm", volume], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(compose + ["run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "minio-init", "-c",
                        'mc alias set local http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null && mc rb --force "$1"', "sh", "local/" + bucket],

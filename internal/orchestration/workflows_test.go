@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/agent"
-	"jarvis/internal/domain"
-	"jarvis/internal/knowledge"
-	"jarvis/internal/storage"
+	"openalbert/internal/agent"
+	"openalbert/internal/domain"
+	"openalbert/internal/knowledge"
+	"openalbert/internal/storage"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/converter"

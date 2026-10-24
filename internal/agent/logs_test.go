@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 type logReaderSpy struct{ filters []domain.LogFilter }

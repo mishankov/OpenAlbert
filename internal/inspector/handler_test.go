@@ -4,9 +4,9 @@ import (
 	"context"
 	"io"
 	"io/fs"
-	"jarvis/internal/domain"
 	"net/http"
 	"net/http/httptest"
+	"openalbert/internal/domain"
 	"strings"
 	"testing"
 )
@@ -47,7 +47,7 @@ func (fakeStore) Artifact(context.Context, string, string) (domain.Artifact, boo
 	return domain.Artifact{}, false, nil
 }
 func (fakeStore) ListFiles(context.Context, string, string) (domain.StoredFiles, error) {
-	return domain.StoredFiles{Bucket: "jarvis", Files: []domain.StoredFile{}}, nil
+	return domain.StoredFiles{Bucket: "openalbert", Files: []domain.StoredFile{}}, nil
 }
 func (fakeStore) OpenFile(context.Context, string) (domain.StoredFile, io.ReadSeekCloser, error) {
 	return domain.StoredFile{}, nil, fs.ErrNotExist

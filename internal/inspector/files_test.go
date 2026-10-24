@@ -14,7 +14,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 type fileStore struct {
@@ -33,7 +33,7 @@ func (s fileStore) ListFiles(_ context.Context, prefix, after string) (domain.St
 	if prefix != "a/" || after != "a/1" {
 		return domain.StoredFiles{}, errors.New("wrong pagination")
 	}
-	return domain.StoredFiles{Bucket: "jarvis", Files: []domain.StoredFile{s.file}, NextAfter: "a/2"}, s.err
+	return domain.StoredFiles{Bucket: "openalbert", Files: []domain.StoredFile{s.file}, NextAfter: "a/2"}, s.err
 }
 func fileRequest(store fileStore, target string, headers map[string]string) *httptest.ResponseRecorder {
 	mux := http.NewServeMux()

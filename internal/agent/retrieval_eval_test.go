@@ -8,16 +8,16 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/integrations"
+	"openalbert/internal/domain"
+	"openalbert/internal/integrations"
 )
 
 // Opt-in evaluation of the actual prompts and tool schemas against a configured
 // model. All knowledge, tasks and outgoing messages are isolated test fixtures;
 // nothing is delivered to Telegram or written to the installation's data.
 func TestLiveRetrievalPrompts(t *testing.T) {
-	if os.Getenv("JARVIS_LIVE_RETRIEVAL_EVAL") != "1" {
-		t.Skip("set JARVIS_LIVE_RETRIEVAL_EVAL=1 and LLM_* to evaluate retrieval prompts")
+	if os.Getenv("OPENALBERT_LIVE_RETRIEVAL_EVAL") != "1" {
+		t.Skip("set OPENALBERT_LIVE_RETRIEVAL_EVAL=1 and LLM_* to evaluate retrieval prompts")
 	}
 	model, err := integrations.NewOpenAI(integrations.OpenAIConfig{BaseURL: os.Getenv("LLM_BASE_URL"), APIKey: os.Getenv("LLM_API_KEY"), Model: os.Getenv("LLM_MODEL")})
 	if err != nil {

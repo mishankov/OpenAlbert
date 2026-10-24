@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 type Store struct {
@@ -190,7 +190,7 @@ func (s *Store) write(rel string, data []byte) error {
 }
 
 func writeAtomic(path string, data []byte, check func() error) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".jarvis-*")
+	f, err := os.CreateTemp(filepath.Dir(path), ".openalbert-*")
 	if err != nil {
 		return err
 	}

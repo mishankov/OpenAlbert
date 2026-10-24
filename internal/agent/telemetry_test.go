@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/integrations"
-	"jarvis/internal/telemetry"
+	"openalbert/internal/domain"
+	"openalbert/internal/integrations"
+	"openalbert/internal/telemetry"
 )
 
 type rejectedSearch struct{ testSearch }
@@ -106,7 +106,7 @@ func TestFailureLogsLinkToTheActualPersistedModelAndToolTrace(t *testing.T) {
 	a, repo, _, conv := fixture(t)
 	capture := &traceCapture{Repository: repo, traces: map[string]domain.Trace{}}
 	a.Repo = capture
-	a.InspectorPublicURL = "https://localhost:8443/jarvis/inspect/"
+	a.InspectorPublicURL = "https://localhost:8443/openalbert/inspect/"
 	a.Model = &testModel{respond: func([]domain.Message) (domain.Message, error) {
 		return domain.Message{}, errors.New("model response truncated by token limit")
 	}}
@@ -135,7 +135,7 @@ func TestFailureLogsLinkToTheActualPersistedModelAndToolTrace(t *testing.T) {
 			t.Fatalf("log does not identify its persisted trace: %v %+v", row, tr)
 		}
 		link, err := url.Parse(row["inspector_url"].(string))
-		if err != nil || link.Host != "localhost:8443" || link.Path != "/jarvis/inspect/" || link.Fragment != "/session/session?trace="+id {
+		if err != nil || link.Host != "localhost:8443" || link.Path != "/openalbert/inspect/" || link.Fragment != "/session/session?trace="+id {
 			t.Fatalf("invalid inspector link: %v %v", link, err)
 		}
 		if row["error_code"] == "operation_failed" || row["error_source"] == nil || row["error_stage"] != row["operation"] || strings.Contains(line, "hidden") {

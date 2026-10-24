@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 const logFields = "_time,level,_msg,operation,result,error_code,error_reason,error_source,error_stage,http_status,retryable,duration_ms,processing_ms,since_received_ms,conversation_id,session_id,turn_id,task_id,trigger,step,tool,tool_call_id,tool_outcome,activity_result,workflow_id,workflow_run_id,activity_id,attempt,cached,trace_id,inspector_url,finish_reason,delivery_state,delivery_id,queue_wait_ms,model,model_calls,tool_calls,tool_errors,input_tokens,output_tokens"
@@ -55,7 +55,7 @@ func (v *VictoriaLogs) Search(ctx context.Context, f domain.LogFilter) (domain.L
 		return out, errors.New("log time range must be positive and at most 24 hours")
 	}
 	out.ConversationID, out.Since, out.Until = f.ConversationID, f.Since.UTC(), f.Until.UTC()
-	filters := []string{`service:="jarvis"`}
+	filters := []string{`service:="openalbert"`}
 	for _, field := range []struct{ name, value string }{
 		{"conversation_id", f.ConversationID}, {"session_id", f.SessionID}, {"turn_id", f.TurnID}, {"operation", f.Operation}, {"tool", f.Tool}, {"result", f.Result}, {"error_code", f.ErrorCode},
 	} {

@@ -15,7 +15,7 @@ import (
 )
 
 func New(w io.Writer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})).With("service", "jarvis", "log_schema_version", 4)
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})).With("service", "openalbert", "log_schema_version", 4)
 }
 
 type Event struct {

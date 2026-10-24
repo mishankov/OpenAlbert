@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/telemetry"
+	"openalbert/internal/domain"
+	"openalbert/internal/telemetry"
 )
 
 func trigger(task string, initiative bool) string {

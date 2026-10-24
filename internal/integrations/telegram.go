@@ -18,8 +18,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/messagefmt"
+	"openalbert/internal/domain"
+	"openalbert/internal/messagefmt"
 )
 
 type TelegramConfig struct {

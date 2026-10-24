@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestCompactContextBoundsPayloadAndPreservesWholeToolExchanges(t *testing.T) {

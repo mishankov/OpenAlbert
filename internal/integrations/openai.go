@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 type OpenAIConfig struct {
@@ -106,7 +106,7 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 		return domain.Completion{}, errors.New("invalid model request")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Jarvis/0.1")
+	req.Header.Set("User-Agent", "OpenAlbert/0.1")
 	if o.opencodeGo {
 		session := domain.ModelSession(ctx)
 		if session == "" {

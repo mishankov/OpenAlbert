@@ -9,9 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"jarvis/internal/domain"
 	"mime/multipart"
 	"net/http"
+	"openalbert/internal/domain"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,7 +102,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	dir, err := os.MkdirTemp("", "jarvis-audio-")
+	dir, err := os.MkdirTemp("", "openalbert-audio-")
 	if err != nil {
 		fail(w, 500, "Temporary storage unavailable")
 		return

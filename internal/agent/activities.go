@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/telemetry"
+	"openalbert/internal/domain"
+	"openalbert/internal/telemetry"
 )
 
 type Activities struct {

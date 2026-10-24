@@ -575,7 +575,7 @@ function route() {
   } else {
     main.innerHTML =
       '<div class="empty-panel">Выберите сессию в списке. <kbd>⌘K / Ctrl+K</kbd> — поиск.</div>';
-    document.title = "Сессии · Jarvis Inspector";
+    document.title = "Сессии · OpenAlbert Inspector";
   }
 }
 
@@ -589,8 +589,8 @@ const memoryKinds = {
 function memoryShell() {
   state.memories = [];
   state.memoryNext = 0;
-  document.title = "Память · Jarvis Inspector";
-  main.innerHTML = `<div class="session-toolbar memory-toolbar"><div class="session-heading"><h2>Память</h2><span class="muted">Текущие записи · сначала обновлённые</span></div><div class="memory-filters"><label>Разговор<select id="memory-scope"><option value="">Загружаем разговоры…</option></select></label><label>Поиск<div class="search-wrap"><input id="memory-search" type="search" placeholder="Текст, ID, источник или участник…" autocomplete="off" value="${esc(state.memoryQuery)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></label><label>Тип<select id="memory-kind"><option value="">Все типы</option>${Object.entries(memoryKinds).map(([key, title]) => `<option value="${key}" ${state.memoryKind === key ? "selected" : ""}>${title}</option>`).join("")}</select></label></div><p class="memory-hint">Все слова запроса должны встречаться в одной записи. Поиск без учёта регистра.</p></div><div id="memory-error" class="error hidden" role="alert"></div><details id="memory-soul" class="analysis-row"><summary title="Раскрыть или свернуть SOUL.md · Enter" aria-keyshortcuts="Enter">Личность SOUL.md <span class="muted">Имя, характер и правила общения Jarvis · общие для всех разговоров</span></summary><div class="run-body" aria-busy="true"><div id="soul-error" class="error hidden" role="alert"></div><pre class="prose" role="status">Загружаем SOUL.md…</pre></div></details><details id="memory-profile" class="analysis-row hidden"><summary>Профиль USER.md <span class="muted">Контекст новых сессий этого разговора</span></summary><div class="run-body"><pre class="prose"></pre></div></details><div id="memory-list" aria-busy="true"><div class="loading-line" role="status">Загружаем память…</div></div><div class="pagination"><span id="memory-count" role="status"></span><button id="more-memory" class="button hidden" title="Загрузить ещё записи · Enter" aria-keyshortcuts="Enter">Ещё записи</button></div>`;
+  document.title = "Память · OpenAlbert Inspector";
+  main.innerHTML = `<div class="session-toolbar memory-toolbar"><div class="session-heading"><h2>Память</h2><span class="muted">Текущие записи · сначала обновлённые</span></div><div class="memory-filters"><label>Разговор<select id="memory-scope"><option value="">Загружаем разговоры…</option></select></label><label>Поиск<div class="search-wrap"><input id="memory-search" type="search" placeholder="Текст, ID, источник или участник…" autocomplete="off" value="${esc(state.memoryQuery)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></label><label>Тип<select id="memory-kind"><option value="">Все типы</option>${Object.entries(memoryKinds).map(([key, title]) => `<option value="${key}" ${state.memoryKind === key ? "selected" : ""}>${title}</option>`).join("")}</select></label></div><p class="memory-hint">Все слова запроса должны встречаться в одной записи. Поиск без учёта регистра.</p></div><div id="memory-error" class="error hidden" role="alert"></div><details id="memory-soul" class="analysis-row"><summary title="Раскрыть или свернуть SOUL.md · Enter" aria-keyshortcuts="Enter">Личность SOUL.md <span class="muted">Имя, характер и правила общения OpenAlbert · общие для всех разговоров</span></summary><div class="run-body" aria-busy="true"><div id="soul-error" class="error hidden" role="alert"></div><pre class="prose" role="status">Загружаем SOUL.md…</pre></div></details><details id="memory-profile" class="analysis-row hidden"><summary>Профиль USER.md <span class="muted">Контекст новых сессий этого разговора</span></summary><div class="run-body"><pre class="prose"></pre></div></details><div id="memory-list" aria-busy="true"><div class="loading-line" role="status">Загружаем память…</div></div><div class="pagination"><span id="memory-count" role="status"></span><button id="more-memory" class="button hidden" title="Загрузить ещё записи · Enter" aria-keyshortcuts="Enter">Ещё записи</button></div>`;
 }
 async function loadSoul() {
   if (state.view !== "memory") return;
@@ -672,7 +672,7 @@ async function loadMemory(more = false) {
     $("#memory-profile pre").textContent = result.profile || "";
     $("#memory-list").innerHTML = state.memories.length
       ? `<ul class="memory-list">${state.memories.map((e) => `<li><button class="memory-row" data-memory="${esc(e.id)}" title="Просмотреть запись · Enter" aria-keyshortcuts="Enter"><span class="memory-meta"><span>${esc(memoryKinds[e.kind] || e.kind)}</span><time>Обновлено ${esc(date(e.updated_at))}</time>${e.subject_user_id ? `<span>Участник ${esc(e.subject_user_id)}</span>` : ""}</span><span class="prose memory-preview">${esc(e.content)}</span><span class="mono muted">${esc(e.id)}</span></button></li>`).join("")}</ul>`
-      : `<div class="empty-panel">${!state.memoryScope ? "Разговоров пока нет. Память появится после общения с Jarvis." : state.memoryQuery || state.memoryKind ? "Записей с такими условиями нет. Измените или очистите фильтры." : "В этом разговоре пока нет записей памяти."}</div>`;
+      : `<div class="empty-panel">${!state.memoryScope ? "Разговоров пока нет. Память появится после общения с OpenAlbert." : state.memoryQuery || state.memoryKind ? "Записей с такими условиями нет. Измените или очистите фильтры." : "В этом разговоре пока нет записей памяти."}</div>`;
     if (focusedID)
       [...main.querySelectorAll("[data-memory]")].find((el) => el.dataset.memory === focusedID)?.focus({ preventScroll: true });
     $("#memory-count").textContent = `Записи: ${state.memories.length} из ${result.total}`;
@@ -728,7 +728,7 @@ const fileDate = (value) =>
     minute: "2-digit",
   });
 function fileShell() {
-  document.title = "Файлы · Jarvis Inspector";
+  document.title = "Файлы · OpenAlbert Inspector";
   main.innerHTML = `<div class="session-toolbar files-toolbar"><div class="session-heading"><h2>Файлы MinIO</h2><span id="file-bucket" class="mono muted"></span><span class="files-order">По дате изменения ↓ · сначала новые</span></div><label for="file-prefix">Префикс ключа</label><div class="search-wrap"><input id="file-prefix" type="search" placeholder="Например, artifacts/" autocomplete="off" value="${esc(state.filePrefix)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></div><div id="files-error" role="alert" class="error hidden"></div><div id="files-list" aria-busy="true"><div class="loading-line" role="status">Загружаем файлы…</div></div><div class="pagination"><span id="files-count" role="status"></span><button id="more-files" class="button hidden" title="Загрузить ещё файлы · Enter" aria-keyshortcuts="Enter">Ещё файлы</button></div>`;
   if (state.files.length) renderFiles();
 }

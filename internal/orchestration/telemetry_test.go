@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/telemetry"
+	"openalbert/internal/domain"
+	"openalbert/internal/telemetry"
 )
 
 type lockedLog struct {

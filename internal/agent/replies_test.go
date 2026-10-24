@@ -11,8 +11,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/integrations"
+	"openalbert/internal/domain"
+	"openalbert/internal/integrations"
 )
 
 func TestTelegramRepliesReachModelAndHistory(t *testing.T) {

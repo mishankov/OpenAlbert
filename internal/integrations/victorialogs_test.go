@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestLogReaderEscapesFiltersBoundsRequestsAndKeepsStructuredResults(t *testing.T) {
@@ -30,7 +30,7 @@ func TestLogReaderEscapesFiltersBoundsRequestsAndKeepsStructuredResults(t *testi
 			t.Error(err)
 		}
 		q := r.Form.Get("query")
-		for _, filter := range []string{`service:="jarvis"`, `conversation_id:="personal:7"`, "turn_id:=" + strconv.Quote(injected)} {
+		for _, filter := range []string{`service:="openalbert"`, `conversation_id:="personal:7"`, "turn_id:=" + strconv.Quote(injected)} {
 			if !strings.Contains(q, filter) {
 				t.Errorf("missing exact escaped filter %q in %q", filter, q)
 			}

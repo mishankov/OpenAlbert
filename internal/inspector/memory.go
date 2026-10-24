@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 type ConversationStore interface {

@@ -13,8 +13,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/messagefmt"
+	"openalbert/internal/domain"
+	"openalbert/internal/messagefmt"
 )
 
 func ID(parts ...string) string {

@@ -23,4 +23,4 @@ http
     );
     res.end(await readFile(new URL(file, web)));
   })
-  .listen(4181, "127.0.0.1");
+  .listen(Number(process.env.INSPECTOR_TEST_PORT || 4181), "127.0.0.1");

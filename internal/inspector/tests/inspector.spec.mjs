@@ -166,7 +166,7 @@ test("ссылка из лога открывает нужный вызов, Esc
   await expect(page.locator("#drawer-title")).toHaveText("configured-model");
   await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: "/tmp/jarvis-logging-inspector-mobile.png" });
+  await page.screenshot({ path: "/tmp/openalbert-logging-inspector-mobile.png" });
   await page.locator("a.back-link").click();
   await expect(page.locator(".session-link")).toBeVisible();
 });

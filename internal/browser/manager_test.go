@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 	"sync"
 	"sync/atomic"
 	"testing"

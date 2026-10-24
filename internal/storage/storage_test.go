@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 // The contract suite also runs against a real Postgres database when configured.
@@ -20,9 +20,9 @@ import (
 func TestRepositoryContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { repositoryContract(t, NewMemory()) })
 	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 		if url == "" {
-			t.Skip("set JARVIS_TEST_DATABASE_URL to test PostgreSQL persistence")
+			t.Skip("set OPENALBERT_TEST_DATABASE_URL to test PostgreSQL persistence")
 		}
 		s, err := Open(context.Background(), url)
 		if err != nil {
@@ -334,9 +334,9 @@ func TestMemoryConcurrentInbox(t *testing.T) {
 }
 
 func TestPostgresRestartDurability(t *testing.T) {
-	url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 	if url == "" {
-		t.Skip("set JARVIS_TEST_DATABASE_URL")
+		t.Skip("set OPENALBERT_TEST_DATABASE_URL")
 	}
 	ctx := context.Background()
 	s, err := Open(ctx, url)
@@ -388,7 +388,7 @@ func TestPostgresRestartDurability(t *testing.T) {
 	var state string
 	var attempts int
 	var jsonState string
-	if err = s.pool.QueryRow(ctx, "SELECT state,attempts,data->>'state' FROM jarvis_outgoing WHERE id=$1", id).Scan(&state, &attempts, &jsonState); err != nil {
+	if err = s.pool.QueryRow(ctx, "SELECT state,attempts,data->>'state' FROM openalbert_outgoing WHERE id=$1", id).Scan(&state, &attempts, &jsonState); err != nil {
 		t.Fatal(err)
 	}
 	if state != "unknown" || jsonState != "unknown" || attempts != 1 {
@@ -407,9 +407,9 @@ func TestPostgresRestartDurability(t *testing.T) {
 	}
 }
 func TestPostgresConcurrentInbox(t *testing.T) {
-	url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 	if url == "" {
-		t.Skip("set JARVIS_TEST_DATABASE_URL")
+		t.Skip("set OPENALBERT_TEST_DATABASE_URL")
 	}
 	ctx := context.Background()
 	s, err := Open(ctx, url)
@@ -431,7 +431,7 @@ func TestPostgresConcurrentInbox(t *testing.T) {
 	}
 	wg.Wait()
 	var count int
-	if err = s.pool.QueryRow(ctx, "SELECT count(*) FROM jarvis_incoming WHERE id LIKE $1", prefix+"%").Scan(&count); err != nil {
+	if err = s.pool.QueryRow(ctx, "SELECT count(*) FROM openalbert_incoming WHERE id LIKE $1", prefix+"%").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 10 {
@@ -497,9 +497,9 @@ func TestConcurrentTaskUpdateDetectsConflict(t *testing.T) {
 }
 
 func TestPostgresTaskCancellationWinsOverStaleWorker(t *testing.T) {
-	url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 	if url == "" {
-		t.Skip("set JARVIS_TEST_DATABASE_URL")
+		t.Skip("set OPENALBERT_TEST_DATABASE_URL")
 	}
 	ctx := context.Background()
 	s, err := Open(ctx, url)
@@ -556,9 +556,9 @@ func TestPostgresTaskCancellationWinsOverStaleWorker(t *testing.T) {
 	}
 }
 func TestPostgresSafeOutboxRetryAndSummary(t *testing.T) {
-	url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 	if url == "" {
-		t.Skip("set JARVIS_TEST_DATABASE_URL")
+		t.Skip("set OPENALBERT_TEST_DATABASE_URL")
 	}
 	ctx := context.Background()
 	s, err := Open(ctx, url)

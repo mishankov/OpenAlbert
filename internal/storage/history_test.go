@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 	"os"
 	"strings"
 	"testing"
@@ -14,9 +14,9 @@ import (
 func TestConversationHistoryContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { historyContract(t, NewMemory()) })
 	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 		if url == "" {
-			t.Skip("set JARVIS_TEST_DATABASE_URL")
+			t.Skip("set OPENALBERT_TEST_DATABASE_URL")
 		}
 		repo, err := Open(context.Background(), url)
 		if err != nil {
@@ -151,9 +151,9 @@ func historyCallsContract(t *testing.T, repo domain.Repository, scope, session s
 func TestGroupOutgoingHistoryContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { groupOutgoingContract(t, NewMemory()) })
 	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 		if url == "" {
-			t.Skip("set JARVIS_TEST_DATABASE_URL")
+			t.Skip("set OPENALBERT_TEST_DATABASE_URL")
 		}
 		repo, err := Open(context.Background(), url)
 		if err != nil {

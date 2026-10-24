@@ -3,7 +3,7 @@ import { test, expect } from "../../../docs/node_modules/@playwright/test/index.
 const entries = [
   { id: "pref <script>", scope: "personal:7", content: "Предпочитает короткие ответы <script>window.XSS=true</script>", kind: "preference", source: "session-7", updated_at: "2026-10-23T12:00:00Z" },
   { id: "place", scope: "personal:7", content: "Живёт в Москве", kind: "profile", source: "session-7", updated_at: "2026-10-22T12:00:00Z" },
-  { id: "project", scope: "personal:7", content: "Разрабатывает Jarvis", kind: "fact", source: "session-7", updated_at: "2026-10-21T12:00:00Z" },
+  { id: "project", scope: "personal:7", content: "Разрабатывает OpenAlbert", kind: "fact", source: "session-7", updated_at: "2026-10-21T12:00:00Z" },
   { id: "participant", scope: "group:8", content: "Любит пончики", kind: "preference", subject_user_id: 42, source: "group-session", source_message_id: "message-42", evidence: "Я люблю пончики <img src=x onerror=alert(1)>", updated_at: "2026-10-23T12:00:00Z" },
 ];
 async function fixture(page, { empty = false } = {}) {
@@ -11,9 +11,9 @@ async function fixture(page, { empty = false } = {}) {
   await page.route("**/api/inspect/**", (route) => {
     const u = new URL(route.request().url());
     requests.push(u);
-    if (u.pathname.endsWith("/soul")) return route.fulfill({ json: { soul: "# Jarvis\n\nТы — Jarvis. Отвечай по-русски. <script>window.SOUL_XSS=true</script>" } });
+    if (u.pathname.endsWith("/soul")) return route.fulfill({ json: { soul: "# OpenAlbert\n\nТы — OpenAlbert. Отвечай по-русски. <script>window.SOUL_XSS=true</script>" } });
     if (u.pathname.endsWith("/sessions")) return route.fulfill({ json: { sessions: [], next_before: 0 } });
-    if (u.pathname.endsWith("/conversations")) return route.fulfill({ json: { conversations: empty ? [] : [{ id: "personal:7", private: true, title: "Личный разговор" }, { id: "group:8", title: "Команда Jarvis" }, { id: "group:empty", title: "Пустой разговор" }] } });
+    if (u.pathname.endsWith("/conversations")) return route.fulfill({ json: { conversations: empty ? [] : [{ id: "personal:7", private: true, title: "Личный разговор" }, { id: "group:8", title: "Команда OpenAlbert" }, { id: "group:empty", title: "Пустой разговор" }] } });
     if (u.pathname.includes("/sessions/")) return route.fulfill({ status: 404, json: {} });
     const scope = u.searchParams.get("conversation_id");
     if (u.pathname.endsWith("/entry")) {
@@ -224,7 +224,7 @@ test("SOUL.md: полный текст, клавиатура, обновлени
   await summary.focus();
   await page.keyboard.press("Enter");
   await expect(page.locator("#memory-soul")).toHaveAttribute("open", "");
-  await expect(page.locator("#memory-soul pre")).toContainText("Ты — Jarvis. Отвечай по-русски.");
+  await expect(page.locator("#memory-soul pre")).toContainText("Ты — OpenAlbert. Отвечай по-русски.");
   await expect(page.locator("#memory-soul pre")).toContainText("<script>window.SOUL_XSS=true</script>");
   expect(await page.evaluate(() => window.SOUL_XSS)).toBeUndefined();
   for (const extra of [{ repeat: true }, { isComposing: true }, { keyCode: 229 }]) {
@@ -236,7 +236,7 @@ test("SOUL.md: полный текст, клавиатура, обновлени
   }
   await page.locator("#memory-scope").selectOption("group:8");
   await expect(page.locator(".memory-row")).toHaveCount(1);
-  await expect(page.locator("#memory-soul pre")).toContainText("Ты — Jarvis.");
+  await expect(page.locator("#memory-soul pre")).toContainText("Ты — OpenAlbert.");
   await expect(page.locator("#memory-soul")).toHaveAttribute("open", "");
   await page.screenshot({ path: testInfo.outputPath("soul-desktop.png") });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -254,7 +254,7 @@ test("SOUL.md: полный текст, клавиатура, обновлени
 test("SOUL.md доступен без разговоров; ошибка чтения не мешает памяти и повторяется по Alt R", async ({ page }) => {
   await fixture(page, { empty: true });
   await page.locator("#memory-soul summary").click();
-  await expect(page.locator("#memory-soul pre")).toContainText("Ты — Jarvis.");
+  await expect(page.locator("#memory-soul pre")).toContainText("Ты — OpenAlbert.");
   await page.route("**/api/inspect/memory/soul", (route) => route.fulfill({ status: 500, json: {} }));
   await page.keyboard.press("Alt+r");
   await expect(page.locator("#soul-error")).toContainText("Не удалось загрузить SOUL.md");
@@ -263,5 +263,5 @@ test("SOUL.md доступен без разговоров; ошибка чте�
   await page.unroute("**/api/inspect/memory/soul");
   await page.keyboard.press("Alt+r");
   await expect(page.locator("#soul-error")).toBeHidden();
-  await expect(page.locator("#memory-soul pre")).toContainText("Ты — Jarvis.");
+  await expect(page.locator("#memory-soul pre")).toContainText("Ты — OpenAlbert.");
 });

@@ -17,18 +17,19 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 const maxArtifactSize = 20 << 20
-const artifactMetadata = "Jarvis-Artifact"
-const digestMetadata = "Jarvis-Sha256"
+
+const artifactMetadata = "OpenAlbert-Artifact"
+const digestMetadata = "OpenAlbert-Sha256"
 
 type Store struct {
 	domain.Repository
 	client *minio.Client
 	bucket string
-	// Compose runs one Jarvis replica. Serialize its writes so a retry cannot
+	// Compose runs one OpenAlbert replica. Serialize its writes so a retry cannot
 	// replace metadata, even when two activities refer to the same artifact.
 	mu sync.Mutex
 }

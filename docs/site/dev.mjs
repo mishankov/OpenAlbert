@@ -36,4 +36,4 @@ const server = createServer(async (request, response) => {
     response.writeHead(error.code === 'ENOENT' ? 404 : 500).end('Not found');
   }
 });
-server.listen(port, '127.0.0.1', () => console.log(`Jarvis documentation: http://localhost:${port}`));
+server.listen(port, '127.0.0.1', () => console.log(`OpenAlbert documentation: http://localhost:${port}`));

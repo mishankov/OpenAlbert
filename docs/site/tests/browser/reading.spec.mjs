@@ -7,7 +7,11 @@ test('все страницы читаются, схемы загружаютс�
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/');
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Архитектура Jarvis');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Архитектура OpenAlbert');
+  await expect(page).toHaveTitle(/OpenAlbert/);
+  const brand = page.getByRole('link', { name: 'OpenAlbert — обзор' });
+  await expect(brand).toContainText('OpenAlbert');
+  expect(await brand.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
   for (const id of pageIds) {
     await page.goto(`/#/${id}`);
     await expect(page.locator('.page-nav a[aria-current="page"]').first()).toHaveAttribute('href', `#/${id}`);
@@ -127,7 +131,10 @@ test('все схемы открываются в максимально впи�
           const stage = document.querySelector('#diagram-stage');
           const image = document.querySelector('#diagram-image');
           const css = getComputedStyle(stage);
-          return { imageWidth: image.width, imageHeight: image.height,
+          // HTMLImageElement.width/height round to integers, which distorts the
+          // measured aspect ratio of short diagrams. Assert actual CSS bounds.
+          const bounds = image.getBoundingClientRect();
+          return { imageWidth: bounds.width, imageHeight: bounds.height,
             availableWidth: stage.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight),
             availableHeight: stage.clientHeight - parseFloat(css.paddingTop) - parseFloat(css.paddingBottom) };
         });
@@ -137,7 +144,7 @@ test('все схемы открываются в максимально впи�
         expect(size.imageWidth / size.imageHeight).toBeCloseTo(viewBox[2] / viewBox[3], 2);
         expect(Math.max(size.imageWidth / size.availableWidth, size.imageHeight / size.availableHeight)).toBeGreaterThan(0.97);
         await page.keyboard.press('w');
-        const fitWidth = await page.locator('#diagram-image').evaluate((image) => image.width);
+        const fitWidth = await page.locator('#diagram-image').evaluate((image) => image.getBoundingClientRect().width);
         expect(fitWidth).toBeCloseTo(size.availableWidth, -1);
         await page.keyboard.press('Escape');
       }

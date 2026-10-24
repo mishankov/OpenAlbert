@@ -18,8 +18,8 @@ import (
 
 	cdpbrowser "github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/chromedp"
-	"jarvis/internal/domain"
-	"jarvis/internal/integrations"
+	"openalbert/internal/domain"
+	"openalbert/internal/integrations"
 )
 
 type Config struct {
@@ -161,7 +161,7 @@ func (c *chromium) Execute(ctx context.Context, req domain.BrowserRequest) (doma
 		if !t.refs[req.Ref] {
 			return out, errors.New("unknown or stale element reference; take a fresh browser_snapshot")
 		}
-		selector := chromedp.CSS(`[data-jarvis-ref="` + req.Ref + `"]`)
+		selector := chromedp.CSS(`[data-openalbert-ref="` + req.Ref + `"]`)
 		if req.Action == "click" {
 			err = chromedp.Do(op, chromedp.Click(selector))
 		} else {
@@ -213,7 +213,7 @@ func (c *chromium) Execute(ctx context.Context, req domain.BrowserRequest) (doma
 func (c *chromium) snapshot(ctx context.Context, t *tab, id string) (domain.BrowserResult, error) {
 	prefix := token()
 	// Return a bounded visible-text observation and visible interactive elements.
-	script := `(()=>{const prefix=` + stringJSON(prefix) + `;const elements=[];for(const el of document.querySelectorAll('a[href],button,input:not([type=hidden]),textarea,select,[role=button],[role=link]')){if(elements.length>=80)break;const r=el.getBoundingClientRect();const s=getComputedStyle(el);if(!r.width||!r.height||s.visibility==='hidden'||s.display==='none')continue;const ref=prefix+'-'+elements.length;el.setAttribute('data-jarvis-ref',ref);elements.push({ref,role:el.getAttribute('role')||el.tagName.toLowerCase(),name:(el.getAttribute('aria-label')||el.innerText||el.getAttribute('placeholder')||el.getAttribute('name')||'').slice(0,180),url:el.href||''});}return {url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,12000),elements};})()`
+	script := `(()=>{const prefix=` + stringJSON(prefix) + `;const elements=[];for(const el of document.querySelectorAll('a[href],button,input:not([type=hidden]),textarea,select,[role=button],[role=link]')){if(elements.length>=80)break;const r=el.getBoundingClientRect();const s=getComputedStyle(el);if(!r.width||!r.height||s.visibility==='hidden'||s.display==='none')continue;const ref=prefix+'-'+elements.length;el.setAttribute('data-openalbert-ref',ref);elements.push({ref,role:el.getAttribute('role')||el.tagName.toLowerCase(),name:(el.getAttribute('aria-label')||el.innerText||el.getAttribute('placeholder')||el.getAttribute('name')||'').slice(0,180),url:el.href||''});}return {url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,12000),elements};})()`
 	out, err := chromedp.Run(ctx, chromedp.Evaluate[domain.BrowserResult](script))
 	if err != nil {
 		return out, errors.New("cannot observe browser page; reopen it if Chromium restarted")
