@@ -89,8 +89,9 @@ ghcr.io/<owner>/<repository>/minio-init:sha-<полный SHA коммита>
 дождись успеха всего workflow. На сервер ничего автоматически не развёртывается.
 
 Namespace берётся из `github.repository` и переводится в нижний регистр, поэтому
-workflow не привязан к конкретному владельцу. В текущем checkout GitHub remote
-не настроен; реальные ссылки на пакеты появятся после публикации репозитория.
+workflow не привязан к конкретному владельцу. Репозиторий проекта —
+[mishankov/OpenAlbert](https://github.com/mishankov/OpenAlbert), базовый путь образов —
+`ghcr.io/mishankov/openalbert`. Пакеты появятся после первой успешной публикации workflow.
 
 ## Настройка GitHub
 
