@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestProgressToolIsNotAReplyAndRejectsInvalidOrBackgroundUpdates(t *testing.T) {

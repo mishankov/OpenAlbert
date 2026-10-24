@@ -469,7 +469,7 @@ function route() {
   } else {
     main.innerHTML =
       '<div class="empty-panel">Выберите сессию в списке. <kbd>⌘K / Ctrl+K</kbd> — поиск.</div>';
-    document.title = "Сессии · Jarvis Inspector";
+    document.title = "Сессии · OpenAlbert Inspector";
   }
 }
 
@@ -491,7 +491,7 @@ const fileDate = (value) =>
     minute: "2-digit",
   });
 function fileShell() {
-  document.title = "Файлы · Jarvis Inspector";
+  document.title = "Файлы · OpenAlbert Inspector";
   main.innerHTML = `<div class="session-toolbar files-toolbar"><div class="session-heading"><h2>Файлы MinIO</h2><span id="file-bucket" class="mono muted"></span><span class="files-order">По дате изменения ↓ · сначала новые</span></div><label for="file-prefix">Префикс ключа</label><div class="search-wrap"><input id="file-prefix" type="search" placeholder="Например, artifacts/" autocomplete="off" value="${esc(state.filePrefix)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></div><div id="files-error" role="alert" class="error hidden"></div><div id="files-list" aria-busy="true"><div class="loading-line" role="status">Загружаем файлы…</div></div><div class="pagination"><span id="files-count" role="status"></span><button id="more-files" class="button hidden" title="Загрузить ещё файлы · Enter" aria-keyshortcuts="Enter">Ещё файлы</button></div>`;
   if (state.files.length) renderFiles();
 }

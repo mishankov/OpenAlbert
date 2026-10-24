@@ -2,7 +2,7 @@ package storage
 
 import (
 	"encoding/json"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 // A cross-chat post records only the public reply request in the destination.

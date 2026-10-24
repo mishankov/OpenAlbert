@@ -19,6 +19,7 @@ export const navigation = [
   ['observability', 'observability.md', 'Логирование', 'pulse'],
   ['inspector', 'inspector.md', 'Инспектор сессий', 'layers'],
   ['development', 'development.md', 'Запуск MVP', 'tool'],
+  ['deployment', 'deployment.md', 'Публикация и установка', 'tool'],
 ];
 
 export const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (c) => ({
@@ -90,7 +91,7 @@ export async function build(destination = output) {
   ]);
   await rename(temporaryPages, join(destination, 'pages.json'));
   const diagramFiles = [...new Set(pages.flatMap((page) => [...page.html.matchAll(/src="docs\/diagrams\/([^\"]+\.svg)"/g)].map((match) => match[1])))];
-  const diagramIndex = `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Исходники схем — Jarvis</title><style>body{font:16px/1.8 system-ui;max-width:760px;margin:50px auto;padding:0 24px;color:#33432e}a{color:#286447}li{margin:12px 0}small{margin-left:20px}</style><a href="../../#/overview">← К документации</a><h1>Исходники схем</h1><ul>${diagramFiles.map((file) => `<li><a href="${file}">${file}</a><small><a href="${file.replace('.svg', '.mmd')}">Mermaid</a></small></li>`).join('')}</ul></html>`;
+  const diagramIndex = `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Исходники схем — OpenAlbert</title><style>body{font:16px/1.8 system-ui;max-width:760px;margin:50px auto;padding:0 24px;color:#33432e}a{color:#286447}li{margin:12px 0}small{margin-left:20px}</style><a href="../../#/overview">← К документации</a><h1>Исходники схем</h1><ul>${diagramFiles.map((file) => `<li><a href="${file}">${file}</a><small><a href="${file.replace('.svg', '.mmd')}">Mermaid</a></small></li>`).join('')}</ul></html>`;
   await writeFile(join(destination, 'docs/diagrams/index.html'), diagramIndex);
   return pages;
 }

@@ -1,15 +1,15 @@
-// Package browser owns independent, ephemeral Chromium processes in the Jarvis container.
+// Package browser owns independent, ephemeral Chromium processes in the OpenAlbert container.
 package browser
 
 import (
 	"context"
 	"errors"
-	"jarvis/internal/telemetry"
 	"log/slog"
+	"openalbert/internal/telemetry"
 	"sync"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 type driver interface {

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestDeepSeekReplaysReasoningAcrossToolsAndUserTurns(t *testing.T) {

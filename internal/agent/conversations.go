@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 // Group metadata records the latest sender, not the installation owner.

@@ -2,7 +2,7 @@ package knowledge
 
 import (
 	"context"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 	"os"
 	"path/filepath"
 	"strings"

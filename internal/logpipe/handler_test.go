@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const fixture = `{"time":1792479900.123456789,"host":"docker-desktop","event":{"tag":"jarvis-jarvis-1","source":"stdout","attrs":{"compose_service":"jarvis","com.docker.compose.project":"example"},"line":{"time":"ignored","level":"INFO","msg":"Обращение обработано","operation":"turn.complete","turn_id":"t-1","service":"forged","_stream":"forged","input_tokens":42}}}`
+const fixture = `{"time":1792479900.123456789,"host":"docker-desktop","event":{"tag":"openalbert-openalbert-1","source":"stdout","attrs":{"compose_service":"openalbert","com.docker.compose.project":"example"},"line":{"time":"ignored","level":"INFO","msg":"Обращение обработано","operation":"turn.complete","turn_id":"t-1","service":"forged","_stream":"forged","input_tokens":42}}}`
 
 func TestNormalizePreservesFieldsAndUsesTrustedContainerIdentity(t *testing.T) {
 	decoder := json.NewDecoder(strings.NewReader(fixture))
@@ -25,10 +25,10 @@ func TestNormalizePreservesFieldsAndUsesTrustedContainerIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row["service"] != "jarvis" || row["level"] != "info" || row["turn_id"] != "t-1" || row["container"] != "jarvis-jarvis-1" || row["project"] != "example" {
+	if row["service"] != "openalbert" || row["level"] != "info" || row["turn_id"] != "t-1" || row["container"] != "openalbert-openalbert-1" || row["project"] != "example" {
 		t.Fatalf("bad normalized fields: %v", row)
 	}
-	if row["_msg"] != "[jarvis] Обращение обработано" || row["_time"] != time.Unix(1792479900, 123456789).UTC().Format(time.RFC3339Nano) {
+	if row["_msg"] != "[openalbert] Обращение обработано" || row["_time"] != time.Unix(1792479900, 123456789).UTC().Format(time.RFC3339Nano) {
 		t.Fatalf("bad presentation/time: %v", row)
 	}
 	if _, ok := row["_stream"]; ok {

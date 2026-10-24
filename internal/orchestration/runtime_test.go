@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/agent"
-	"jarvis/internal/domain"
-	"jarvis/internal/integrations"
-	"jarvis/internal/storage"
+	"openalbert/internal/agent"
+	"openalbert/internal/domain"
+	"openalbert/internal/integrations"
+	"openalbert/internal/storage"
 )
 
 type deliveryRepository struct {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func (a *Activities) participantScope(ctx context.Context, current domain.Conversation, requested string) (string, error) {

@@ -2,7 +2,7 @@ package agent
 
 import (
 	"encoding/json"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 // CompactContext bounds Temporal Activity payloads while retaining the latest user

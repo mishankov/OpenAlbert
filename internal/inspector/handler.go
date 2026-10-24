@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 //go:embed web/*

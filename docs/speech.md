@@ -2,7 +2,7 @@
 
 [К содержанию](README.md)
 
-Jarvis распознаёт готовые Telegram voice/audio через отдельный CPU-сервис `stt`. В Compose он подключён к `http://stt:8080/v1`; реальную `.env` для этого менять не требуется. Вне Compose STT включается только при заданном `STT_BASE_URL`. Разговорная LLM и её ключ независимы от STT.
+OpenAlbert распознаёт готовые Telegram voice/audio через отдельный CPU-сервис `stt`. В Compose он подключён к `http://stt:8080/v1`; реальную `.env` для этого менять не требуется. Вне Compose STT включается только при заданном `STT_BASE_URL`. Разговорная LLM и её ключ независимы от STT.
 
 ## Контейнер и API
 
@@ -21,24 +21,24 @@ FFmpeg внутри контейнера преобразует OGG/Opus и др
 
 ## Активация после согласования
 
-Изменения кода и Compose не меняют запущенный MVP. Следующие команды предназначены для отдельно согласованной активации из основной установки после переноса изменений. Не запускай второй Jarvis из рабочего дерева с тем же Telegram-токеном.
+Изменения кода и Compose не меняют запущенный MVP. Следующие команды предназначены для отдельно согласованной активации из основной установки после переноса изменений. Не запускай второй OpenAlbert из рабочего дерева с тем же Telegram-токеном.
 
 ```sh
-docker compose build stt jarvis
-docker compose up -d stt
-docker compose ps stt
+docker compose -f compose.local.yaml build stt openalbert
+docker compose -f compose.local.yaml up -d stt
+docker compose -f compose.local.yaml ps stt
 ```
 
 Первый запуск загружает около 742 MB весов и прогревает модель. Дождись `healthy`; стартовый период healthcheck — 15 минут. Проверка без Telegram:
 
 ```sh
-docker compose exec stt python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/ready').read().decode())"
+docker compose -f compose.local.yaml exec stt python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/ready').read().decode())"
 ```
 
-После готовности STT отдельно пересоздай Jarvis для нового кода и настроек:
+После готовности STT отдельно пересоздай OpenAlbert для нового кода и настроек:
 
 ```sh
-docker compose up -d --no-deps jarvis
+docker compose -f compose.local.yaml up -d --no-deps openalbert
 ```
 
 Bootstrap подготавливает владельца каталога `/models`, затем сбрасывает привилегии. Для офлайн-развёртывания заранее размести проверенный файл указанной ревизии и задай `STT_DOWNLOAD_MODEL=false`.
@@ -52,7 +52,7 @@ Bootstrap подготавливает владельца каталога `/mod
 | `STT_DOWNLOAD_MODEL` | Разрешает загрузку отсутствующих весов при старте контейнера. |
 | `STT_CPUS` | Начальное ограничение CPU: 2. |
 | `STT_THREADS` | Начальное `OMP_NUM_THREADS`: 2, не общий предел всех native потоков. |
-| `STT_MEMORY_LIMIT` | Начальный предел: 3g; непроверенный бюджет, не RAM-минимум модели или всего Jarvis. |
+| `STT_MEMORY_LIMIT` | Начальный предел: 3g; непроверенный бюджет, не RAM-минимум модели или всего OpenAlbert. |
 
 Отключение клиента не удаляет сервис `stt` из Compose. Для внешнего STT задай его URL, модель и профиль; локальный контейнер запускать не требуется. Прежний `LLM_TRANSCRIPTION_MODEL` больше не используется.
 
@@ -87,6 +87,6 @@ go vet ./...
 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/path/to/chromium' ./docs/node_modules/.bin/playwright test -c internal/inspector/playwright.config.mjs
 ```
 
-SQL-контракты требуют отдельную временную PostgreSQL через `JARVIS_TEST_DATABASE_URL`, никогда рабочую базу. Тесты декодирования используют синтетический OGG и подставной native endpoint. Без FFmpeg на хосте их можно выполнить внутри собранного STT-образа с тестовым Go-бинарником для архитектуры образа. Ни веса, ни Telegram для этого не нужны.
+SQL-контракты требуют отдельную временную PostgreSQL через `OPENALBERT_TEST_DATABASE_URL`, никогда рабочую базу. Тесты декодирования используют синтетический OGG и подставной native endpoint. Без FFmpeg на хосте их можно выполнить внутри собранного STT-образа с тестовым Go-бинарником для архитектуры образа. Ни веса, ни Telegram для этого не нужны.
 
 Эти проверки не измеряют качество Nemotron. Отдельный эксперимент на целевом Linux CPU должен сравнить одинаковые русские записи с ручными эталонами: WER/CER, смысловые ошибки имён/чисел/отрицаний, холодный старт, время OGG → текст и пик RAM. Результатов таких замеров пока нет.

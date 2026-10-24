@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"jarvis/internal/agent"
-	"jarvis/internal/domain"
-	"jarvis/internal/telemetry"
+	"openalbert/internal/agent"
+	"openalbert/internal/domain"
+	"openalbert/internal/telemetry"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"

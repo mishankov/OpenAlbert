@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 type sessionModel struct{ sessions []string }

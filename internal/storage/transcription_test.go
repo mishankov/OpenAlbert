@@ -3,7 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 	"os"
 	"testing"
 	"time"
@@ -44,7 +44,7 @@ func transcriptionContract(t *testing.T, repo domain.Repository) {
 }
 func TestTranscriptionLeaseMemory(t *testing.T) { transcriptionContract(t, NewMemory()) }
 func TestTranscriptionLeasePostgres(t *testing.T) {
-	url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("disposable PostgreSQL only")
 	}

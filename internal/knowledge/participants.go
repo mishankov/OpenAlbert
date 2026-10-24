@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func participantDir(scope string, id int64) string {

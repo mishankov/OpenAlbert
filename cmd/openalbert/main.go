@@ -12,17 +12,17 @@ import (
 	"syscall"
 	"time"
 
-	"jarvis/internal/agent"
-	"jarvis/internal/blob"
-	"jarvis/internal/browser"
-	"jarvis/internal/config"
-	"jarvis/internal/domain"
-	"jarvis/internal/inspector"
-	"jarvis/internal/integrations"
-	"jarvis/internal/knowledge"
-	"jarvis/internal/orchestration"
-	"jarvis/internal/storage"
-	"jarvis/internal/telemetry"
+	"openalbert/internal/agent"
+	"openalbert/internal/blob"
+	"openalbert/internal/browser"
+	"openalbert/internal/config"
+	"openalbert/internal/domain"
+	"openalbert/internal/inspector"
+	"openalbert/internal/integrations"
+	"openalbert/internal/knowledge"
+	"openalbert/internal/orchestration"
+	"openalbert/internal/storage"
+	"openalbert/internal/telemetry"
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
@@ -30,7 +30,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("Jarvis stopped", "error", err.Error())
+		slog.Error("OpenAlbert stopped", "error", err.Error())
 		os.Exit(1)
 	}
 }

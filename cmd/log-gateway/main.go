@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"jarvis/internal/logpipe"
+	"openalbert/internal/logpipe"
 )
 
 func main() {

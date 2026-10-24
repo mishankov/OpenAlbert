@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+!.env.release.example
 /data/
 /knowledge/
 /container_data/

@@ -11,9 +11,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/knowledge"
-	"jarvis/internal/storage"
+	"openalbert/internal/domain"
+	"openalbert/internal/knowledge"
+	"openalbert/internal/storage"
 )
 
 type testModel struct {

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"jarvis/internal/integrations"
+	"openalbert/internal/integrations"
 )
 
 // The proxy validates DNS and dials the checked IP, including on HTTPS CONNECT.

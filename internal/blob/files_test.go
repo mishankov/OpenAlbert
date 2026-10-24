@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/storage"
+	"openalbert/internal/domain"
+	"openalbert/internal/storage"
 )
 
 func xmlText(value string) string {
@@ -33,7 +33,7 @@ func (f *fakeS3) list(w http.ResponseWriter, r *http.Request) {
 	}
 	keys := []string{}
 	for objectPath := range f.objects {
-		key := strings.TrimPrefix(objectPath, "/jarvis/")
+		key := strings.TrimPrefix(objectPath, "/openalbert/")
 		if strings.HasPrefix(key, q.Get("prefix")) && key > q.Get("continuation-token") {
 			keys = append(keys, key)
 		}
@@ -45,12 +45,12 @@ func (f *fakeS3) list(w http.ResponseWriter, r *http.Request) {
 		keys = keys[:limit]
 	}
 	w.Header().Set("Content-Type", "application/xml")
-	fmt.Fprintf(w, `<ListBucketResult><Name>jarvis</Name><IsTruncated>%t</IsTruncated>`, truncated)
+	fmt.Fprintf(w, `<ListBucketResult><Name>openalbert</Name><IsTruncated>%t</IsTruncated>`, truncated)
 	if truncated {
 		fmt.Fprintf(w, `<NextContinuationToken>%s</NextContinuationToken>`, xmlText(keys[len(keys)-1]))
 	}
 	for _, key := range keys {
-		obj := f.objects["/jarvis/"+key]
+		obj := f.objects["/openalbert/"+key]
 		modified := obj.headers.Get("Last-Modified")
 		if modified == "" {
 			modified = "2026-10-22T12:00:00Z"
@@ -76,7 +76,7 @@ func TestListAndOpenBucketFiles(t *testing.T) {
 	// Objects outside the app's artifact namespace are also browsable.
 	base := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 	for i := range 1105 {
-		f.objects[fmt.Sprintf("/jarvis/uploads/%04d +#?.txt", i)] = fakeObject{data: []byte("raw"), headers: http.Header{"Content-Type": {"text/plain"}, "Last-Modified": {base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339)}}}
+		f.objects[fmt.Sprintf("/openalbert/uploads/%04d +#?.txt", i)] = fakeObject{data: []byte("raw"), headers: http.Header{"Content-Type": {"text/plain"}, "Last-Modified": {base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339)}}}
 	}
 	page, err := s.ListFiles(ctx, "artifacts/", "")
 	if err != nil || len(page.Files) != 1 || page.Files[0].Name != art.Name || page.Files[0].ConversationID != art.ConversationID || page.Files[0].MIME != art.MIME {
@@ -126,7 +126,7 @@ func TestFileDatePaginationTiesAndDeletedCursor(t *testing.T) {
 	ctx := context.Background()
 	s, f := setup(t, storage.NewMemory())
 	for i := range 205 {
-		f.objects[fmt.Sprintf("/jarvis/ties/%03d", i)] = fakeObject{headers: http.Header{}}
+		f.objects[fmt.Sprintf("/openalbert/ties/%03d", i)] = fakeObject{headers: http.Header{}}
 	}
 	var after string
 	for pageNo, count := range []int{100, 100, 5} {
@@ -148,7 +148,7 @@ func TestFileDatePaginationTiesAndDeletedCursor(t *testing.T) {
 		after = page.NextAfter
 		// The following page must not require the previous object to exist.
 		f.mu.Lock()
-		delete(f.objects, "/jarvis/"+page.Files[len(page.Files)-1].Key)
+		delete(f.objects, "/openalbert/"+page.Files[len(page.Files)-1].Key)
 		f.mu.Unlock()
 	}
 	for _, invalid := range []string{"old-key", strings.Repeat("x", 4097), "e30"} {

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/messagefmt"
+	"openalbert/internal/domain"
+	"openalbert/internal/messagefmt"
 )
 
 func TestBackgroundPlaceholdersNeverReachOutbox(t *testing.T) {

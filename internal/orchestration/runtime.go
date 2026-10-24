@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"jarvis/internal/agent"
-	"jarvis/internal/domain"
-	"jarvis/internal/integrations"
-	"jarvis/internal/messagefmt"
-	"jarvis/internal/telemetry"
+	"openalbert/internal/agent"
+	"openalbert/internal/domain"
+	"openalbert/internal/integrations"
+	"openalbert/internal/messagefmt"
+	"openalbert/internal/telemetry"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"

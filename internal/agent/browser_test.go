@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"go.temporal.io/sdk/temporal"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 	"strings"
 	"testing"
 	"time"

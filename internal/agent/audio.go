@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 	"strings"
 	"sync"
 	"time"

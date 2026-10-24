@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestOwnerReadsGroupsWhileGroupsAndOtherPrivateChatsStayIsolated(t *testing.T) {

@@ -4,17 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"jarvis/internal/domain"
-	"jarvis/internal/inspector"
+	"openalbert/internal/domain"
+	"openalbert/internal/inspector"
 	"os"
 	"testing"
 	"time"
 )
 
 func TestInspectionPostgres(t *testing.T) {
-	url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 	if url == "" {
-		t.Skip("set JARVIS_TEST_DATABASE_URL to a disposable database")
+		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
 	}
 	ctx := context.Background()
 	repo, err := Open(ctx, url)
@@ -96,7 +96,7 @@ func TestInspectionPostgres(t *testing.T) {
 }
 
 func TestPendingAudioIsVisibleBeforeMessagePreparation(t *testing.T) {
-	url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("disposable PostgreSQL only")
 	}

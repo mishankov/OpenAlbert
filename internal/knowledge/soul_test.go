@@ -30,7 +30,7 @@ func TestSoulEditsPersistAndRejectAmbiguousOrEmptyReplacements(t *testing.T) {
 			ctx := context.Background()
 			before, _ := store.Soul(ctx)
 			for _, edit := range [][2]string{
-				{"Jarvis", "Атлас"}, // occurs in both heading and introduction
+				{"OpenAlbert", "Атлас"}, // occurs in both heading and introduction
 				{"missing text", "new"},
 				{before, " "},
 				{before, strings.Repeat("я", 12001)},
@@ -43,7 +43,7 @@ func TestSoulEditsPersistAndRejectAmbiguousOrEmptyReplacements(t *testing.T) {
 					t.Fatal("invalid edit modified file")
 				}
 			}
-			if err := store.UpdateSoul(ctx, "Ты — Jarvis,", "Ты — Атлас,"); err != nil {
+			if err := store.UpdateSoul(ctx, "Ты — OpenAlbert,", "Ты — Атлас,"); err != nil {
 				t.Fatal(err)
 			}
 			reopened, err := NewWithSoulFile(root, path)
@@ -51,7 +51,7 @@ func TestSoulEditsPersistAndRejectAmbiguousOrEmptyReplacements(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, err := reopened.Soul(ctx)
-			if err != nil || got != strings.Replace(before, "Ты — Jarvis,", "Ты — Атлас,", 1) {
+			if err != nil || got != strings.Replace(before, "Ты — OpenAlbert,", "Ты — Атлас,", 1) {
 				t.Fatalf("edit did not survive reopening: %q %v", got, err)
 			}
 		})

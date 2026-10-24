@@ -32,7 +32,7 @@ func TestIndependentSTTMultipart(t *testing.T) {
 		if string(b) != "opus" || h.Filename != "voice.ogg" {
 			t.Error("incorrect source audio")
 		}
-		_, _ = io.WriteString(w, `{"text":"Привет, Джарвис","duration_seconds":1,"decode_ms":3,"inference_ms":12}`)
+		_, _ = io.WriteString(w, `{"text":"Привет, Альберт","duration_seconds":1,"decode_ms":3,"inference_ms":12}`)
 	}))
 	defer s.Close()
 	c, err := NewSTT(STTConfig{BaseURL: s.URL + "/v1/", APIKey: "speech-only", Model: "nemotron-3.5", Revision: "weights-v1"})
@@ -40,7 +40,7 @@ func TestIndependentSTTMultipart(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, err := c.Transcribe(context.Background(), "../../voice.ogg", []byte("opus"))
-	if err != nil || r.Text != "Привет, Джарвис" || r.InferenceMS != 12 {
+	if err != nil || r.Text != "Привет, Альберт" || r.InferenceMS != 12 {
 		t.Fatalf("%+v %v", r, err)
 	}
 	if strings.Contains(c.Profile(), "speech-only") {

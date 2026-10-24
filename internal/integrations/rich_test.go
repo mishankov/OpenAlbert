@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestRichMessagesKeepTableFormulaDetailsAndLongCodeUntouched(t *testing.T) {

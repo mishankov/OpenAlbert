@@ -1,7 +1,7 @@
 package messagefmt
 
 import (
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,7 +14,7 @@ func entityText(text string, e domain.TextEntity) string {
 	return string(utf16.Decode(u[e.Offset : e.Offset+e.Length]))
 }
 func TestMarkdownScreenshot(t *testing.T) {
-	m := Markdown("Вот содержимое:\n\n**SOUL.md**\n```\n# Jarvis\nТы — внимательный помощник.\n```\n\n**USER.md**\n```md\n# User profile\n- Денис живёт в Москве.\n```\n\nПара замечаний: `USER.md` обновляется.")
+	m := Markdown("Вот содержимое:\n\n**SOUL.md**\n```\n# OpenAlbert\nТы — внимательный помощник.\n```\n\n**USER.md**\n```md\n# User profile\n- Денис живёт в Москве.\n```\n\nПара замечаний: `USER.md` обновляется.")
 	if strings.Contains(m.Text, "```") || strings.Contains(m.Text, "**") {
 		t.Fatalf("raw Markdown: %q", m.Text)
 	}
@@ -29,7 +29,7 @@ func TestMarkdownScreenshot(t *testing.T) {
 			code = append(code, entityText(m.Text, e))
 		}
 	}
-	if !reflect.DeepEqual(bold, []string{"SOUL.md", "USER.md"}) || len(pre) != 2 || !strings.HasPrefix(pre[0], "# Jarvis\n") || !strings.Contains(pre[1], "- Денис живёт в Москве.") || !reflect.DeepEqual(code, []string{"USER.md"}) {
+	if !reflect.DeepEqual(bold, []string{"SOUL.md", "USER.md"}) || len(pre) != 2 || !strings.HasPrefix(pre[0], "# OpenAlbert\n") || !strings.Contains(pre[1], "- Денис живёт в Москве.") || !reflect.DeepEqual(code, []string{"USER.md"}) {
 		t.Fatalf("missing formatting: %+v", m)
 	}
 }

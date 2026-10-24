@@ -45,7 +45,7 @@ async function fixture(page, { imageFailure = false } = {}) {
       const after = u.searchParams.get("after");
       return route.fulfill({
         json: {
-          bucket: "jarvis",
+          bucket: "openalbert",
           files: prefix
             ? files.filter((f) => f.key.startsWith(prefix))
             : after
@@ -99,7 +99,7 @@ test("файлы: страницы, текст, изображение, скач
     "aria-current",
     "page",
   );
-  await expect(page.locator("#file-bucket")).toHaveText("jarvis");
+  await expect(page.locator("#file-bucket")).toHaveText("openalbert");
   await page.locator(".file-row").first().focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("dialog")).toContainText("personal:7");
@@ -232,7 +232,7 @@ test("занятость и запоздавший ответ не заменя�
     count++;
     await pending;
     await route.fulfill({
-      json: { bucket: "jarvis", files: files.slice(0, 2) },
+      json: { bucket: "openalbert", files: files.slice(0, 2) },
     });
   });
   await page.keyboard.press("Alt+r");
@@ -253,8 +253,8 @@ test("занятость и запоздавший ответ не заменя�
     if (prefix === "uploads/") {
       started = true;
       await old;
-      await route.fulfill({ json: { bucket: "jarvis", files: [files[1]] } });
-    } else await route.fulfill({ json: { bucket: "jarvis", files: [] } });
+      await route.fulfill({ json: { bucket: "openalbert", files: [files[1]] } });
+    } else await route.fulfill({ json: { bucket: "openalbert", files: [] } });
   });
   await page.locator("#file-prefix").fill("uploads/");
   await expect.poll(() => started).toBe(true);

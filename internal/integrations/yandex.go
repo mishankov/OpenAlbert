@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 type YandexConfig struct {

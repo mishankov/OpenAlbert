@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func storedFile(info minio.ObjectInfo) domain.StoredFile {

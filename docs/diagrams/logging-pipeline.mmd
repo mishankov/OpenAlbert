@@ -1,7 +1,7 @@
 flowchart LR
     accTitle: Доставка логов в VictoriaLogs
-    accDescr: Собственный код Jarvis формирует широкие события, инфраструктура пишет штатные логи, и все контейнеры отправляют потоки через logging driver в VictoriaLogs.
-    subgraph Containers["Контейнеры Jarvis"]
+    accDescr: Собственный код OpenAlbert формирует широкие события, инфраструктура пишет штатные логи, и все контейнеры отправляют потоки через logging driver в VictoriaLogs.
+    subgraph Containers["Контейнеры OpenAlbert"]
         App["Go-компоненты<br/>Wide Events в JSON"]
         Infra["Temporal · PostgreSQL<br/>и вспомогательные службы"]
     end

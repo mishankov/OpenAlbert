@@ -40,7 +40,7 @@ function renderPage() {
   const [requested = 'overview', anchor] = parseRoute();
   currentPage = pages.find((page) => page.id === requested) || pages[0];
   const page = currentPage;
-  document.title = `${page.label} — Jarvis`;
+  document.title = `${page.label} — OpenAlbert`;
   $('#breadcrumb-current').textContent = page.label;
   $('#page-number').textContent = String(page.index).padStart(2, '0');
   $('#source-link').href = `docs/${page.file}`;
@@ -52,7 +52,7 @@ function renderPage() {
     if (heading) {
       const figure = document.createElement('figure');
       figure.className = 'diagram overview-diagram';
-      figure.innerHTML = `<button class="diagram-open" data-diagram="docs/diagrams/components.svg" data-aspect="${page.diagrams?.['components.svg'] || 2}" data-title="Карта системы Jarvis" aria-label="Увеличить схему: карта системы Jarvis" aria-keyshortcuts="Enter" title="Открыть схему · Enter"><img src="docs/diagrams/components.svg" alt="Карта компонентов Jarvis"><span class="diagram-expand" aria-hidden="true">↗</span></button><figcaption>Карта системы<span>Нажми, чтобы увеличить</span></figcaption>`;
+      figure.innerHTML = `<button class="diagram-open" data-diagram="docs/diagrams/components.svg" data-aspect="${page.diagrams?.['components.svg'] || 2}" data-title="Карта системы OpenAlbert" aria-label="Увеличить схему: карта системы OpenAlbert" aria-keyshortcuts="Enter" title="Открыть схему · Enter"><img src="docs/diagrams/components.svg" alt="Карта компонентов OpenAlbert"><span class="diagram-expand" aria-hidden="true">↗</span></button><figcaption>Карта системы<span>Нажми, чтобы увеличить</span></figcaption>`;
       heading.before(figure);
       const list = heading.nextElementSibling;
       if (list?.tagName === 'UL') {

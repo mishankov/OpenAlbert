@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/integrations"
-	"jarvis/internal/telemetry"
+	"openalbert/internal/domain"
+	"openalbert/internal/integrations"
+	"openalbert/internal/telemetry"
 )
 
 type rejectedSearch struct{ testSearch }

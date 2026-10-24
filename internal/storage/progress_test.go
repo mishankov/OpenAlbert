@@ -7,15 +7,15 @@ import (
 	"testing"
 	"time"
 
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 )
 
 func TestProgressRepositoryContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { progressContract(t, NewMemory()) })
 	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 		if url == "" {
-			t.Skip("set JARVIS_TEST_DATABASE_URL for PostgreSQL")
+			t.Skip("set OPENALBERT_TEST_DATABASE_URL for PostgreSQL")
 		}
 		s, err := Open(context.Background(), url)
 		if err != nil {
@@ -126,9 +126,9 @@ func progressContract(t *testing.T, repo domain.Repository) {
 }
 
 func TestPostgresProgressRestartRecovery(t *testing.T) {
-	url := os.Getenv("JARVIS_TEST_DATABASE_URL")
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
 	if url == "" {
-		t.Skip("set JARVIS_TEST_DATABASE_URL for PostgreSQL")
+		t.Skip("set OPENALBERT_TEST_DATABASE_URL for PostgreSQL")
 	}
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -158,7 +158,7 @@ func TestPostgresProgressRestartRecovery(t *testing.T) {
 	defer s.Close()
 	for _, id := range []string{"creating", "editing"} {
 		var state, messageID string
-		if err = s.pool.QueryRow(ctx, `SELECT data->'delivery'->>'state',data->'delivery'->>'message_id' FROM jarvis_progress WHERE id=$1`, prefix+id).Scan(&state, &messageID); err != nil {
+		if err = s.pool.QueryRow(ctx, `SELECT data->'delivery'->>'state',data->'delivery'->>'message_id' FROM openalbert_progress WHERE id=$1`, prefix+id).Scan(&state, &messageID); err != nil {
 			t.Fatal(err)
 		}
 		if id == "creating" && state != "disabled" {

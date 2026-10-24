@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"jarvis/internal/domain"
+	"openalbert/internal/domain"
 	"strings"
 	"testing"
 )

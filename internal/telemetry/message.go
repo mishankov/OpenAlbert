@@ -8,7 +8,7 @@ import (
 
 func readableMessage(operation, result string, elapsed time.Duration, fields map[string]any, diagnostic Diagnostic) string {
 	labels := map[string]string{
-		"application.started": "Jarvis запущен",
+		"application.started": "OpenAlbert запущен",
 		"telegram.receive":    "Получено сообщение из Telegram",
 		"turn.prepare":        "Подготовлен контекст обращения",
 		"llm.complete":        "Получен ответ модели",

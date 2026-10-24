@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"jarvis/internal/sttserver"
 	"log"
 	"net/http"
+	"openalbert/internal/sttserver"
 	"os"
 	"os/signal"
 	"syscall"

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/knowledge"
+	"openalbert/internal/domain"
+	"openalbert/internal/knowledge"
 )
 
 func TestIdentityComesFromOwnerSoulAndReloadsWithoutBuiltInName(t *testing.T) {
@@ -31,7 +31,7 @@ func TestIdentityComesFromOwnerSoulAndReloadsWithoutBuiltInName(t *testing.T) {
 			t.Fatal(err)
 		}
 		system := turn.Messages[0].Content
-		if !strings.Contains(system, "Ты — "+name) || strings.Contains(system, "Jarvis") {
+		if !strings.Contains(system, "Ты — "+name) || strings.Contains(system, "OpenAlbert") {
 			t.Fatal("system prompt does not use the owner-defined identity exclusively")
 		}
 		if name == "Атлас" && strings.Contains(system, "Ирис") {
@@ -47,7 +47,7 @@ func TestSoulToolRenamesAndNextTurnLoadsNewIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := `{"old_text":"Ты — Jarvis,","new_text":"Ты — Атлас,"}`
+	args := `{"old_text":"Ты — OpenAlbert,","new_text":"Ты — Атлас,"}`
 	for i := 0; i < 2; i++ {
 		result := tool(t, a, conv, "rename", "rename-call", "soul_update", args)
 		if !strings.Contains(result, `"state":"updated"`) {
@@ -55,14 +55,14 @@ func TestSoulToolRenamesAndNextTurnLoadsNewIdentity(t *testing.T) {
 		}
 	}
 	after, err := store.Soul(ctx)
-	if err != nil || after != strings.Replace(before, "Ты — Jarvis,", "Ты — Атлас,", 1) {
+	if err != nil || after != strings.Replace(before, "Ты — OpenAlbert,", "Ты — Атлас,", 1) {
 		t.Fatalf("rename changed unrelated personality text: %q, %v", after, err)
 	}
 	turn, err := a.Prepare(ctx, RunInput{Key: "after-rename", SessionID: "after-rename", ConversationID: conv.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(turn.Messages[0].Content, "Ты — Атлас,") || strings.Contains(turn.Messages[0].Content, "Ты — Jarvis,") {
+	if !strings.Contains(turn.Messages[0].Content, "Ты — Атлас,") || strings.Contains(turn.Messages[0].Content, "Ты — OpenAlbert,") {
 		t.Fatal("next turn did not load the renamed identity")
 	}
 }
@@ -89,7 +89,7 @@ func TestSoulChangesRejectedOutsidePrivateInteractiveTurn(t *testing.T) {
 				}
 			}
 			_, err := a.execute(ctx, ToolInput{Conversation: conv, Background: tc.background, TaskID: tc.task,
-				Call: domain.ToolCall{Name: "soul_update", Arguments: []byte(`{"old_text":"Ты — Jarvis,","new_text":"Ты — Атлас,"}`)}})
+				Call: domain.ToolCall{Name: "soul_update", Arguments: []byte(`{"old_text":"Ты — OpenAlbert,","new_text":"Ты — Атлас,"}`)}})
 			if err == nil {
 				t.Fatal("forged call bypassed scope restriction")
 			}

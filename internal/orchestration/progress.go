@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"jarvis/internal/domain"
-	"jarvis/internal/integrations"
+	"openalbert/internal/domain"
+	"openalbert/internal/integrations"
 )
 
 // This runs in the same loop as final deliveries: an in-flight status creation
