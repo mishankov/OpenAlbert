@@ -21,7 +21,7 @@ func (audioArtifactStore) Artifact(_ context.Context, scope, id string) (domain.
 	}
 	return domain.Artifact{MIME: "audio/ogg", Data: []byte("ogg")}, true, nil
 }
-func TestInspectorAudioUsesSafeMIMEAndSameOriginPolicy(t *testing.T) {
+func TestInspectorAudioUsesSafeMIMEAndContentPolicy(t *testing.T) {
 	mux := http.NewServeMux()
 	Register(mux, fakeStore{}, audioArtifactStore{})
 	w := httptest.NewRecorder()
@@ -52,7 +52,7 @@ func (fakeStore) ListFiles(context.Context, string, string) (domain.StoredFiles,
 func (fakeStore) OpenFile(context.Context, string) (domain.StoredFile, io.ReadSeekCloser, error) {
 	return domain.StoredFile{}, nil, fs.ErrNotExist
 }
-func TestLocalReadOnlyInspector(t *testing.T) {
+func TestReadOnlyInspector(t *testing.T) {
 	mux := http.NewServeMux()
 	Register(mux, fakeStore{}, fakeStore{})
 	for _, tc := range []struct {
@@ -61,21 +61,23 @@ func TestLocalReadOnlyInspector(t *testing.T) {
 	}{
 		{"GET", "/inspect/", "localhost:8080", "", 200},
 		{"GET", "/api/inspect/sessions", "127.0.0.1:8080", "", 200},
+		{"GET", "/api/inspect/sessions", "192.168.1.31:8080", "http://192.168.1.31:8080", 200},
 		{"GET", "/api/inspect/sessions/missing", "localhost:8080", "", 404},
 		{"POST", "/api/inspect/sessions", "localhost:8080", "", 405},
-		{"GET", "/api/inspect/sessions", "attacker.example:8080", "", 403},
-		{"GET", "/api/inspect/sessions", "localhost:8080", "https://attacker.example", 403},
+		{"GET", "/api/inspect/sessions", "inspector.lan:8080", "", 200},
+		{"GET", "/api/inspect/sessions", "localhost:8080", "https://other.example", 200},
 		{"GET", "/api/inspect/sessions", "localhost:8080", "http://localhost:8080", 200},
 		{"GET", "/api/inspect/files", "localhost:8080", "", 200},
 		{"GET", "/api/inspect/file?key=missing", "localhost:8080", "", 404},
 		{"GET", "/api/inspect/file", "localhost:8080", "", 400},
-		{"GET", "/api/inspect/file/content?key=missing", "attacker.example", "", 403},
-		{"GET", "/api/inspect/files", "localhost:8080", "https://attacker.example", 403},
+		{"GET", "/api/inspect/file/content?key=missing", "inspector.lan", "", 404},
+		{"GET", "/api/inspect/files", "localhost:8080", "https://other.example", 200},
 		{"DELETE", "/api/inspect/file?key=notes.txt", "localhost:8080", "", 405},
 	} {
 		t.Run(tc.method+tc.path+tc.host+tc.origin, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "http://"+tc.host+tc.path, nil)
 			req.Header.Set("Origin", tc.origin)
+			req.Header.Set("Sec-Fetch-Site", "cross-site")
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, req)
 			if rec.Code != tc.code {

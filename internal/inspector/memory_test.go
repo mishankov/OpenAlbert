@@ -99,9 +99,9 @@ func TestMemoryInspectorReadsAllPagesAndKeepsScopes(t *testing.T) {
 		{"GET", "/api/inspect/memory", "localhost", "", 400},
 		{"GET", "/api/inspect/memory/entry?conversation_id=personal:7", "localhost", "", 400},
 		{"GET", "/api/inspect/memory/entry?conversation_id=other&id=fact-000", "localhost", "", 404},
-		{"GET", "/api/inspect/memory/conversations", "evil.example", "", 403},
-		{"GET", base, "localhost", "https://evil.example", 403},
-		{"GET", "/api/inspect/memory/entry?conversation_id=personal:7&id=fact-000", "localhost", "https://evil.example", 403},
+		{"GET", "/api/inspect/memory/conversations", "inspector.lan", "", 200},
+		{"GET", base, "localhost", "https://other.example", 200},
+		{"GET", "/api/inspect/memory/entry?conversation_id=personal:7&id=fact-000", "localhost", "https://other.example", 200},
 		{"POST", base, "localhost", "", 405},
 		{"DELETE", "/api/inspect/memory/entry?conversation_id=personal:7&id=fact-000", "localhost", "", 405},
 	} {
@@ -117,7 +117,7 @@ func TestMemoryInspectorReadsAllPagesAndKeepsScopes(t *testing.T) {
 	}
 }
 
-func TestSoulInspectorReadsConfiguredFileAndRemainsLocalReadOnly(t *testing.T) {
+func TestSoulInspectorReadsConfiguredFileAndRemainsReadOnly(t *testing.T) {
 	for _, external := range []bool{false, true} {
 		t.Run(fmt.Sprint(external), func(t *testing.T) {
 			root := t.TempDir()
@@ -158,8 +158,8 @@ func TestSoulInspectorReadsConfiguredFileAndRemainsLocalReadOnly(t *testing.T) {
 				method, host, origin string
 				code                 int
 			}{
-				{"GET", "evil.example", "", 403},
-				{"GET", "localhost", "https://evil.example", 403},
+				{"GET", "inspector.lan", "", 200},
+				{"GET", "localhost", "https://other.example", 200},
 				{"PUT", "localhost", "", 405},
 				{"DELETE", "localhost", "", 405},
 			} {

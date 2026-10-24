@@ -1,4 +1,4 @@
-// Package inspector serves a local, read-only view of persisted agent activity.
+// Package inspector serves a read-only view of persisted agent activity.
 package inspector
 
 import (
@@ -7,11 +7,8 @@ import (
 	"encoding/json"
 	"io"
 	"io/fs"
-	"net"
 	"net/http"
-	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"openalbert/internal/domain"
@@ -29,8 +26,8 @@ type ArtifactStore interface {
 func Register(mux *http.ServeMux, store Store, artifacts ArtifactStore) {
 	registerFiles(mux, artifacts)
 	files, _ := fs.Sub(assets, "web")
-	mux.Handle("GET /inspect/", local(http.StripPrefix("/inspect/", http.FileServer(http.FS(files)))))
-	mux.Handle("GET /api/inspect/sessions", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /inspect/", inspectorResponse(http.StripPrefix("/inspect/", http.FileServer(http.FS(files)))))
+	mux.Handle("GET /api/inspect/sessions", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f := Filter{Query: r.URL.Query().Get("q"), Status: r.URL.Query().Get("status"), Trigger: r.URL.Query().Get("trigger"), Conversation: r.URL.Query().Get("conversation_id"), Before: number(r, "before"), Limit: 51}
 		rows, err := store.InspectSessions(r.Context(), f)
 		if err != nil {
@@ -44,7 +41,7 @@ func Register(mux *http.ServeMux, store Store, artifacts ArtifactStore) {
 		}
 		write(w, map[string]any{"sessions": rows, "next_before": next})
 	})))
-	mux.Handle("GET /api/inspect/sessions/{id}", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/inspect/sessions/{id}", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		out, found, err := store.InspectSession(r.Context(), r.PathValue("id"), number(r, "after"))
 		if err != nil {
 			fail(w, 500)
@@ -56,7 +53,7 @@ func Register(mux *http.ServeMux, store Store, artifacts ArtifactStore) {
 		}
 		write(w, out)
 	})))
-	mux.Handle("GET /api/inspect/trace", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/inspect/trace", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		out, found, err := store.InspectTrace(r.Context(), r.URL.Query().Get("session_id"), r.URL.Query().Get("id"))
 		if err != nil {
 			fail(w, 500)
@@ -68,7 +65,7 @@ func Register(mux *http.ServeMux, store Store, artifacts ArtifactStore) {
 		}
 		write(w, out)
 	})))
-	mux.Handle("GET /api/inspect/artifact", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/inspect/artifact", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		out, found, err := artifacts.Artifact(r.Context(), r.URL.Query().Get("conversation_id"), r.URL.Query().Get("id"))
 		if err != nil {
 			fail(w, 500)
@@ -106,28 +103,8 @@ func write(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
-func local(next http.Handler) http.Handler {
+func inspectorResponse(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host := r.Host
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
-		}
-		ip := net.ParseIP(host)
-		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-			fail(w, 403)
-			return
-		}
-		if origin := r.Header.Get("Origin"); origin != "" {
-			u, err := url.Parse(origin)
-			if err != nil || u.Host != r.Host || (u.Scheme != "http" && u.Scheme != "https") {
-				fail(w, 403)
-				return
-			}
-		}
-		if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
-			fail(w, 403)
-			return
-		}
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")

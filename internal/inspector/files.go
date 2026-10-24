@@ -26,7 +26,7 @@ func textMIME(value string) bool {
 }
 
 func registerFiles(mux *http.ServeMux, store ArtifactStore) {
-	mux.Handle("GET /api/inspect/files", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/inspect/files", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		out, err := store.ListFiles(r.Context(), r.URL.Query().Get("prefix"), r.URL.Query().Get("after"))
 		if err != nil {
 			if errors.Is(err, fs.ErrInvalid) {
@@ -89,6 +89,6 @@ func registerFiles(mux *http.ServeMux, store ArtifactStore) {
 		}
 		write(w, out)
 	}
-	mux.Handle("GET /api/inspect/file", local(http.HandlerFunc(serve)))
-	mux.Handle("GET /api/inspect/file/content", local(http.HandlerFunc(serve)))
+	mux.Handle("GET /api/inspect/file", inspectorResponse(http.HandlerFunc(serve)))
+	mux.Handle("GET /api/inspect/file/content", inspectorResponse(http.HandlerFunc(serve)))
 }

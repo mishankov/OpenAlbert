@@ -22,10 +22,10 @@ type MemoryStore interface {
 	Soul(context.Context) (string, error)
 }
 
-// RegisterMemory exposes the knowledge store through the same local, read-only
+// RegisterMemory exposes the knowledge store through the same read-only
 // boundary as sessions. It deliberately does not use the agent's capped search.
 func RegisterMemory(mux *http.ServeMux, conversations ConversationStore, memory MemoryStore) {
-	mux.Handle("GET /api/inspect/memory/soul", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/inspect/memory/soul", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		text, err := memory.Soul(r.Context())
 		if err != nil {
 			fail(w, 500)
@@ -33,7 +33,7 @@ func RegisterMemory(mux *http.ServeMux, conversations ConversationStore, memory 
 		}
 		write(w, map[string]string{"soul": text})
 	})))
-	mux.Handle("GET /api/inspect/memory/conversations", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/inspect/memory/conversations", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rows, err := conversations.ListConversations(r.Context())
 		if err != nil {
 			fail(w, 500)
@@ -44,7 +44,7 @@ func RegisterMemory(mux *http.ServeMux, conversations ConversationStore, memory 
 		}
 		write(w, map[string]any{"conversations": rows})
 	})))
-	mux.Handle("GET /api/inspect/memory", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/inspect/memory", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scope := r.URL.Query().Get("conversation_id")
 		if !memoryID(scope) {
 			fail(w, 400)
@@ -88,7 +88,7 @@ func RegisterMemory(mux *http.ServeMux, conversations ConversationStore, memory 
 		}
 		write(w, map[string]any{"entries": filtered[start:end], "total": total, "next_after": next, "profile": profile})
 	})))
-	mux.Handle("GET /api/inspect/memory/entry", local(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/inspect/memory/entry", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scope, id := r.URL.Query().Get("conversation_id"), r.URL.Query().Get("id")
 		if !memoryID(scope) || !memoryID(id) {
 			fail(w, 400)
