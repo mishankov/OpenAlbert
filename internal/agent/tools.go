@@ -119,6 +119,9 @@ func taskUpdateAccess(in ToolInput) error {
 }
 
 func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
+	if strings.HasPrefix(in.Call.Name, "computer_") {
+		return a.executeComputer(ctx, in)
+	}
 	if in.Call.Name == "logs_search" {
 		return a.searchLogs(ctx, in)
 	}
@@ -446,6 +449,9 @@ func (a *Activities) toolDefinitions() []domain.Tool {
 	if a.Browser != nil {
 		tools = append(tools, browserDefinitions()...)
 	}
+	if a.Computer != nil {
+		tools = append(tools, computerDefinitions()...)
+	}
 	available := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
 		if tool.Name != "web_search" || a.searchEnabled() {
@@ -461,6 +467,9 @@ func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 	interactive := turn.Input.TaskID == "" && !turn.Input.Initiative
 	filtered := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
+		if strings.HasPrefix(tool.Name, "computer_") && (!a.isOwnerPrivate(turn.Conversation) || turn.Input.Initiative) {
+			continue
+		}
 		if tool.Name == "task_update" && turn.Input.Initiative {
 			continue
 		}

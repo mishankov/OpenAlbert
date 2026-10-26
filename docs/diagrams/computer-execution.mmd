@@ -7,14 +7,14 @@ sequenceDiagram
     participant Computer as Computer box
     Agent->>Activity: Выполнить удалённое действие
     Activity->>Store: Зафиксировать намерение
-    Activity->>Computer: Команда через SSH / другой протокол
+    Activity->>Computer: Команда через SSH с постоянным ID
     alt Результат получен
-        Computer-->>Activity: Вывод или ссылка на длительную операцию
+        Computer-->>Activity: Вывод, состояние и ID операции
         Activity->>Store: Сохранить известное состояние
         Activity-->>Agent: Результат или возможность проверки статуса
     else Ответ потерян
         Activity->>Store: Результат пока неизвестен
-        Activity->>Computer: Проверить состояние, если возможно
+        Activity->>Computer: Проверить тот же ID без повторного запуска
         Computer-->>Activity: Найденное состояние или отсутствие подтверждения
         Activity->>Store: Сохранить результат проверки
         Activity-->>Agent: Подтверждённый статус или неопределённость

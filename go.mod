@@ -7,9 +7,11 @@ require (
 	github.com/chromedp/chromedp v0.21.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/minio/minio-go/v7 v7.4.1
+	github.com/stretchr/testify v1.12.1
 	github.com/yuin/goldmark v1.8.6
 	go.temporal.io/api v1.63.5
 	go.temporal.io/sdk v1.50.0
+	golang.org/x/crypto v0.58.0
 	golang.org/x/net v0.61.0
 )
 
@@ -37,11 +39,9 @@ require (
 	github.com/robfig/cron v1.2.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
-	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect

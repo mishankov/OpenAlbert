@@ -8,7 +8,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
-OWN_IMAGES = {"openalbert", "stt", "log-gateway", "minio", "minio-init"}
+OWN_IMAGES = {"openalbert", "stt", "log-gateway", "minio", "minio-init", "computer", "computer-init"}
 TEST_ENV = {
     "OPENALBERT_IMAGE_PREFIX": "ghcr.io/example/openalbert",
     "OPENALBERT_IMAGE_TAG": "sha-" + "1" * 40,
@@ -57,7 +57,8 @@ def check_pair(overrides):
         assert "build" not in actual, f"{name}: release must not build on the host"
         if name in OWN_IMAGES:
             assert "build" in expected, f"{name}: local development must build from source"
-            image = f'{TEST_ENV["OPENALBERT_IMAGE_PREFIX"]}/{name}:{TEST_ENV["OPENALBERT_IMAGE_TAG"]}'
+            component = "computer" if name == "computer-init" else name
+            image = f'{TEST_ENV["OPENALBERT_IMAGE_PREFIX"]}/{component}:{TEST_ENV["OPENALBERT_IMAGE_TAG"]}'
             assert actual.pop("image") == image, f"{name}: unexpected published image"
             expected.pop("build")
         else:
@@ -87,6 +88,12 @@ def main():
         assert "stt" not in external["services"], "Disabled bundled speech recognition must not start"
         dependency = external["services"]["openalbert"].get("depends_on", {}).get("stt")
         assert dependency is None or dependency.get("required") is False, "External speech recognition still requires the bundled service"
+    assert not current["services"]["computer"].get("ports"), "SSH must not be published"
+    assert set(current["services"]["computer"]["networks"]) == {"computer"}
+    assert set(current["services"]["openalbert"]["networks"]) == {"computer", "default"}
+    for address in ["", "remote.example:2222"]:
+        configured = check_pair({"COMPUTER_SSH_ADDRESS": address})
+        assert configured["services"]["openalbert"]["environment"]["COMPUTER_SSH_ADDRESS"] == address
     for logs_url in ["", "http://logs.example:9428"]:
         inspector_url = "https://inspect.example/inspect/"
         release = check_pair({"VICTORIALOGS_URL": logs_url, "INSPECTOR_PUBLIC_URL": inspector_url})

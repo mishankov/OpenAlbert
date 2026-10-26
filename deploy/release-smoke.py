@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise a fresh published-image deployment with fake Telegram/LLM APIs.
 
-Requires four locally built images; does not contact real providers or download
+Requires five locally built images; does not contact real providers or download
 STT weights. Uses a unique Compose project, temporary data and loopback ports.
 """
 import argparse
@@ -22,7 +22,7 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parent.parent
-COMPONENTS = ("openalbert", "log-gateway", "minio", "minio-init")
+COMPONENTS = ("openalbert", "computer", "log-gateway", "minio", "minio-init")
 spec = importlib.util.spec_from_file_location("mvp_smoke", ROOT / "deploy/mvp-smoke.py")
 mvp = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mvp)
@@ -55,7 +55,7 @@ def main():
         subprocess.run(["docker", "image", "inspect", image], env=env, check=True, stdout=subprocess.DEVNULL)
 
     project = "openalbert-release-smoke-" + uuid.uuid4().hex[:12]
-    state = mvp.FakeState(project, without_search=True)
+    state = mvp.FakeState(project, without_search=True, with_computer=True)
     server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), mvp.handler_for(state))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     api_url = f"http://host.docker.internal:{server.server_port}"
@@ -91,8 +91,9 @@ def main():
             gateway_port = free_port()
             for name, service in model["services"].items():
                 assert "build" not in service, "Published deployment unexpectedly builds source"
-                if name in images:
-                    service["image"] = images[name]
+                component = "computer" if name == "computer-init" else name
+                if component in images:
+                    service["image"] = images[component]
                     service["pull_policy"] = "never"
                 service["logging"]["options"]["splunk-url"] = f"http://127.0.0.1:{gateway_port}"
                 service["ports"] = [
@@ -131,18 +132,20 @@ def main():
                 mvp.wait_until("closed sessions analyzed", lambda: sql("SELECT count(*)>0 AND bool_and(analyzed) FROM openalbert_sessions") == "t")
                 assert sql("SELECT count(*) FROM openalbert_incoming WHERE handled") == "1"
                 assert sql("SELECT count(*) FROM openalbert_tasks WHERE data->>'status'='completed'") == "1"
-                assert sql("SELECT count(*) FROM openalbert_artifacts WHERE octet_length(content)=0") == "1"
+                assert sql("SELECT count(*) FROM openalbert_artifacts WHERE octet_length(content)=0") == "2"
                 assert state.analyses > 0 and len(state.sent) == 2
                 assert all(str(message["chat_id"]) == "42" for message in state.sent)
                 assert len(read_json(app_url + "/api/inspect/memory/conversations")["conversations"]) > 0
                 assert "OpenAlbert" in read_json(app_url + "/api/inspect/memory/soul")["soul"]
                 objects = run(compose + ["run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "minio-init", "-ec",
                                         'mc alias set local http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null; mc find "local/$S3_BUCKET"']).stdout.splitlines()
-                assert len(objects) == 1, "Artifact bytes were not persisted in S3"
-                content = run(compose + ["run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "minio-init", "-ec",
+                assert len(objects) == 2, "Input and computer result were not persisted in S3"
+                contents = []
+                for object_key in objects:
+                    contents.append(run(compose + ["run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "minio-init", "-ec",
                                         'mc alias set local http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null; mc cat "$1"',
-                                        "sh", objects[0]]).stdout
-                assert content == state.document.decode(), "S3 artifact differs from the incoming document"
+                                        "sh", object_key]).stdout)
+                assert sorted(contents) == sorted([state.document.decode(), state.document.decode().upper()]), "S3 computer result differs"
                 memory = run(compose + ["exec", "-T", "openalbert", "sh", "-c", "find /data/knowledge -type f -exec cat {} \\;"]).stdout
                 assert project + " preference" in memory
                 before = (state.completions, state.analyses)
