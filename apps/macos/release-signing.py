@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run release build/package in an isolated, temporary signing keychain.
 
-Expects an explicitly configured persistent certificate backup in CI. Never
+Expects an explicitly configured persistent certificate backup on the host. Never
 creates an identity, reads login.keychain, or falls back to ad-hoc release signing.
 """
 import base64

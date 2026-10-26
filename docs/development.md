@@ -4,8 +4,11 @@ MVP работает через Telegram и нативный клиент macOS.
 
 Этот документ описывает локальную разработку через `compose.local.yaml`: OpenAlbert, STT,
 log-gateway, MinIO и инициализатор бакета собираются из исходников. Установка готовых
-образов из GHCR и GitHub Actions описаны в [руководстве публикации](deployment.md).
+образов из GHCR и локальная публикация описаны в [руководстве публикации](deployment.md).
 `compose.yaml` запускается отдельно и не требует сборки на сервере.
+
+Полный набор проверок и сборок запускается через [Task](local-checks.md):
+`task check`, `task test`, `task images`, `task verify`.
 
 ## Первый запуск
 

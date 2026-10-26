@@ -24,6 +24,7 @@ export const navigation = [
   ['macos-development-vm', 'macos-development-vm.md', 'Разработка в macOS VM', 'tool'],
   ['macos-updates', 'macos-updates.md', 'Обновления macOS', 'tool'],
   ['development', 'development.md', 'Запуск MVP', 'tool'],
+  ['local-checks', 'local-checks.md', 'Локальные проверки', 'tool'],
   ['deployment', 'deployment.md', 'Публикация и установка', 'tool'],
 ];
 

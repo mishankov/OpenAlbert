@@ -19,6 +19,6 @@ export default defineConfig({
     command: "node tests/server.mjs",
     cwd: fileURLToPath(new URL(".", import.meta.url)),
     url: `${baseURL}/inspect/`,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
   },
 });

@@ -43,75 +43,56 @@ AGPL и credits клиента включены в соответствующи�
 `auto-setup` соответствует текущей установке с одним сервером Temporal; отказоустойчивый
 кластер и отдельный процесс миграций эта конфигурация не настраивает.
 
-## Что делает GitHub Actions
+## Локальная сборка и публикация
 
-Workflow `.github/workflows/ci.yml` работает на pull request, push в `master` и при
-ручном запуске. Публикация разрешена только для запуска на ветке `master`, кроме PR.
+Все проверки и сборки выполняются локально через Task, Docker Buildx Bake и Tart.
+Полный каталог команд, установка инструментов и отчёты описаны в
+[локальных проверках](local-checks.md).
 
-Проверки выполняются до сборки образов:
-
-1. Проверка workflow через actionlint и обоих Compose: соответствие сервисов,
-   обязательные переменные, отсутствие исходников на сервере, отключённый/внешний STT.
-2. `gofmt`, `go vet`, `go test -race` с временными PostgreSQL и VictoriaLogs,
-   настоящим Chromium и FFmpeg. Проверяется и реальный контракт поиска логов.
-   Telegram, платные LLM и скачивание весов для тестов не нужны.
-3. `npm ci`, тесты и сборка документации, Playwright-тесты документации и инспектора,
-   включая существующие проверки сочетаний клавиш, IME и русской раскладки.
-
-Затем каждый из шести образов собирается отдельно на нативных Linux AMD64 и ARM64
-runners. Образы проходят smoke-проверки; для `minio-init` дополнительно запускаются
-временный MinIO, повторное создание бакета и реальный S3-контракт OpenAlbert.
-Для `computer` проверяется реальный SSH, sudo, обмен файлами, отмена, дедупликация
-команд и сохранение состояния после пересоздания контейнера.
-Проверка STT запускает native CLI без скачивания модели; качество распознавания
-и расход памяти требуют отдельного эксперимента с весами. Кэши сборки разделены
-по компоненту и архитектуре.
-
-После сборок CI поднимает опубликованный вариант Compose с пустыми каталогами
-данных и подставными Telegram/LLM API. Проверяются инициализация PostgreSQL и
-Temporal, фоновая задача, загрузка вложения в Ubuntu, обработка с sudo и сохранение
-результата в S3, Markdown-память, инспектор и
-путь Docker → log-gateway → VictoriaLogs. После перезапуска приложения проверяются
-сохранённый Telegram offset и отсутствие повторной обработки и отправки ответов.
-Общие SHA- и `master`-теги публикуются только после успешной проверки этого запуска.
-
-В PR образы не публикуются, вход в GHCR не выполняется. Используется событие
-`pull_request`, поэтому код из fork не получает токен для записи пакетов.
-После успешных проверок и smoke-тестов на `master` загружаются образы отдельных
-архитектур, затем создаются общие AMD64/ARM64-манифесты:
-
-```text
-ghcr.io/<owner>/<repository>/openalbert:sha-<полный SHA коммита>
-ghcr.io/<owner>/<repository>/computer:sha-<полный SHA коммита>
-ghcr.io/<owner>/<repository>/stt:sha-<полный SHA коммита>
-ghcr.io/<owner>/<repository>/log-gateway:sha-<полный SHA коммита>
-ghcr.io/<owner>/<repository>/minio:sha-<полный SHA коммита>
-ghcr.io/<owner>/<repository>/minio-init:sha-<полный SHA коммита>
+```sh
+task verify
 ```
 
-У каждого также есть обновляемый тег `master`. Для воспроизводимой установки
-выбирай `sha-<полный SHA>` от полностью успешного workflow. Публикация нескольких
-пакетов не атомарна; при сбое последнего этапа перезапусти неуспешные jobs и
-дождись успеха всего workflow. На сервер ничего автоматически не развёртывается.
+Команда проверяет форматирование, Go analysis, Compose, Go race-тесты с временными
+PostgreSQL/VictoriaLogs и настоящими Chromium/FFmpeg, документацию, браузерные
+сценарии и нативные macOS-тесты в Tart. Затем собирает шесть образов для архитектуры
+Docker engine, запускает smoke каждого образа и чистое развёртывание с перезапуском.
+Telegram/LLM заменены синтетическими API, рабочий `.env` не читается, веса STT не скачиваются.
+MinIO проверяется реальным S3-контрактом и повторной инициализацией бакета; Ubuntu —
+контрактом SSH, sudo, файлов, отмены и восстановления после пересоздания.
 
-Namespace берётся из `github.repository` и переводится в нижний регистр, поэтому
-workflow не привязан к конкретному владельцу. Репозиторий проекта —
-[mishankov/OpenAlbert](https://github.com/mishankov/OpenAlbert), базовый путь образов —
-`ghcr.io/mishankov/openalbert`. Пакеты появятся после первой успешной публикации workflow.
+Публикация запускается отдельно, из чистого checkout ветки `master`:
 
-## Настройка GitHub
+```sh
+docker login ghcr.io
+OPENALBERT_IMAGE_PREFIX=ghcr.io/mishankov/openalbert task publish
+```
 
-1. Опубликуй репозиторий с основной веткой `master`, включи Actions и разреши
-   используемые actions в настройках организации, если там действует allowlist.
-2. Разреши workflow создавать packages. Публикация использует встроенный
-   `GITHUB_TOKEN` с `packages: write`; отдельный PAT для CI не нужен.
-3. После первой публикации проверь видимость **каждого** GHCR package: публичный
-   GitHub-репозиторий сам по себе не делает package публичным. Для анонимного
-   `docker compose pull` пакеты должны быть public. Для закрытых пакетов нужен
-   `docker login ghcr.io` на сервере с доступом на чтение.
-4. В защите `master` включи обязательные проверки workflow. Нативные ARM64 jobs
-   используют runner `ubuntu-24.04-arm`; он должен быть доступен для репозитория.
-   При его недоступности потребуется ARM64 runner или настройка сборок через QEMU.
+`task publish` сам повторяет все проверки и собирает/проверяет **обе** архитектуры
+`linux/amd64` и `linux/arm64`, включая чистое развёртывание каждой.
+На Apple Silicon AMD64 использует эмуляцию и может собираться значительно дольше.
+Образы загружаются только после успешной проверки всех этапов. Авторизация — локальный
+Docker credential store; namespace задаётся явно через `OPENALBERT_IMAGE_PREFIX`.
+
+Каждый компонент получает теги `sha-<полный SHA>-amd64` и `sha-<полный SHA>-arm64`,
+после чего создаются общие манифесты `sha-<полный SHA>` и `master`:
+
+```text
+ghcr.io/<owner>/<repository>/openalbert:sha-<полный SHA>
+ghcr.io/<owner>/<repository>/computer:sha-<полный SHA>
+ghcr.io/<owner>/<repository>/stt:sha-<полный SHA>
+ghcr.io/<owner>/<repository>/log-gateway:sha-<полный SHA>
+ghcr.io/<owner>/<repository>/minio:sha-<полный SHA>
+ghcr.io/<owner>/<repository>/minio-init:sha-<полный SHA>
+```
+
+Для воспроизводимой установки выбирай SHA-тег от полностью успешного локального
+прогона. Публикация нескольких пакетов не атомарна: при ошибке повтори `task publish`
+из того же коммита и дождись общего успеха. На сервер ничего автоматически не развёртывается.
+Проверь видимость каждого GHCR package: для анонимного pull пакет должен быть public;
+для закрытых пакетов на сервере нужен `docker login ghcr.io` с правом чтения.
+Если в защите ветки остались обязательные проверки удалённых workflows, удали эти
+требования в настройках репозитория: локальные команды не создают GitHub status checks.
 
 ## Установка без исходников
 
@@ -216,40 +197,26 @@ docker compose ps
 образы. Периодическое создание копий, их хранение вне сервера и проверку
 восстановления нужно настроить для конкретной установки.
 
-## Локальные проверки CI
+## Проверки и диагностика
 
 ```sh
-python3 deploy/check-compose.py
-go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-go vet ./...
-go test -race ./...
-npm ci --prefix docs
-npm test --prefix docs
-npm run build --prefix docs
+task --list
+task check
+task test
+task images
+task verify
+task reports
 ```
 
-Браузерные и интеграционные проверки требуют Chromium, FFmpeg и отдельных
-временных PostgreSQL/S3, как в workflow. Инструкции разработки остаются в
-[development.md](development.md).
+Каждый прогон сохраняет отдельный каталог `reports/local/<run-id>/` с
+`summary.md`, `result.json`, логами этапов, HTML/JUnit-отчётами Playwright и
+диагностикой VM. Подробнее — [локальные проверки](local-checks.md).
 
-Для сквозной проверки установки собери четыре образа и запусти тест:
-
-```sh
-docker build -t openalbert-ci:openalbert .
-docker build -t openalbert-ci:log-gateway -f deploy/logging.Dockerfile .
-docker build -t openalbert-ci:minio --target minio -f deploy/minio.Dockerfile .
-docker build -t openalbert-ci:minio-init --target minio-init -f deploy/minio.Dockerfile .
-python3 deploy/release-smoke.py
-```
-
-Для существующих локальных образов можно передать `--image компонент=тег`.
+Для сквозного теста уже собранных образов можно вызвать `python3 deploy/release-smoke.py`
+с `--image компонент=тег` для каждого из пяти компонентов (без STT).
 Проверка использует отдельный Compose project, временные данные и случайные
 локальные порты; реальные ключи и `.env` проекта не читает. Веса STT не скачиваются.
 
-Если локальные серверы документации или инспектора уже занимают тестовые порты,
-задай `DOCS_TEST_PORT` и `INSPECTOR_TEST_PORT`. Это позволяет проверять текущий
-checkout отдельными процессами, не используя сервер другого рабочего дерева.
-
-Официальные справочники: [публикация в GHCR](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images),
-[сборки нескольких архитектур](https://docs.docker.com/build/ci/github-actions/multi-platform/),
+Официальные справочники: [Docker Bake](https://docs.docker.com/build/bake/),
+[сборки нескольких архитектур](https://docs.docker.com/build/building/multi-platform/),
 [inline configs Compose](https://docs.docker.com/reference/compose-file/configs/).
