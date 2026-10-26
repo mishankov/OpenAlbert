@@ -177,12 +177,12 @@ class Run:
         self.command("format", [sys.executable, "tools/local.py", "--format-check"])
         self.command("vet", ["go", "vet", "./..."])
         self.command("local-runner-tests", [sys.executable, "-m", "unittest", "discover", "-s", "tools", "-p", "test_*.py", "-v"])
-        self.command("compose", [sys.executable, "deploy/check-compose.py"])
-        self.command("test-compose", ["docker", "compose", "--env-file", "/dev/null", "-f", "deploy/compose.test.yaml", "config", "-q"])
-        self.command("bake-config", ["docker", "buildx", "bake", "-f", "docker-bake.hcl", "--print"])
+        self.command("compose", [sys.executable, "tools/checks/check-compose.py"])
+        self.command("test-compose", ["docker", "compose", "--project-directory", str(ROOT), "--env-file", "/dev/null", "-f", "deploy/compose.test.yaml", "config", "-q"])
+        self.command("bake-config", ["docker", "buildx", "bake", "-f", "deploy/docker-bake.hcl", "--print"])
 
     def go(self):
-        compose = ["docker", "compose", "--env-file", "/dev/null", "-f", "deploy/compose.test.yaml", "-p", self.repository]
+        compose = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", "/dev/null", "-f", "deploy/compose.test.yaml", "-p", self.repository]
         try:
             self.command("go-services", compose + ["up", "-d", "--wait", "--wait-timeout", "90", "postgres", "victorialogs"])
             self.command("go-race-integration", compose + ["run", "--build", "--rm", "go"], timeout=1800)
@@ -198,7 +198,7 @@ class Run:
         self.command("docs-tests", ["npm", "test"], cwd=ROOT / "docs")
         self.command("docs-build", ["npm", "run", "build"], cwd=ROOT / "docs")
         for suite, config, variable in (("docs", "docs/playwright.config.mjs", "DOCS_TEST_PORT"),
-                                        ("inspector", "internal/inspector/playwright.config.mjs", "INSPECTOR_TEST_PORT")):
+                                        ("inspector", "apps/backend/internal/inspector/playwright.config.mjs", "INSPECTOR_TEST_PORT")):
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))
                 port = sock.getsockname()[1]
@@ -215,7 +215,7 @@ class Run:
         # them before Python discovery so a fresh checkout cannot skip that suite.
         self.command("macos-resolve", ["swift", "package", "--package-path", "apps/macos", "resolve"])
         self.command("macos-tooling", [sys.executable, "-m", "unittest", "discover", "-s", "apps/macos", "-p", "test_*.py", "-v"])
-        self.command("go-swift-contract", [sys.executable, "deploy/desktop/check-contract.py"])
+        self.command("go-swift-contract", [sys.executable, "tools/checks/check-contract.py"])
         self.vm("test")
         self.vm("smoke", "--configuration", "release")
 
@@ -226,16 +226,16 @@ class Run:
     def images(self, arch, deployment=False):
         env = dict(self.env, LOCAL_REPOSITORY=self.repository, ARCH=arch, REVISION=self.data["revision"],
                    DOCKER_DEFAULT_PLATFORM="linux/" + arch)
-        self.command("images-" + arch, ["docker", "buildx", "bake", "-f", "docker-bake.hcl", "--load",
+        self.command("images-" + arch, ["docker", "buildx", "bake", "-f", "deploy/docker-bake.hcl", "--load",
                                        "--metadata-file", self.directory / ("images-" + arch + ".json")], env=env, timeout=7200)
         images = {name: f"{self.repository}:{name}-{arch}" for name in COMPONENTS}
         self.data["images"][arch] = images
         self.save()
         env["MINIO_SMOKE_IMAGE"] = images["minio"]
         for component, image in images.items():
-            self.command(f"smoke-{component}-{arch}", ["bash", "deploy/smoke-image.sh", component, image], env=env, timeout=900)
+            self.command(f"smoke-{component}-{arch}", ["bash", "tools/smoke/smoke-image.sh", component, image], env=env, timeout=900)
         if deployment:
-            args = [sys.executable, "deploy/release-smoke.py"]
+            args = [sys.executable, "tools/smoke/release-smoke.py"]
             for component, image in images.items():
                 if component != "stt":
                     args += ["--image", component + "=" + image]
@@ -310,7 +310,7 @@ def main():
     parser.add_argument("--format-check", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.format_check:
-        files = output(["gofmt", "-l", "cmd", "internal"])
+        files = output(["gofmt", "-l", "apps/backend", "services"])
         if files:
             print(files)
             return 1

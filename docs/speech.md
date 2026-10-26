@@ -24,21 +24,21 @@ FFmpeg внутри контейнера преобразует OGG/Opus и др
 Изменения кода и Compose не меняют запущенный MVP. Следующие команды предназначены для отдельно согласованной активации из основной установки после переноса изменений. Не запускай второй OpenAlbert из рабочего дерева с тем же Telegram-токеном.
 
 ```sh
-docker compose -f compose.local.yaml build stt openalbert
-docker compose -f compose.local.yaml up -d stt
-docker compose -f compose.local.yaml ps stt
+docker compose --project-directory . -f deploy/compose.local.yaml build stt openalbert
+docker compose --project-directory . -f deploy/compose.local.yaml up -d stt
+docker compose --project-directory . -f deploy/compose.local.yaml ps stt
 ```
 
 Первый запуск загружает около 742 MB весов и прогревает модель. Дождись `healthy`; стартовый период healthcheck — 15 минут. Проверка без Telegram:
 
 ```sh
-docker compose -f compose.local.yaml exec stt python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/ready').read().decode())"
+docker compose --project-directory . -f deploy/compose.local.yaml exec stt python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/ready').read().decode())"
 ```
 
 После готовности STT отдельно пересоздай OpenAlbert для нового кода и настроек:
 
 ```sh
-docker compose -f compose.local.yaml up -d --no-deps openalbert
+docker compose --project-directory . -f deploy/compose.local.yaml up -d --no-deps openalbert
 ```
 
 Bootstrap подготавливает владельца каталога `/models`, затем сбрасывает привилегии. Для офлайн-развёртывания заранее размести проверенный файл указанной ревизии и задай `STT_DOWNLOAD_MODEL=false`.
@@ -85,7 +85,7 @@ Durable Telegram inbox → `PrepareAudio` → оригинал в S3 → `Transc
 ```sh
 go test -race ./...
 go vet ./...
-PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/path/to/chromium' ./docs/node_modules/.bin/playwright test -c internal/inspector/playwright.config.mjs
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/path/to/chromium' ./docs/node_modules/.bin/playwright test -c apps/backend/internal/inspector/playwright.config.mjs
 ```
 
 SQL-контракты требуют отдельную временную PostgreSQL через `OPENALBERT_TEST_DATABASE_URL`, никогда рабочую базу. Тесты декодирования используют синтетический OGG и подставной native endpoint. Без FFmpeg на хосте их можно выполнить внутри собранного STT-образа с тестовым Go-бинарником для архитектуры образа. Ни веса, ни Telegram для этого не нужны.

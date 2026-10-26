@@ -15,4 +15,6 @@ work
 coverage*
 *.test
 
-/internal/inspector/test-results/
+/apps/backend/internal/inspector/test-results/
+
+apps/macos

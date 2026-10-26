@@ -68,7 +68,7 @@ composition и при удержании клавиши. Диалоги блок
 ```sh
 swift test --package-path apps/macos --filter AlbertCoreTests
 python3 -m unittest discover -s apps/macos -p 'test_*.py' -v
-python3 deploy/desktop/check-contract.py
+python3 tools/checks/check-contract.py
 python3 apps/macos/desktop_vm.py test
 python3 apps/macos/desktop_vm.py smoke
 python3 apps/macos/desktop_vm.py screenshots
