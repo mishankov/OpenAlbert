@@ -20,6 +20,7 @@ type Memory struct {
 	conversations  map[string]domain.Conversation
 	incoming       map[string]domain.Incoming
 	incomingOrder  []string
+	publicOrder    []publicKey
 	handled        map[string]bool
 	sessions       map[string]domain.Session
 	sessionOrder   []string
@@ -70,13 +71,16 @@ func (m *Memory) AcceptIncoming(ctx context.Context, in domain.Incoming, offset 
 	if offset > m.offset {
 		m.offset = offset
 	}
-	m.conversations[in.Conversation.ID] = in.Conversation
+	canonical := in.Conversation
+	canonical.DeliveryChannel = ""
+	m.conversations[in.Conversation.ID] = canonical
 	if _, ok := m.incoming[in.ID]; ok {
 		return false, nil
 	}
 	in.CreatedAt = nowIfZero(in.CreatedAt)
 	m.incoming[in.ID] = cloneIncoming(in)
 	m.incomingOrder = append(m.incomingOrder, in.ID)
+	m.publicOrder = append(m.publicOrder, publicKey{ID: in.ID, Incoming: true})
 	return true, nil
 }
 func (m *Memory) PollOffset(ctx context.Context) (int64, error) {
@@ -347,10 +351,12 @@ func (m *Memory) EnqueueOutgoing(ctx context.Context, o domain.Outgoing) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.outgoing[o.ID]; !ok {
+		o.EnqueuedAt = nowIfZero(o.EnqueuedAt)
 		o.State = "pending"
 		o.Attempts = 0
 		m.outgoing[o.ID] = clone(o)
 		m.outgoingOrder = append(m.outgoingOrder, o.ID)
+		m.publicOrder = append(m.publicOrder, publicKey{ID: o.ID})
 		if o.RecordInHistory {
 			session, message := outgoingHistory(o)
 			m.sessions[session.ID] = session

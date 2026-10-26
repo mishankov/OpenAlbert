@@ -80,7 +80,11 @@ func (r *Runtime) refreshTyping(ctx context.Context, now time.Time, next map[str
 	}
 	active := map[string]domain.Conversation{}
 	for _, in := range incoming {
-		active[in.Conversation.ID] = in.Conversation
+		if in.Source == "desktop" {
+			delete(active, in.Conversation.ID)
+		} else {
+			active[in.Conversation.ID] = in.Conversation
+		}
 	}
 	for id := range next {
 		if _, ok := active[id]; !ok {
@@ -299,7 +303,10 @@ func (r *Runtime) DeliverOnce(ctx context.Context) error {
 			event.End(err)
 			return err
 		}
-		if out.ArtifactID != "" {
+		if out.Conversation.DeliveryChannel == "desktop" {
+			// Durable queuing is delivery for the polling client; no Telegram call.
+			err = nil
+		} else if out.ArtifactID != "" {
 			artifact, ok, e := r.Repo.Artifact(ctx, out.Conversation.ID, out.ArtifactID)
 			if e != nil {
 				err = e

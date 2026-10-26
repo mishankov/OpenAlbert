@@ -43,7 +43,7 @@ func (s *Store) StartProgress(ctx context.Context, p domain.Progress) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO openalbert_progress(id,data) VALUES($1,$2) ON CONFLICT DO NOTHING`, p.TurnID, raw)
+	_, err = s.pool.Exec(ctx, `INSERT INTO openalbert_progress(id,data) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET data=jsonb_set(openalbert_progress.data,'{conversation}',excluded.data->'conversation')`, p.TurnID, raw)
 	return err
 }
 
@@ -61,9 +61,14 @@ func (s *Store) EndProgress(ctx context.Context, id, status string) error {
 }
 
 func (s *Store) DueProgress(ctx context.Context, now time.Time, n int) ([]domain.Progress, error) {
-	return selectJSON[domain.Progress](ctx, s.pool, `WITH candidates AS (SELECT p.data||jsonb_build_object('outcome',`+progressOutcomeSQL+`) AS data FROM openalbert_progress p WHERE p.data->'delivery'->>'state'='ready')
- SELECT data FROM candidates WHERE data->>'outcome'<>'waiting' AND (data->'delivery'->>'retry_at')::timestamptz<=$1
- AND (data->>'outcome'<>'active' OR ((data->>'started_at')::timestamptz<=$2 AND (data->'delivery'->>'updated_at')::timestamptz<=$3))
+	return selectJSON[domain.Progress](ctx, s.pool, `WITH candidates AS (
+ SELECT p.data||jsonb_build_object('outcome',`+progressOutcomeSQL+`) AS data
+ FROM openalbert_progress p WHERE p.data->'delivery'->>'state'='ready'
+ OR (p.data->'delivery'->>'state'='suspended' AND COALESCE(p.data->'conversation'->>'delivery_channel','')<>'desktop'))
+ SELECT data FROM candidates WHERE (data->'delivery'->>'retry_at')::timestamptz<=$1
+ AND (data->'conversation'->>'delivery_channel'='desktop' OR data->'delivery'->>'removing'='true'
+ OR (data->>'outcome'<>'waiting' AND (data->>'outcome'<>'active'
+ OR ((data->>'started_at')::timestamptz<=$2 AND (data->'delivery'->>'updated_at')::timestamptz<=$3))))
  ORDER BY data->>'started_at',data->>'turn_id' LIMIT $4`, now, now.Add(-domain.ProgressDelay), now.Add(-domain.ProgressInterval), limitValue(n))
 }
 
@@ -92,6 +97,10 @@ func (m *Memory) StartProgress(ctx context.Context, p domain.Progress) error {
 	defer m.mu.Unlock()
 	if _, ok := m.progress[p.TurnID]; !ok {
 		m.progress[p.TurnID] = newProgress(p)
+	} else {
+		current := m.progress[p.TurnID]
+		current.Conversation = p.Conversation
+		m.progress[p.TurnID] = current
 	}
 	return nil
 }

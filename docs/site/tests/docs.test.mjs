@@ -12,7 +12,8 @@ test('сборка сохраняет все документы, ссылки и
   const output = await mkdtemp(join(tmpdir(), 'openalbert-docs-test-'));
   t.after(() => rm(output, { recursive: true, force: true }));
   const pages = await build(output);
-  assert.equal(pages.length, 14);
+  assert.equal(pages.length, 15);
+  assert.ok(pages.find((page) => page.id === 'desktop-api')?.html.includes('DESKTOP_API_TOKEN'));
   assert.ok(pages.find((page) => page.id === 'deployment')?.html.includes('compose.yaml'));
   assert.ok(pages.find((page) => page.id === 'speech')?.html.includes('STT_BASE_URL'));
   const ids = new Set(pages.map((page) => page.id));

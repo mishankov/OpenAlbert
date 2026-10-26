@@ -81,3 +81,19 @@ CREATE TABLE IF NOT EXISTS openalbert_traces (
 CREATE INDEX IF NOT EXISTS openalbert_traces_session ON openalbert_traces(session_id,started_at,id);
 CREATE INDEX IF NOT EXISTS openalbert_turns_session ON openalbert_checkpoints((data->'Input'->>'SessionID')) WHERE id LIKE 'turn-done/%';
 CREATE INDEX IF NOT EXISTS openalbert_audio_session ON openalbert_checkpoints((data->>'session_id')) WHERE id LIKE 'audio/%';
+
+-- A common sequence for transport-visible history, independent of model turns.
+CREATE TABLE IF NOT EXISTS openalbert_public_timeline (
+ seq bigserial UNIQUE,
+ kind text NOT NULL CHECK(kind IN ('incoming','outgoing')),
+ source_id text NOT NULL,
+ conversation_id text NOT NULL,
+ PRIMARY KEY(kind,source_id)
+);
+CREATE INDEX IF NOT EXISTS openalbert_public_scope ON openalbert_public_timeline(conversation_id,seq);
+INSERT INTO openalbert_public_timeline(kind,source_id,conversation_id)
+ SELECT kind,id,scope FROM (
+  SELECT 'incoming' AS kind,id,data->'conversation'->>'id' AS scope,COALESCE(NULLIF(data->>'created_at',''),'1970-01-01T00:00:00Z') AS at FROM openalbert_incoming
+  UNION ALL
+  SELECT 'outgoing',id,data->'conversation'->>'id',COALESCE(NULLIF(data->>'enqueued_at',''),'1970-01-01T00:00:00Z') FROM openalbert_outgoing
+ ) legacy ORDER BY at,kind,id ON CONFLICT DO NOTHING;

@@ -18,6 +18,7 @@ export const navigation = [
   ['background', 'background.md', 'Фоновая работа', 'pulse'],
   ['observability', 'observability.md', 'Логирование', 'pulse'],
   ['inspector', 'inspector.md', 'Инспектор сессий', 'layers'],
+  ['desktop-api', 'desktop-api.md', 'Desktop API', 'layers'],
   ['development', 'development.md', 'Запуск MVP', 'tool'],
   ['deployment', 'deployment.md', 'Публикация и установка', 'tool'],
 ];
