@@ -22,6 +22,21 @@ func TestLaunchSettings(t *testing.T) {
 	}
 }
 
+func TestComputerConnectionSettings(t *testing.T) {
+	for _, address := range []string{"", "computer:22", "[::1]:2222", "secret-invalid", "user@host:22", "host:0", "host:65536"} {
+		env := validEnv()
+		env["COMPUTER_SSH_ADDRESS"] = address
+		c, err := load(func(k string) string { return env[k] })
+		valid := address == "" || address == "computer:22" || address == "[::1]:2222"
+		if (err == nil) != valid || (err != nil && strings.Contains(err.Error(), "secret-invalid")) {
+			t.Fatalf("computer address: %v", err)
+		}
+		if valid && (c.ComputerSSHUser != "albert" || c.ComputerSSHKnownHostsFile == "") {
+			t.Fatal("missing SSH defaults")
+		}
+	}
+}
+
 func TestSTTConfigurationIsIndependent(t *testing.T) {
 	for _, invalid := range []string{"", "STT_MODEL", "STT_REVISION", "STT_BASE_URL"} {
 		env := validEnv()

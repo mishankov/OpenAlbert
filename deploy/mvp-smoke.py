@@ -13,6 +13,7 @@ import http.server
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -45,10 +46,11 @@ def wait_until(description, condition, timeout=60):
 
 
 class FakeState:
-    def __init__(self, marker, without_search=False, with_browser=False):
+    def __init__(self, marker, without_search=False, with_browser=False, with_computer=False):
         self.marker = marker
         self.without_search = without_search
         self.with_browser = with_browser
+        self.with_computer = with_computer
         self.update_id = int(time.time() * 1000)
         self.document = ("Local document for " + marker).encode()
         self.sent = []
@@ -104,8 +106,27 @@ class FakeState:
             if "call_browser_shot" not in tools:
                 return {"role": "assistant", "tool_calls": [self.call("browser_screenshot", {"page_id": opened["page_id"]}, "browser_shot")]}
             assert tools["call_browser_shot"].get("artifact_id"), "browser screenshot was not saved"
+        computer_setup = self.with_computer and not user_text.startswith("Background task step")
+        if computer_setup:
+            names = {tool["function"]["name"] for tool in body.get("tools", [])}
+            assert "computer_exec" in names, "owner computer tool missing"
+            if "call_computer_upload" not in tools:
+                artifact_id = re.search(r"artifact_id=([a-f0-9]+)", user_text).group(1)
+                return {"role": "assistant", "tool_calls": [self.call("computer_upload", {
+                    "artifact_id": artifact_id, "path": "/workspace/input.txt"}, "computer_upload")]}
+            assert "error" not in tools["call_computer_upload"], "artifact upload failed"
+            if "call_computer_exec" not in tools:
+                command = "python3 -c 'from pathlib import Path; Path(\"output.txt\").write_bytes(Path(\"input.txt\").read_bytes().upper())'; sudo -n id -u"
+                return {"role": "assistant", "tool_calls": [self.call("computer_exec", {
+                    "command": command, "wait_seconds": 5}, "computer_exec")]}
+            execution = tools["call_computer_exec"]
+            assert execution.get("state") == "completed" and execution.get("stdout") == "0\n", "remote sudo execution failed"
+            if "call_computer_download" not in tools:
+                return {"role": "assistant", "tool_calls": [self.call("computer_download", {
+                    "path": "/workspace/output.txt"}, "computer_download")]}
+            assert tools["call_computer_download"].get("artifact_id"), "computer result was not saved"
         # A final empty assistant response ends the tool loop after persisted results.
-        if any(message["role"] == "tool" for message in messages[last_user + 1:]) and (not browser_setup or "call_memory" in tools):
+        if any(message["role"] == "tool" for message in messages[last_user + 1:]) and (not (browser_setup or computer_setup) or "call_memory" in tools):
             return {"role": "assistant", "content": ""}
         if user_text.startswith("Background task step"):
             task = json.loads(user_text.split("Task: ", 1)[1])

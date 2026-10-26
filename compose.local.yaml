@@ -16,6 +16,46 @@ x-logging: &logging
     max-buffer-size: "4m"
 
 services:
+  computer-init:
+    labels:
+      compose_service: computer-init
+    build:
+      context: .
+      dockerfile: deploy/computer/Dockerfile
+    command: [initialize]
+    restart: on-failure
+    network_mode: none
+    volumes:
+      - ./container_data/computer/client:/client
+      - ./container_data/computer/server:/server
+    logging: *logging
+
+  computer:
+    labels:
+      compose_service: computer
+    build:
+      context: .
+      dockerfile: deploy/computer/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      computer-init:
+        condition: service_completed_successfully
+    cpus: "${COMPUTER_CPUS:-2}"
+    mem_limit: "${COMPUTER_MEMORY_LIMIT:-2g}"
+    pids_limit: 256
+    networks: [computer]
+    volumes:
+      - ./container_data/computer/server:/etc/openalbert-ssh:ro
+      - ./container_data/computer/home:/home/albert
+      - ./container_data/computer/workspace:/workspace
+    healthcheck:
+      test: [CMD-SHELL, "/usr/sbin/sshd -t && kill -0 $(cat /run/sshd.pid)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+    stop_grace_period: 10s
+
   stt:
     profiles: [local-stt]
     labels:
@@ -198,10 +238,13 @@ services:
     labels:
       compose_service: openalbert
     build: .
+    networks: [default, computer]
     shm_size: 512mb
     restart: unless-stopped
     init: true
     depends_on:
+      computer:
+        condition: service_healthy
       stt:
         condition: service_started
         required: false
@@ -232,6 +275,10 @@ services:
       YANDEX_API_KEY: "${YANDEX_API_KEY:-}"
       YANDEX_FOLDER_ID: "${YANDEX_FOLDER_ID:-}"
       KNOWLEDGE_DIR: /data/knowledge
+      COMPUTER_SSH_ADDRESS: "${COMPUTER_SSH_ADDRESS-computer:22}"
+      COMPUTER_SSH_USER: "${COMPUTER_SSH_USER:-albert}"
+      COMPUTER_SSH_KEY_FILE: "${COMPUTER_SSH_KEY_FILE:-/data/computer/id_ed25519}"
+      COMPUTER_SSH_KNOWN_HOSTS_FILE: "${COMPUTER_SSH_KNOWN_HOSTS_FILE:-/data/computer/known_hosts}"
       BROWSER_ENABLED: "${BROWSER_ENABLED:-true}"
       BROWSER_NO_SANDBOX: "${BROWSER_NO_SANDBOX:-true}"
       BROWSER_EXECUTABLE: "${BROWSER_EXECUTABLE:-}"
@@ -251,6 +298,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - ./container_data/knowledge:/data/knowledge
+      - ./container_data/computer/client:/data/computer:ro
     logging: *logging
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
@@ -259,3 +307,7 @@ services:
       retries: 6
       start_period: 30s
     stop_grace_period: 45s
+
+networks:
+  default: {}
+  computer: {}

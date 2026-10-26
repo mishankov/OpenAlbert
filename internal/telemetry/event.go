@@ -100,6 +100,8 @@ func (e *Event) End(err error) {
 				switch name, _ := e.fields["tool"].(string); {
 				case strings.HasPrefix(name, "browser_"):
 					source = "browser"
+				case strings.HasPrefix(name, "computer_"):
+					source = "computer"
 				case name == "web_read", name == "web_search":
 					source = "web"
 				case name == "send_message", name == "send_group_message", name == "report_progress":

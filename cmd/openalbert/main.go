@@ -15,6 +15,7 @@ import (
 	"openalbert/internal/agent"
 	"openalbert/internal/blob"
 	"openalbert/internal/browser"
+	"openalbert/internal/computer"
 	"openalbert/internal/config"
 	"openalbert/internal/domain"
 	"openalbert/internal/inspector"
@@ -118,6 +119,12 @@ func run() error {
 	}
 	activities := &agent.Activities{OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: model, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, ModelName: c.LLMModel, InspectorPublicURL: c.InspectorPublicURL}
 	activities.Logs = logs
+	if c.ComputerSSHAddress != "" {
+		activities.Computer, err = computer.New(computer.Config{Address: c.ComputerSSHAddress, User: c.ComputerSSHUser, KeyFile: c.ComputerSSHKeyFile, KnownHostsFile: c.ComputerSSHKnownHostsFile})
+		if err != nil {
+			return err
+		}
+	}
 	activities.STT = speech
 	activities.STTModel = c.STTModel
 	activities.TaskChanged = func(ctx context.Context, scope, id string) error {
@@ -158,6 +165,7 @@ func run() error {
 	event.Set("web_search_enabled", c.YandexAPIKey != "")
 	event.Set("log_search_enabled", logs != nil)
 	event.Set("browser_enabled", c.BrowserEnabled)
+	event.Set("computer_enabled", activities.Computer != nil)
 	event.Set("browser_limit", 5)
 	event.Set("namespace", c.TemporalNamespace)
 	event.Set("task_queue", c.TemporalTaskQueue)

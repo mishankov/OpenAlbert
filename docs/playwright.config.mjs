@@ -21,6 +21,7 @@ export default defineConfig({
     cwd: fileURLToPath(new URL('.', import.meta.url)),
     url: baseURL,
     env: { PORT: String(port) },
-    reuseExistingServer: !process.env.CI,
+    // A server in another worktree may serve stale docs and hide regressions.
+    reuseExistingServer: false,
   },
 });

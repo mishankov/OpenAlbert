@@ -1,0 +1,17 @@
+Port 22
+HostKey /etc/openalbert-ssh/ssh_host_ed25519_key
+AuthorizedKeysFile /etc/openalbert-ssh/authorized_keys
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AllowUsers albert
+AllowAgentForwarding no
+AllowTcpForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitUserEnvironment no
+UsePAM yes
+PrintMotd no
+Subsystem sftp internal-sftp

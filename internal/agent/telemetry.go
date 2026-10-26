@@ -62,6 +62,21 @@ func toolResultMetadata(ev *telemetry.Event, result any) {
 		if target := v["conversation_id"]; target != "" {
 			ev.Set("target_conversation_id", target)
 		}
+		if executionIDPattern.MatchString(v["execution_id"]) {
+			ev.Set("execution_id", v["execution_id"])
+		}
+	case domain.ComputerResult:
+		if executionIDPattern.MatchString(v.ExecutionID) {
+			ev.Set("execution_id", v.ExecutionID)
+		}
+		switch v.State {
+		case "queued", "running", "completed", "failed", "cancelled", "timed_out", "unknown":
+			ev.Set("computer_state", v.State)
+		}
+		if v.ExitCode != nil {
+			ev.Set("exit_code", *v.ExitCode)
+		}
+		ev.Set("output_truncated", v.OutputTruncated)
 	case domain.BrowserResult:
 		if v.PageID != "" {
 			ev.Set("page_id", v.PageID)
