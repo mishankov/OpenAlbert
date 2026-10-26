@@ -108,9 +108,9 @@ test('панель T3: при промежуточной ширине текст
     expect(dimensions.content).toBeGreaterThan(Math.min(width - 80, 820));
     expect(dimensions.overflow).toBe(false);
     await page.getByRole('button', { name: 'Оглавление текущей страницы' }).click();
-    await page.locator('#toc-dialog').getByRole('link', { name: 'Граница Computer box — после MVP', exact: true }).click();
+    await page.locator('#toc-dialog').getByRole('link', { name: 'Граница Computer box', exact: true }).click();
     await expect(page.locator('#toc-dialog')).not.toBeVisible();
-    await expect(page.locator('#граница-computer-box-после-mvp')).toBeFocused();
+    await expect(page.locator('#граница-computer-box')).toBeFocused();
   }
 });
 
