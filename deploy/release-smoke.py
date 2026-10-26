@@ -50,7 +50,9 @@ def main():
         if not separator or name not in images or not value:
             parser.error("--image must identify one of " + ", ".join(COMPONENTS))
         images[name] = value
-    env = {key: value for key, value in os.environ.items() if key in {"PATH", "HOME", "DOCKER_CONFIG"}}
+    env = {key: value for key, value in os.environ.items() if key in {
+        "PATH", "HOME", "DOCKER_CONFIG", "DOCKER_HOST", "DOCKER_CONTEXT",
+        "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_DEFAULT_PLATFORM"}}
     for image in images.values():
         subprocess.run(["docker", "image", "inspect", image], env=env, check=True, stdout=subprocess.DEVNULL)
 
@@ -91,6 +93,8 @@ def main():
             gateway_port = free_port()
             for name, service in model["services"].items():
                 assert "build" not in service, "Published deployment unexpectedly builds source"
+                if env.get("DOCKER_DEFAULT_PLATFORM"):
+                    service["platform"] = env["DOCKER_DEFAULT_PLATFORM"]
                 component = "computer" if name == "computer-init" else name
                 if component in images:
                     service["image"] = images[component]

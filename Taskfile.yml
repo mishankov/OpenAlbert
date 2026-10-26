@@ -1,0 +1,49 @@
+version: '3'
+
+# No dotenv: verification never loads application credentials.
+tasks:
+  default:
+    desc: List local commands
+    cmds: [task --list]
+  check:
+    desc: Check formatting, Go analysis, tooling and Compose configuration
+    cmds: [python3 tools/local.py check]
+  test:
+    desc: Run Go integration, browser and macOS VM tests
+    cmds: [python3 tools/local.py test]
+  test:go:
+    desc: Run race tests with disposable PostgreSQL, VictoriaLogs, Chromium and FFmpeg
+    cmds: [python3 tools/local.py test:go]
+  test:web:
+    desc: Build docs and test docs/inspector keyboard flows with Playwright reports
+    cmds: [python3 tools/local.py test:web]
+  test:macos:
+    desc: Test tooling, Go/Swift contract, native keyboard flows and release bundle in Tart
+    cmds: [python3 tools/local.py test:macos]
+  images:
+    desc: Build and smoke-test all six images for the Docker engine architecture
+    cmds: [python3 tools/local.py images]
+  verify:
+    desc: Run all checks, tests, image builds and a fresh deployment/restart test
+    cmds: [python3 tools/local.py verify]
+  publish:
+    desc: Verify a clean master checkout and publish tested AMD64/ARM64 images
+    cmds: [python3 tools/local.py publish]
+  release:macos:
+    desc: Verify and prepare a signed macOS release locally (no upload)
+    cmds: [python3 tools/local.py release:macos]
+  release:macos:draft:
+    desc: Verify, sign and upload a new macOS draft release from a clean checkout
+    cmds: [python3 tools/local.py release:macos:draft]
+  vm:setup:
+    desc: Set up the managed macOS development VM once
+    cmds: [python3 apps/macos/desktop_vm.py setup]
+  vm:doctor:
+    desc: Check the managed VM and host toolchain
+    cmds: [python3 apps/macos/desktop_vm.py doctor]
+  screenshots:
+    desc: Capture native screenshots inside Tart
+    cmds: [python3 tools/local.py screenshots]
+  reports:
+    desc: Show the most recent local run summary
+    cmds: [python3 tools/local.py reports]

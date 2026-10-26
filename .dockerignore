@@ -9,6 +9,9 @@ data
 knowledge
 container_data
 bin
+reports
+.task
+work
 coverage*
 *.test
 

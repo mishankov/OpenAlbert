@@ -36,7 +36,10 @@ case "$component" in
     docker run --rm --entrypoint mc "$image" --version
     # Exercise the initializer twice and OpenAlbert's real S3 contract against the
     # same server source used by the published image, on each architecture.
-    docker build -f deploy/minio.Dockerfile --target minio -t openalbert-ci:minio-smoke .
+    minio_image=${MINIO_SMOKE_IMAGE:-openalbert-local:minio-smoke}
+    if [[ -z ${MINIO_SMOKE_IMAGE:-} ]]; then
+      docker build -f deploy/minio.Dockerfile --target minio -t "$minio_image" .
+    fi
     network="openalbert-ci-$(date +%s)-$$"
     container="${network}-minio"
     cleanup() {
@@ -48,7 +51,7 @@ case "$component" in
     docker run -d --name "$container" --network "$network" --network-alias minio \
       -p 127.0.0.1::9000 \
       -e MINIO_ROOT_USER=openalbert-ci -e MINIO_ROOT_PASSWORD=ci-only-password \
-      openalbert-ci:minio-smoke >/dev/null
+      "$minio_image" >/dev/null
     for ((run=0; run<2; run++)); do
       docker run --rm --network "$network" \
         -e S3_ACCESS_KEY=openalbert-ci -e S3_SECRET_KEY=ci-only-password -e S3_BUCKET=openalbert-ci \

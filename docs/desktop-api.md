@@ -168,4 +168,4 @@ HTTPS can be provided by a reverse proxy when needed.
 
 Database startup adds and backfills a public timeline index from the durable
 inbox/outbox. No separate agent, queue or conversation is created. Deployments
-use the repository's existing GitHub Actions / GHCR release process.
+use the local Task / Docker Bake publication process described in local-checks.md and deployment.md.

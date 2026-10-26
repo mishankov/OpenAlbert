@@ -109,6 +109,22 @@ sys.exit(97)
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_prepared_release_smoke_copies_exact_bundle_without_rebuilding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / "signed/Albert.app"
+            executable = app / "Contents/MacOS/Albert"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"exact signed release bytes")
+            staging = root / "staging"
+            config = mock.Mock(root=root, environment={})
+            with mock.patch.object(vm, "host_metadata", return_value=META), \
+                    mock.patch.object(vm, "compile_display"), mock.patch.object(vm, "execute") as execute, \
+                    mock.patch.object(vm, "source_snapshot"):
+                vm.prepare_host(config, staging, "smoke", prepared_app=app)
+            execute.assert_not_called()
+            self.assertEqual((staging / "runtime/Albert.app/Contents/MacOS/Albert").read_bytes(), executable.read_bytes())
+
     def test_runtime_archive_preserves_framework_links_on_guest_disk(self):
         with tempfile.TemporaryDirectory() as directory:
             staging = Path(directory)

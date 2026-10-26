@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Compile on the host; run native Albert UI checks in an owned Tart macOS VM.
 
-There is no host-desktop fallback. CI invokes its own explicit direct-runner
-commands instead. Only prepared binaries, allowlisted source and optional image
+There is no host-desktop fallback. Only prepared binaries, allowlisted source and optional image
 fixtures enter the read-only share; a fresh output directory is writable.
 """
 from __future__ import annotations
@@ -382,7 +381,7 @@ def relocate_test_bundle(bundle, env):
         raise VMError("XCTest bundle still references host build/SDK paths")
 
 
-def prepare_host(config, staging, mode, configuration="debug", assets=None):
+def prepare_host(config, staging, mode, configuration="debug", assets=None, prepared_app=None):
     env = config.environment
     app_root = config.root / "apps/macos"
     runtime = staging / "runtime"
@@ -393,8 +392,15 @@ def prepare_host(config, staging, mode, configuration="debug", assets=None):
         return toolchain
     # Local bundles intentionally have no update credentials or signing identity.
     # safe_environment's allowlist does not include any Albert/Sparkle secret.
-    execute([app_root / "build-app.sh", configuration], env=env, timeout=600, log=staging / "host-build.log")
-    source_app = app_root / "build/Альберт.app"
+    if prepared_app is not None:
+        if mode != "smoke":
+            raise VMError("A prepared application is accepted only for smoke checks")
+        source_app = Path(prepared_app).resolve()
+        if not source_app.is_dir() or source_app.suffix != ".app":
+            raise VMError("--app must point to a prepared .app bundle")
+    else:
+        execute([app_root / "build-app.sh", configuration], env=env, timeout=600, log=staging / "host-build.log")
+        source_app = app_root / "build/Альберт.app"
     import release as packaging
     packaging.assert_relative_links(source_app)
     shutil.copytree(source_app, runtime / "Albert.app", symlinks=True)
@@ -687,6 +693,7 @@ def main():
     parser.add_argument("--lock-timeout", type=float, default=600)
     parser.add_argument("--assets", type=Path, help="screenshots only: directory with lake.jpg and forest.jpg")
     parser.add_argument("--output", type=Path, help="parent directory for a fresh diagnostics subdirectory")
+    parser.add_argument("--app", type=Path, help="smoke only: verify this prepared bundle without rebuilding or signing")
     args = parser.parse_args()
     try:
         if platform.system() != "Darwin" or platform.machine() != "arm64":
@@ -696,13 +703,19 @@ def main():
         finite_timeout(args.lock_timeout)
         if args.assets and args.command != "screenshots":
             raise VMError("--assets is accepted only for explicit screenshots")
+        if args.app and args.command != "smoke":
+            raise VMError("--app is accepted only for explicit smoke checks")
         config = Configuration()
         with cancellation_signals():
             if args.command == "setup":
                 setup(config, args.lock_timeout)
             else:
+                prepare = prepare_host
+                if args.app:
+                    import functools
+                    prepare = functools.partial(prepare_host, prepared_app=args.app)
                 run_prepared(config, args.command, configuration=args.configuration, timeout=timeout,
-                             lock_timeout=args.lock_timeout, assets=args.assets, output_base=args.output)
+                             lock_timeout=args.lock_timeout, assets=args.assets, output_base=args.output, prepare=prepare)
     except (VMError, OSError) as error:
         print(f"Desktop VM failed: {error}", file=sys.stderr)
         return error.status if isinstance(error, VMError) else 1

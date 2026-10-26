@@ -16,3 +16,7 @@ __pycache__/
 
 # Local design previews and screenshots.
 /work/
+
+# Local verification logs, reports and artifacts.
+/reports/
+/.task/

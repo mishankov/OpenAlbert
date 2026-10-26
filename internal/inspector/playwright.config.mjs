@@ -6,6 +6,9 @@ export default defineConfig({
   testDir: "./tests",
   outputDir: "./test-results",
   fullyParallel: false,
+  // Native media keyboard controls on macOS need one active browser at a time.
+  // Keep the local keyboard harness isolated instead of competing for focus.
+  workers: 1,
   use: {
     baseURL,
     viewport: { width: 1440, height: 1000 },
@@ -19,6 +22,6 @@ export default defineConfig({
     command: "node tests/server.mjs",
     cwd: fileURLToPath(new URL(".", import.meta.url)),
     url: `${baseURL}/inspect/`,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
   },
 });
