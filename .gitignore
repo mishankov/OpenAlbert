@@ -13,3 +13,6 @@
 __pycache__/
 
 /internal/inspector/test-results/
+
+# Local design previews and screenshots.
+/work/

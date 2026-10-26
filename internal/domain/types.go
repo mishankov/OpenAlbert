@@ -189,6 +189,7 @@ type Repository interface {
 	Close()
 	PublicTimeline(context.Context, string, int64, int) ([]PublicRecord, error)
 	ListArtifacts(context.Context, string) ([]Artifact, error)
+	ConversationActivity(context.Context, string) (ConversationActivity, error)
 	Ping(context.Context) error
 	LoadCheckpoint(context.Context, string) (json.RawMessage, bool, error)
 	SaveCheckpoint(context.Context, string, json.RawMessage) error

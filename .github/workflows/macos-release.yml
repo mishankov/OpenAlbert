@@ -1,0 +1,108 @@
+name: macOS draft release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Must match macos-v<version.json version>
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify and prepare signed macOS draft
+    runs-on: macos-latest
+    timeout-minutes: 30
+    environment: macos-release
+    permissions:
+      contents: write
+    env:
+      ALBERT_BUILD_ARCH: arm64
+      ALBERT_UPDATE_FEED_URL: https://github.com/${{ github.repository }}/releases/latest/download/appcast.xml
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+      ALBERT_SIGNING_CERT_SHA1: ${{ vars.ALBERT_SIGNING_CERT_SHA1 }}
+      RELEASE_REPOSITORY: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Validate release configuration and reserve a new version/build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 apps/macos/release.py check-config
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'This release tag already exists. Release archives are immutable.' >&2
+            exit 1
+          fi
+          history_dir="$RUNNER_TEMP/albert-release-history"
+          mkdir -p "$history_dir"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/tags?per_page=100" \
+            --jq '.[].name' > "$history_dir/tags.txt"
+          python3 - "$history_dir/tags.txt" <<'PY'
+          import os, pathlib, sys
+          if os.environ['RELEASE_TAG'] in pathlib.Path(sys.argv[1]).read_text().splitlines():
+              raise SystemExit('This Git tag already exists. Refusing to reuse or retarget it.')
+          PY
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.tag_name | startswith("macos-v")) | {tag: .tag_name, assets: [.assets[] | select(.name == "appcast.xml") | .id]}' > "$history_dir/releases.jsonl"
+          python3 - "$history_dir" <<'PY'
+          import json, pathlib, sys
+          directory = pathlib.Path(sys.argv[1])
+          releases = [json.loads(line) for line in (directory / 'releases.jsonl').read_text().splitlines()]
+          if any(len(release['assets']) != 1 for release in releases):
+              raise SystemExit('A previous macOS release has missing or ambiguous appcast metadata; build reuse cannot be ruled out.')
+          (directory / 'asset-ids.txt').write_text(''.join(str(release['assets'][0]) + '\n' for release in releases))
+          PY
+          while IFS= read -r asset_id; do
+            test -n "$asset_id" || continue
+            gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$history_dir/$asset_id.xml"
+          done < "$history_dir/asset-ids.txt"
+          python3 - "$history_dir" <<'PY'
+          import pathlib, subprocess, sys
+          feeds = sorted(pathlib.Path(sys.argv[1]).glob('*.xml'))
+          subprocess.run([sys.executable, 'apps/macos/release.py', 'check-history', *map(str, feeds)], check=True)
+          PY
+      - name: Test native client and keyboard commands
+        run: swift test --package-path apps/macos
+      - name: Test release metadata, signatures and tamper rejection
+        run: python3 -m unittest discover -s apps/macos -p 'test_release.py' -v
+      - name: Verify Swift client against actual Go API handlers
+        run: python3 deploy/desktop/check-contract.py
+      - name: Build stable signed application and authenticate update archive
+        env:
+          ALBERT_SIGNING_P12: ${{ secrets.ALBERT_SIGNING_P12 }}
+          ALBERT_SIGNING_PASSWORD: ${{ secrets.ALBERT_SIGNING_PASSWORD }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: python3 apps/macos/release-signing.py
+      - name: Check packaged native window and keyboard flow
+        run: apps/macos/build/Альберт.app/Contents/MacOS/Albert --smoke-test
+      - name: Keep reviewable release artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: albert-macos-release
+          path: apps/macos/build/release/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Create draft for manual review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Creating the ref fails if another actor reserved the tag after validation.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$GITHUB_SHA" >/dev/null
+          gh release create "$RELEASE_TAG" apps/macos/build/release/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --draft --title "Альберт $RELEASE_TAG" --generate-notes

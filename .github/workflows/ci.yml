@@ -76,6 +76,28 @@ jobs:
       - run: go vet ./...
       - run: go test -race -count=1 -timeout 10m ./...
 
+  macos:
+    name: Native macOS app and Go API contract
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test client, drafts and native keyboard commands on the CI desktop
+        run: swift test --package-path apps/macos
+      - name: Test VM lifecycle, update signatures and release metadata
+        run: python3 -m unittest discover -s apps/macos -p 'test_*.py' -v
+      - name: Check the Swift client against real Go handlers
+        run: python3 deploy/desktop/check-contract.py
+      - name: Package the native app
+        run: apps/macos/build-app.sh
+      - name: Check native window, menu and editor
+        run: apps/macos/build/Альберт.app/Contents/MacOS/Albert --smoke-test
+
   web:
     name: Documentation and inspector browser tests
     runs-on: ubuntu-24.04

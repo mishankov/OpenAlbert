@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { access, readFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { build, compilePage } from '../build.mjs';
+import { build, compilePage, navigation } from '../build.mjs';
 import { keyboardAction } from '../public/keyboard.js';
 
 const event = (values = {}) => ({ code: 'KeyK', key: 'k', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, repeat: false, isComposing: false, ...values });
@@ -12,8 +12,9 @@ test('сборка сохраняет все документы, ссылки и
   const output = await mkdtemp(join(tmpdir(), 'openalbert-docs-test-'));
   t.after(() => rm(output, { recursive: true, force: true }));
   const pages = await build(output);
-  assert.equal(pages.length, 15);
-  assert.ok(pages.find((page) => page.id === 'desktop-api')?.html.includes('DESKTOP_API_TOKEN'));
+  assert.equal(pages.length, navigation.length);
+  assert.ok(pages.find((page) => page.id === 'desktop-api')?.html.includes('/api/v1/messages'));
+  assert.ok(pages.find((page) => page.id === 'desktop')?.html.includes('DESKTOP_API_TOKEN'));
   assert.ok(pages.find((page) => page.id === 'deployment')?.html.includes('compose.yaml'));
   assert.ok(pages.find((page) => page.id === 'speech')?.html.includes('STT_BASE_URL'));
   const ids = new Set(pages.map((page) => page.id));

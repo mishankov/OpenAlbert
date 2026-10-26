@@ -1,0 +1,12 @@
+# Install on the VPS after setting DNS and bringing up albert0.
+albert.example.com {
+	# Keep the API prefix: the backend routes include /api/v1/.
+	handle /api/v1/* {
+		reverse_proxy 10.77.0.2:8080
+	}
+
+	# Inspector, health and infrastructure are not public routes.
+	handle {
+		respond "Not found" 404
+	}
+}
