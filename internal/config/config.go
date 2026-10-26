@@ -13,6 +13,7 @@ import (
 )
 
 type Config struct {
+	DesktopAPIToken                                         string
 	TelegramOwnerUserID                                     int64
 	DatabaseURL                                             string
 	TemporalAddress, TemporalNamespace, TemporalTaskQueue   string
@@ -45,7 +46,8 @@ func load(get func(string) string) (Config, error) {
 		return fallback
 	}
 	c := Config{
-		STTBaseURL: value("STT_BASE_URL", ""), STTAPIKey: value("STT_API_KEY", ""), STTModel: value("STT_MODEL", ""), STTRevision: value("STT_REVISION", ""),
+		DesktopAPIToken: value("DESKTOP_API_TOKEN", ""),
+		STTBaseURL:      value("STT_BASE_URL", ""), STTAPIKey: value("STT_API_KEY", ""), STTModel: value("STT_MODEL", ""), STTRevision: value("STT_REVISION", ""),
 		DatabaseURL: value("DATABASE_URL", ""), TemporalAddress: value("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: value("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: value("TEMPORAL_TASK_QUEUE", "openalbert"),
 		TelegramBotToken: value("TELEGRAM_BOT_TOKEN", ""), TelegramBaseURL: value("TELEGRAM_BASE_URL", ""), LLMBaseURL: value("LLM_BASE_URL", "https://api.openai.com/v1"), LLMAPIKey: value("LLM_API_KEY", ""), LLMModel: value("LLM_MODEL", ""),
 		YandexAPIKey: value("YANDEX_API_KEY", ""), YandexEndpoint: value("YANDEX_SEARCH_URL", ""), YandexFolderID: value("YANDEX_FOLDER_ID", ""), KnowledgeDir: value("KNOWLEDGE_DIR", "./container_data/knowledge"), SoulFile: value("SOUL_FILE", ""), HTTPAddr: value("HTTP_ADDR", ":8080"),
@@ -58,6 +60,9 @@ func load(get func(string) string) (Config, error) {
 		ComputerSSHKnownHostsFile: value("COMPUTER_SSH_KNOWN_HOSTS_FILE", "/data/computer/known_hosts"),
 	}
 	var problems []error
+	if c.DesktopAPIToken != "" && len(c.DesktopAPIToken) < 32 {
+		problems = append(problems, errors.New("DESKTOP_API_TOKEN must contain at least 32 bytes"))
+	}
 	if c.ComputerSSHAddress != "" {
 		host, port, e := net.SplitHostPort(c.ComputerSSHAddress)
 		p, pe := strconv.Atoi(port)

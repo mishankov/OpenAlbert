@@ -49,6 +49,16 @@ func (e *attachmentDownloadError) Error() string { return "Attachment download f
 func (e *attachmentDownloadError) Unwrap() error { return e.cause }
 
 func (a *Activities) attachmentArtifact(ctx context.Context, in RunInput, id string, index int, at domain.Attachment) (domain.Artifact, error) {
+	if at.ArtifactID != "" {
+		art, found, err := a.Repo.Artifact(ctx, in.ConversationID, at.ArtifactID)
+		if err != nil {
+			return art, err
+		}
+		if !found {
+			return art, errors.New("attachment artifact missing")
+		}
+		return art, nil
+	}
 	artifactID := ID(id, fmt.Sprint(index))
 	if prior, ok, err := a.Repo.Artifact(ctx, in.ConversationID, artifactID); err != nil {
 		return prior, err

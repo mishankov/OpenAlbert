@@ -19,8 +19,9 @@ type Progress struct {
 }
 
 type ProgressDelivery struct {
+	Removing  bool      `json:"removing,omitempty"` // Finish an idempotent Telegram cleanup even if the route changes back.
 	Version   int64     `json:"version"`
-	State     string    `json:"state"` // ready, sending, done, disabled
+	State     string    `json:"state"` // ready, sending, suspended (desktop), done, disabled
 	MessageID string    `json:"message_id"`
 	LastText  string    `json:"last_text"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -28,7 +29,19 @@ type ProgressDelivery struct {
 }
 
 func (p Progress) Due(now time.Time) bool {
-	if p.Delivery.State != "ready" || now.Before(p.Delivery.RetryAt) || p.Outcome == "waiting" {
+	activeRoute := p.Conversation.DeliveryChannel != "desktop"
+	if p.Delivery.State != "ready" && !(p.Delivery.State == "suspended" && activeRoute) {
+		return false
+	}
+	if now.Before(p.Delivery.RetryAt) {
+		return false
+	}
+	// Route changes clean up an existing Telegram status immediately, even while
+	// the answer is waiting in the outbox. No new Telegram status is created here.
+	if !activeRoute || p.Delivery.Removing {
+		return true
+	}
+	if p.Outcome == "waiting" {
 		return false
 	}
 	return p.Outcome != "active" || (!now.Before(p.StartedAt.Add(ProgressDelay)) && !now.Before(p.Delivery.UpdatedAt.Add(ProgressInterval)))

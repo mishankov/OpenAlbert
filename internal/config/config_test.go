@@ -131,3 +131,18 @@ func TestOwnerUsesFirstAllowedIDOrExplicitAllowedID(t *testing.T) {
 		}
 	}
 }
+
+func TestDesktopAPITokenIsOptionalAndValidated(t *testing.T) {
+	for _, token := range []string{"", "short-secret", strings.Repeat("a", 32)} {
+		env := validEnv()
+		env["DESKTOP_API_TOKEN"] = token
+		c, err := load(func(k string) string { return env[k] })
+		if token == "short-secret" {
+			if err == nil || strings.Contains(err.Error(), token) {
+				t.Fatal("weak token accepted or leaked")
+			}
+		} else if err != nil || c.DesktopAPIToken != token {
+			t.Fatal("valid token config rejected", err)
+		}
+	}
+}

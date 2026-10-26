@@ -173,7 +173,7 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 				if messagefmt.FitsCaption(caption) {
 					// One durable delivery owns both media and caption, so an
 					// uncertain acknowledgement can never retry just one part.
-					out := domain.Outgoing{ID: key + "/000", Conversation: in.Conversation, Text: caption.Text, Entities: caption.Entities, Formatted: true, ArtifactID: p.ArtifactID, State: "pending", TurnID: in.RunKey, SessionID: in.SessionID, TaskID: in.TaskID, Trigger: in.TriggerName(), StartedAt: in.StartedAt, ReceivedAt: in.ReceivedAt, EnqueuedAt: now, PartCount: 1}
+					out := domain.Outgoing{ID: key + "/000", Conversation: in.Conversation, Text: caption.Text, Markdown: p.Text, Entities: caption.Entities, Formatted: true, ArtifactID: p.ArtifactID, State: "pending", TurnID: in.RunKey, SessionID: in.SessionID, TaskID: in.TaskID, Trigger: in.TriggerName(), StartedAt: in.StartedAt, ReceivedAt: in.ReceivedAt, EnqueuedAt: now, PartCount: 1}
 					if err := a.Repo.EnqueueOutgoing(ctx, out); err != nil {
 						return nil, err
 					}

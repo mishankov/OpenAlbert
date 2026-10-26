@@ -81,6 +81,7 @@ func (s *Store) SaveArtifact(ctx context.Context, art domain.Artifact) error {
 	if art.CreatedAt.IsZero() {
 		art.CreatedAt = time.Now().UTC()
 	}
+	art.SizeBytes = int64(len(art.Data))
 	metadata := art
 	metadata.Data = nil
 	raw, err := json.Marshal(metadata)

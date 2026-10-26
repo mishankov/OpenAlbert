@@ -17,6 +17,7 @@ import (
 	"openalbert/internal/browser"
 	"openalbert/internal/computer"
 	"openalbert/internal/config"
+	"openalbert/internal/desktopapi"
 	"openalbert/internal/domain"
 	"openalbert/internal/inspector"
 	"openalbert/internal/integrations"
@@ -154,6 +155,7 @@ func run() error {
 			defer w.Stop()
 		}
 	}
+	(&desktopapi.API{Repo: artifacts, Memory: knowledgeStore, OwnerID: c.TelegramOwnerUserID, Token: c.DesktopAPIToken}).Register(mux)
 	inspector.Register(mux, repo, artifacts)
 	inspector.RegisterMemory(mux, repo, knowledgeStore)
 	runtime.Start(ctx)

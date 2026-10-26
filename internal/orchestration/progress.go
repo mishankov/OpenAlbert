@@ -17,8 +17,19 @@ func (r *Runtime) ProgressOnce(ctx context.Context, now time.Time) error {
 		return err
 	}
 	for _, row := range rows {
+		if row.Conversation.DeliveryChannel == "desktop" && row.Delivery.MessageID == "" {
+			next := row.Delivery
+			next.State = "suspended"
+			if _, _, err = r.Repo.SetProgressDelivery(ctx, row.TurnID, row.Delivery.Version, next); err != nil {
+				return err
+			}
+			continue
+		}
 		next := row.Delivery
 		next.State = "sending"
+		if row.Conversation.DeliveryChannel == "desktop" {
+			next.Removing = true
+		}
 		p, claimed, err := r.Repo.SetProgressDelivery(ctx, row.TurnID, row.Delivery.Version, next)
 		if err != nil {
 			return err
@@ -50,6 +61,17 @@ func (r *Runtime) deliverProgress(ctx context.Context, p domain.Progress, now ti
 	var err error
 	c, cancel := context.WithTimeout(ctx, 2*time.Second)
 	switch {
+	case next.Removing || p.Conversation.DeliveryChannel == "desktop":
+		// This ID was created on Telegram before the turn was steered to desktop.
+		// Delete idempotently before suspending; a later Telegram input may resume.
+		err = r.Telegram.DeleteProgress(c, p.Conversation, next.MessageID)
+		if err == nil {
+			next.State = "suspended"
+			next.Removing = false
+			next.MessageID = ""
+			next.LastText = ""
+			next.UpdatedAt = time.Time{}
+		}
 	case p.Outcome == "waiting": // Reply queued or Finish raced with the claim.
 	case terminal && next.MessageID == "":
 		next.State = "done" // A fast request never gets a status, including failures.

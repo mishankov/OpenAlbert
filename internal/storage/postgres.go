@@ -138,7 +138,9 @@ func (s *Store) AcceptIncoming(ctx context.Context, in domain.Incoming, offset i
 	if err != nil {
 		return false, err
 	}
-	c, err := encode(in.Conversation)
+	canonical := in.Conversation
+	canonical.DeliveryChannel = ""
+	c, err := encode(canonical)
 	if err != nil {
 		return false, err
 	}
@@ -156,6 +158,11 @@ func (s *Store) AcceptIncoming(ctx context.Context, in domain.Incoming, offset i
 	}
 	if _, err = tx.Exec(ctx, "UPDATE openalbert_poll SET offset_value=GREATEST(offset_value,$1) WHERE id", offset); err != nil {
 		return false, err
+	}
+	if tag.RowsAffected() > 0 {
+		if _, err = tx.Exec(ctx, "INSERT INTO openalbert_public_timeline(kind,source_id,conversation_id) VALUES('incoming',$1,$2) ON CONFLICT DO NOTHING", in.ID, in.Conversation.ID); err != nil {
+			return false, err
+		}
 	}
 	return tag.RowsAffected() > 0, tx.Commit(ctx)
 }
@@ -411,23 +418,27 @@ func (s *Store) EnqueueOutgoing(ctx context.Context, o domain.Outgoing) error {
 	if err := validID(o.Conversation.ID); err != nil {
 		return err
 	}
+	o.EnqueuedAt = nowIfZero(o.EnqueuedAt)
 	o.State = "pending"
 	o.Attempts = 0
 	b, err := encode(o)
 	if err != nil {
 		return err
 	}
-	if o.RecordInHistory {
-		tx, err := s.pool.Begin(ctx)
-		if err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, "INSERT INTO openalbert_outgoing(id,data) VALUES($1,$2) ON CONFLICT DO NOTHING", o.ID, b)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		if _, err = tx.Exec(ctx, "INSERT INTO openalbert_public_timeline(kind,source_id,conversation_id) VALUES('outgoing',$1,$2) ON CONFLICT DO NOTHING", o.ID, o.Conversation.ID); err != nil {
 			return err
 		}
-		defer tx.Rollback(ctx)
-		tag, err := tx.Exec(ctx, "INSERT INTO openalbert_outgoing(id,data) VALUES($1,$2) ON CONFLICT DO NOTHING", o.ID, b)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() > 0 {
+		if o.RecordInHistory {
 			session, message := outgoingHistory(o)
 			se, err := encode(session)
 			if err != nil {
@@ -444,11 +455,10 @@ func (s *Store) EnqueueOutgoing(ctx context.Context, o domain.Outgoing) error {
 				return err
 			}
 		}
-		return tx.Commit(ctx)
 	}
-	_, err = s.pool.Exec(ctx, "INSERT INTO openalbert_outgoing(id,data) VALUES($1,$2) ON CONFLICT DO NOTHING", o.ID, b)
-	return err
+	return tx.Commit(ctx)
 }
+
 func (s *Store) PendingOutgoing(ctx context.Context, n int) ([]domain.Outgoing, error) {
 	rows, err := s.pool.Query(ctx, "SELECT data,state,attempts FROM openalbert_outgoing WHERE state='pending' ORDER BY seq LIMIT $1", limitValue(n))
 	if err != nil {
@@ -513,6 +523,9 @@ func (s *Store) SaveArtifact(ctx context.Context, a domain.Artifact) error {
 		return err
 	}
 	a.CreatedAt = nowIfZero(a.CreatedAt)
+	if a.SizeBytes == 0 {
+		a.SizeBytes = int64(len(a.Data))
+	}
 	b, err := encode(a)
 	if err != nil {
 		return err

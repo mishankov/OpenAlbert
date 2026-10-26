@@ -117,6 +117,10 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 	if !ok {
 		return out, errors.New("conversation missing")
 	}
+	conv, err = a.replyConversation(ctx, conv, in.IncomingIDs)
+	if err != nil {
+		return out, err
+	}
 	out = Turn{Input: in, Conversation: conv}
 	a.startProgress(ctx, in, conv)
 	if err = a.Repo.StartSession(ctx, domain.Session{ID: in.SessionID, ConversationID: conv.ID, Status: "active", CreatedAt: time.Now().UTC()}); err != nil {
@@ -149,6 +153,16 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 			out.ReceivedAt = msg.CreatedAt
 		}
 		text := incomingText(msg)
+		if msg.TaskContextID != "" {
+			task, found, e := a.Repo.Task(ctx, conv.ID, msg.TaskContextID)
+			if e != nil {
+				return out, e
+			}
+			if !found {
+				return out, errors.New("task context missing")
+			}
+			text = fmt.Sprintf("[Task under discussion: id=%s; title=%s; status=%s; goal=%s]\n%s", task.ID, task.Title, task.Status, task.Goal, text)
+		}
 		images := []string{}
 		for i, attachment := range msg.Attachments {
 			art, attachmentErr := a.attachmentArtifact(ctx, in, id, i, attachment)
@@ -734,6 +748,10 @@ func (a *Activities) AcknowledgeStop(ctx context.Context, scope, session string,
 	if !ok {
 		return errors.New("conversation missing")
 	}
+	conv, err = a.replyConversation(ctx, conv, ids)
+	if err != nil {
+		return err
+	}
 	for _, id := range ids {
 		if err = a.Repo.MarkIncomingHandled(ctx, id); err != nil {
 			return err
@@ -751,6 +769,10 @@ func (a *Activities) NotifyFailure(ctx context.Context, scope, key string) error
 	}
 	if !ok {
 		return errors.New("conversation missing")
+	}
+	conv, err = a.failureConversation(ctx, conv, key)
+	if err != nil {
+		return err
 	}
 	return a.Repo.EnqueueOutgoing(ctx, domain.Outgoing{ID: ID("failure", key), Conversation: conv, Text: "Не удалось завершить запрос в пределах текущего запуска. Состояние сохранено; можно уточнить запрос или попробовать снова.", State: "pending", TurnID: key, Trigger: "failure", EnqueuedAt: time.Now().UTC(), PartCount: 1})
 }

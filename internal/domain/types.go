@@ -7,12 +7,13 @@ import (
 )
 
 type Conversation struct {
-	Title    string `json:"title,omitempty"`
-	ID       string `json:"id"`
-	ChatID   int64  `json:"chat_id"`
-	ThreadID int    `json:"thread_id,omitempty"`
-	OwnerID  int64  `json:"owner_id"`
-	Private  bool   `json:"private"`
+	DeliveryChannel string `json:"delivery_channel,omitempty"` // Ephemeral turn route; never persist in canonical conversations.
+	Title           string `json:"title,omitempty"`
+	ID              string `json:"id"`
+	ChatID          int64  `json:"chat_id"`
+	ThreadID        int    `json:"thread_id,omitempty"`
+	OwnerID         int64  `json:"owner_id"`
+	Private         bool   `json:"private"`
 }
 type Attachment struct {
 	SizeBytes       int64  `json:"size_bytes,omitempty"`
@@ -25,6 +26,8 @@ type Attachment struct {
 	ArtifactID      string `json:"artifact_id,omitempty"`
 }
 type Incoming struct {
+	Source         string        `json:"source,omitempty"`
+	TaskContextID  string        `json:"task_context_id,omitempty"`
 	Command        string        `json:"command,omitempty"` // Validated transport command, without slash or bot username.
 	AuthorName     string        `json:"author_name,omitempty"`
 	AuthorUsername string        `json:"author_username,omitempty"`
@@ -113,6 +116,7 @@ type Task struct {
 	Version         int64     `json:"version"`
 }
 type Outgoing struct {
+	Markdown        string       `json:"markdown,omitempty"`
 	RecordInHistory bool         `json:"record_in_history,omitempty"`
 	ID              string       `json:"id"`
 	Conversation    Conversation `json:"conversation"`
@@ -142,6 +146,7 @@ type TextEntity struct {
 	Language string `json:"language,omitempty"`
 }
 type Artifact struct {
+	SizeBytes      int64     `json:"size_bytes,omitempty"`
 	SessionID      string    `json:"session_id,omitempty"`
 	ID             string    `json:"id"`
 	ConversationID string    `json:"conversation_id"`
@@ -182,6 +187,8 @@ type HistoryToolCall struct {
 // Repository stores operational state. All mutation keys supplied by callers must be idempotent.
 type Repository interface {
 	Close()
+	PublicTimeline(context.Context, string, int64, int) ([]PublicRecord, error)
+	ListArtifacts(context.Context, string) ([]Artifact, error)
 	Ping(context.Context) error
 	LoadCheckpoint(context.Context, string) (json.RawMessage, bool, error)
 	SaveCheckpoint(context.Context, string, json.RawMessage) error
@@ -264,4 +271,11 @@ type Knowledge interface {
 	Skills(context.Context) ([]Skill, error)
 	ReadSkill(context.Context, string) (Skill, error)
 	ProposeSkill(context.Context, string, string, string) error
+}
+
+// PublicRecord joins only the durable inbox/outbox, never model history.
+type PublicRecord struct {
+	Seq      int64
+	Incoming *Incoming
+	Outgoing *Outgoing
 }

@@ -85,3 +85,5 @@ npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i diagrams/components.m
 ## Сайт документации
 
 Исходники сайта, инструменты сборки, тесты и готовая статическая версия находятся внутри `docs`. Инструкции по запуску и управлению — в [site/README.md](site/README.md).
+
+- [Desktop API v1](desktop-api.md): авторизация, личная история, сообщения, поручения и вложения.
