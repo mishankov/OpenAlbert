@@ -97,3 +97,7 @@ INSERT INTO openalbert_public_timeline(kind,source_id,conversation_id)
   UNION ALL
   SELECT 'outgoing',id,data->'conversation'->>'id',COALESCE(NULLIF(data->>'enqueued_at',''),'1970-01-01T00:00:00Z') FROM openalbert_outgoing
  ) legacy ORDER BY at,kind,id ON CONFLICT DO NOTHING;
+
+-- Status polling reads only this conversation's pending inbox/public progress.
+CREATE INDEX IF NOT EXISTS openalbert_incoming_scope_pending ON openalbert_incoming((data->'conversation'->>'id')) WHERE NOT handled;
+CREATE INDEX IF NOT EXISTS openalbert_progress_scope_active ON openalbert_progress((data->'conversation'->>'id')) WHERE data->>'status'='active';

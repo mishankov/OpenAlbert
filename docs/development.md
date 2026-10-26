@@ -1,6 +1,6 @@
 # Запуск и разработка MVP
 
-MVP работает через Telegram. Backend написан на Go; модель и OpenAI-совместимый endpoint выбираются настройками запуска. Docker Compose поднимает OpenAlbert, PostgreSQL, Temporal и его Web UI, MinIO для вложений и VictoriaLogs. Отдельный Ubuntu Computer box доступен по SSH; desktop-интерфейс пока не реализуется.
+MVP работает через Telegram и нативный клиент macOS. Backend написан на Go; модель и OpenAI-совместимый endpoint выбираются настройками запуска. Docker Compose поднимает OpenAlbert, PostgreSQL, Temporal и его Web UI, MinIO для вложений и VictoriaLogs. Отдельный Ubuntu Computer box доступен по SSH. Подключение desktop-клиента описано в [desktop.md](desktop.md).
 
 Этот документ описывает локальную разработку через `compose.local.yaml`: OpenAlbert, STT,
 log-gateway, MinIO и инициализатор бакета собираются из исходников. Установка готовых

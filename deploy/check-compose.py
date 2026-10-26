@@ -33,7 +33,8 @@ def render(filename=None, overrides=None, env_file=".env.example", cwd=ROOT):
     env.update(overrides or {})
     command = ["docker", "compose", "--env-file", env_file]
     if filename is not None:
-        command += ["-f", filename]
+        for path in filename if isinstance(filename, list) else [filename]:
+            command += ["-f", path]
     return subprocess.run(
         command + ["config", "--format", "json"],
         cwd=cwd, env=env, capture_output=True, text=True, check=False,
@@ -79,6 +80,11 @@ def check_pair(overrides):
 def main():
     assert config() == config("compose.yaml"), "Default Compose must use the published images"
     current = check_pair({})
+    tunnel = config(["compose.yaml", "deploy/desktop/compose.wireguard.yaml"])
+    app_ports = tunnel["services"]["openalbert"]["ports"]
+    assert {(p["host_ip"], str(p["published"]), p["target"]) for p in app_ports} == {
+        ("127.0.0.1", "8080", 8080), ("10.77.0.2", "8080", 8080),
+    }, "Desktop tunnel override must preserve loopback and bind only the dedicated WireGuard IP"
     assert current["name"] == "openalbert", "Unexpected Compose project name"
     assert "stt" in current["services"], "Example settings must enable bundled speech recognition"
     for stt_url in ["", "http://speech.example:8080/v1"]:

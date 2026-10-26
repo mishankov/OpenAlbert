@@ -126,7 +126,12 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 func (a *API) status(w http.ResponseWriter, r *http.Request) {
-	respond(w, 200, map[string]any{"api_version": 1, "name": "Альберт", "conversation_id": a.scope(), "max_attachment_bytes": MaxAttachmentBytes})
+	activity, err := a.Repo.ConversationActivity(r.Context(), a.scope())
+	if err != nil {
+		internal(w)
+		return
+	}
+	respond(w, 200, map[string]any{"api_version": 1, "name": "Альберт", "conversation_id": a.scope(), "max_attachment_bytes": MaxAttachmentBytes, "activity": activity})
 }
 func ptr(s string) *string {
 	if s == "" {

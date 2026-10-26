@@ -18,7 +18,11 @@ export const navigation = [
   ['background', 'background.md', 'Фоновая работа', 'pulse'],
   ['observability', 'observability.md', 'Логирование', 'pulse'],
   ['inspector', 'inspector.md', 'Инспектор сессий', 'layers'],
-  ['desktop-api', 'desktop-api.md', 'Desktop API', 'layers'],
+  ['desktop', 'desktop.md', 'Приложение macOS', 'layers'],
+  ['desktop-api', 'desktop-api.md', 'Desktop API', 'tool'],
+  ['desktop-voice', 'desktop-voice.md', 'Голос в macOS', 'tool'],
+  ['macos-development-vm', 'macos-development-vm.md', 'Разработка в macOS VM', 'tool'],
+  ['macos-updates', 'macos-updates.md', 'Обновления macOS', 'tool'],
   ['development', 'development.md', 'Запуск MVP', 'tool'],
   ['deployment', 'deployment.md', 'Публикация и установка', 'tool'],
 ];

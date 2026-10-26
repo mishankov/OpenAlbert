@@ -11,9 +11,9 @@ Every `/api/v1/` request, including downloads, requires
 `Authorization: Bearer <token>`. `DESKTOP_API_TOKEN` enables the API; unset means
 disabled. Use a randomly generated token of at least 32 bytes. The first version
 has one owner token; device enrollment and separate revocation are future work.
-The API accepts direct HTTP connections, including a local-network address such
-as `http://192.168.1.31:8080`. Authentication is required for both HTTP and HTTPS.
-Never put tokens in URLs or logs. HTTP transmits tokens and messages unencrypted.
+The client stores the token in macOS Keychain. The application accepts HTTP and
+HTTPS server URLs. Every transport still requires the Bearer token. Never put
+tokens in URLs, logs, or preferences.
 
 Errors: `{"error":{"code":"unauthorized","message":"…"}}`.
 Codes include `unauthorized`, `invalid_request`, `not_found`, `conflict`,
@@ -24,7 +24,18 @@ there is no CORS API. JSON request bodies have a finite size limit.
 
 ### GET /api/v1/status
 
-`{"api_version":1,"name":"Альберт","conversation_id":"personal:123","max_attachment_bytes":20971520}`
+`{"api_version":1,"name":"Альберт","conversation_id":"personal:123","max_attachment_bytes":20971520,"activity":{"state":"idle"}}`
+
+`activity` is always included. `state` is `queued` while this conversation has
+unhandled accepted input, `processing` while its public progress record is active,
+and `idle` when neither remains. Processing takes precedence over queued input.
+`text` is optional: queued input uses `Обрабатываю сообщение…`; processing returns
+the latest public progress text. Idle omits text. Completion, failure and
+cancellation clear processing; later pending messages can keep the state queued.
+The value is read immediately from the durable inbox/progress, without Telegram's
+30-second delivery delay, model messages, reasoning, or traces. It is scoped to
+the owner's conversation and does not infer work from scheduled tasks marked
+`running` between executions. The client polls status alongside messages.
 
 ### GET /api/v1/messages?limit=100&before=<opaque cursor>
 
@@ -112,7 +123,7 @@ returns `invalid_request`. Uploaded audio reaches the existing STT workflow
 without a Telegram download. The STT decoder enforces the real five-minute
 limit. Voice upload/POST retries preserve the same message UUID and uploaded ID.
 Public history contains attachment metadata, with audio bytes available only
-through authenticated content downloads.
+through authenticated content downloads. See [voice behavior](desktop-voice.md).
 
 Attachment:
 `{"id":"…","name":"lake.jpg","mime":"image/jpeg","size_bytes":12345}`.
@@ -122,6 +133,25 @@ Attachment:
 Authenticated binary download with accurate Content-Type, attachment filename,
 `X-Content-Type-Options: nosniff`, and private/no-store caching. IDs are URL path
 escaped. Images are downloaded by the client and decoded locally.
+
+## Client behavior
+
+Native macOS app, one window/conversation, neutral light/dark system colors,
+sidebar hidden initially. Conversation, tasks, memory, files. No chat list or
+new-chat command. Preserve draft and task context while navigating; failed sends
+retain their retry ID. Network failures show a quiet actionable error and never
+insert fabricated assistant replies. Read pages remain usable offline.
+
+Render Markdown safely, including headings, lists, quotes, code, links, and
+inline emphasis; no remote HTML/scripts. Images retain aspect ratio and open
+larger. Do not fetch arbitrary remote images silently with the owner's token.
+
+Shortcuts: conversation ⌘1, tasks ⌘2, memory ⌘3, files ⌘4, sections ⌘\\,
+send Enter (⌘Return is an alias), newline Shift+Enter, discuss ⌘Return, stop ⌘., attach ⌘O, settings ⌘,.
+Older messages use ⌃⌘↑; the editor's standard ⌘↑ binding is preserved.
+Escape dismisses the foremost presentation/context. Buttons/menus expose
+shortcuts and share actions, disabled/busy rules, and focus behavior. Sending
+must handle IME composition, repeat, non-English layouts, and preserve drafts.
 
 ## Deployment
 

@@ -1,0 +1,9 @@
+# /etc/wireguard/albert0.conf on the VPS; replace every placeholder.
+[Interface]
+Address = 10.77.0.1/32
+ListenPort = 51821
+PrivateKey = REPLACE_WITH_VPS_PRIVATE_KEY
+
+[Peer]
+PublicKey = REPLACE_WITH_PI_PUBLIC_KEY
+AllowedIPs = 10.77.0.2/32

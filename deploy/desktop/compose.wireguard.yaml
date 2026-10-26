@@ -1,0 +1,6 @@
+# Optional Pi-only override. albert0 must exist before Compose starts.
+# docker compose -f compose.yaml -f deploy/desktop/compose.wireguard.yaml up -d openalbert
+services:
+  openalbert:
+    ports:
+      - "10.77.0.2:8080:8080"

@@ -46,3 +46,10 @@ func (p Progress) Due(now time.Time) bool {
 	}
 	return p.Outcome != "active" || (!now.Before(p.StartedAt.Add(ProgressDelay)) && !now.Before(p.Delivery.UpdatedAt.Add(ProgressInterval)))
 }
+
+// ConversationActivity is a public projection of the durable inbox and active
+// progress. It never contains model messages, tool calls or reasoning.
+type ConversationActivity struct {
+	State string `json:"state"` // idle, queued, processing
+	Text  string `json:"text,omitempty"`
+}
