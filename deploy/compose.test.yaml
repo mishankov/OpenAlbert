@@ -1,4 +1,4 @@
-# Disposable integration environment, independent of compose.local.yaml and .env.
+# Disposable integration environment, independent of deploy/compose.local.yaml and .env.
 services:
   postgres:
     image: postgres:17.9-alpine
@@ -16,8 +16,8 @@ services:
     image: victoriametrics/victoria-logs:v1.53.0
   go:
     build:
-      context: ..
-      dockerfile: deploy/test.Dockerfile
+      context: .
+      dockerfile: tools/testing/go.Dockerfile
     environment:
       OPENALBERT_TEST_DATABASE_URL: postgres://openalbert:local-test-password@postgres:5432/openalbert_test?sslmode=disable
       OPENALBERT_TEST_VICTORIALOGS_URL: http://victorialogs:9428

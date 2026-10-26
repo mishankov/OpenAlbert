@@ -102,7 +102,7 @@ go vet ./...
 ```sh
 npm ci --prefix docs
 ./docs/node_modules/.bin/playwright install chromium
-./docs/node_modules/.bin/playwright test -c internal/inspector/playwright.config.mjs
+./docs/node_modules/.bin/playwright test -c apps/backend/internal/inspector/playwright.config.mjs
 ```
 
 Если браузер уже установлен отдельно, путь можно передать через `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`.

@@ -8,7 +8,7 @@ import XCTest
 final class LiveAPIContractTests: XCTestCase {
     func testRealGoAPIContract() async throws {
         guard let address = ProcessInfo.processInfo.environment["ALBERT_CONTRACT_URL"] else {
-            throw XCTSkip("Run python3 deploy/desktop/check-contract.py for the Go ↔ Swift test")
+            throw XCTSkip("Run python3 tools/checks/check-contract.py for the Go ↔ Swift test")
         }
         let client = try APIClient(baseURL: XCTUnwrap(URL(string: address)), token: "contract-test-only-not-a-real-owner-token")
         let status = try await client.status()

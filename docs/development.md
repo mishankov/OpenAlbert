@@ -2,10 +2,10 @@
 
 MVP работает через Telegram и нативный клиент macOS. Backend написан на Go; модель и OpenAI-совместимый endpoint выбираются настройками запуска. Docker Compose поднимает OpenAlbert, PostgreSQL, Temporal и его Web UI, MinIO для вложений и VictoriaLogs. Отдельный Ubuntu Computer box доступен по SSH. Подключение desktop-клиента описано в [desktop.md](desktop.md).
 
-Этот документ описывает локальную разработку через `compose.local.yaml`: OpenAlbert, STT,
+Этот документ описывает локальную разработку через `deploy/compose.local.yaml`: OpenAlbert, STT,
 log-gateway, MinIO и инициализатор бакета собираются из исходников. Установка готовых
 образов из GHCR и локальная публикация описаны в [руководстве публикации](deployment.md).
-`compose.yaml` запускается отдельно и не требует сборки на сервере.
+`deploy/compose.yaml` запускается отдельно и не требует сборки на сервере.
 
 Полный набор проверок и сборок запускается через [Task](local-checks.md):
 `task check`, `task test`, `task images`, `task verify`.
@@ -23,7 +23,7 @@ cp .env.example .env
 Заполни `.env`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, `LLM_API_KEY`, `LLM_MODEL`. Для старта Яндекс не требуется: оставь `YANDEX_API_KEY` и `YANDEX_FOLDER_ID` пустыми. Без них агент читает публичные ссылки через `web_read`, а `web_search` отсутствует в доступных инструментах. Для подключения поиска позже заполни обе настройки. Файл игнорируется Git. После этого:
 
 ```sh
-docker compose -f compose.local.yaml up -d --build
+docker compose --project-directory . -f deploy/compose.local.yaml up -d --build
 ```
 
 В `TELEGRAM_ALLOWED_USER_IDS` указываются числовые Telegram ID разрешённых пользователей через запятую. Пустой список запрещает запуск. По умолчанию бот принимает только личные сообщения от этих пользователей. Для групп нужно дополнительно указать отрицательные ID групп в `TELEGRAM_ALLOWED_GROUP_IDS`; в разрешённых группах принимаются сообщения всех обычных участников, доставленные Telegram. Список `TELEGRAM_ALLOWED_USER_IDS` ограничивает личные чаты. Группы видят только свой контекст. Личный чат владельца может читать сохранённые групповые обсуждения через инструменты истории и памяти; обратный доступ запрещён кодом.
@@ -33,7 +33,7 @@ docker compose -f compose.local.yaml up -d --build
 Не запускай два экземпляра Telegram poller с одним токеном. Для смены модели измени `LLM_MODEL` и при необходимости `LLM_BASE_URL`/`LLM_API_KEY`, затем пересоздай приложение:
 
 ```sh
-docker compose -f compose.local.yaml up -d --force-recreate openalbert
+docker compose --project-directory . -f deploy/compose.local.yaml up -d --force-recreate openalbert
 ```
 
 Для OpenCode Go с Chat Completions используется `LLM_BASE_URL=https://opencode.ai/inference/go/openai/v1`, а `LLM_MODEL` содержит ID модели без префикса провайдера, например `deepseek-v4.1-flash`. Адаптер представляется как `OpenAlbert/0.1` и передаёт стабильный `x-opencode-session` для разговора, включая анализ сессий. Значение заголовка — непрозрачный хеш, не Telegram ID. Эти требования описаны в [документации OpenCode Go](https://opencode.ai/v2/docs/console/go/).
@@ -44,7 +44,7 @@ Chromium установлен в образ OpenAlbert и запускается
 
 ## Как смотреть исполнение в Temporal UI
 
-Открой [Temporal UI](http://localhost:8233). Логин и пароль не нужны: локальная установка работает с `TEMPORAL_AUTH_ENABLED=false` и опубликована только на loopback. UI подключается к `temporal:7233` внутри Compose; браузеру этот служебный адрес не нужен. Смена локального порта задаётся через `TEMPORAL_UI_HOST_PORT` в `.env` с последующим `docker compose -f compose.local.yaml up -d temporal-ui`.
+Открой [Temporal UI](http://localhost:8233). Логин и пароль не нужны: локальная установка работает с `TEMPORAL_AUTH_ENABLED=false` и опубликована только на loopback. UI подключается к `temporal:7233` внутри Compose; браузеру этот служебный адрес не нужен. Смена локального порта задаётся через `TEMPORAL_UI_HOST_PORT` в `.env` с последующим `docker compose --project-directory . -f deploy/compose.local.yaml up -d temporal-ui`.
 
 В namespace из `TEMPORAL_NAMESPACE` (по умолчанию `default`) открой **Workflows**. Здесь видны исполняемые и завершённые workflows, их статусы и время запуска. В карточке workflow история показывает вызовы Activities, результаты, ошибки, повторные попытки и таймеры. Длительное ожидание таймера у задачи, назначенной на будущее, нормально: процесс не вызывает модель всё это время.
 
@@ -94,7 +94,7 @@ HTTP-журнал UI сохраняется полностью; ссылка «�
 
 ## Как задать характер
 
-Попроси бота в личном диалоге изменить имя или характер, например: «Теперь тебя зовут Атлас. Обнови SOUL.md». Агент прочитает актуальный текст и сохранит точечную правку. Можно также открыть `container_data/knowledge/SOUL.md` в редакторе и описать манеру общения, инициативу и принципы. При первом запуске отсутствующий SOUL создаётся из встроенного шаблона `internal/knowledge/templates/SOUL.md`.
+Попроси бота в личном диалоге изменить имя или характер, например: «Теперь тебя зовут Атлас. Обнови SOUL.md». Агент прочитает актуальный текст и сохранит точечную правку. Можно также открыть `container_data/knowledge/SOUL.md` в редакторе и описать манеру общения, инициативу и принципы. При первом запуске отсутствующий SOUL создаётся из встроенного шаблона `apps/backend/internal/knowledge/templates/SOUL.md`.
 
 Файл перечитывается при подготовке следующего запроса или фонового запуска. Пересобирать контейнер после правок не нужно. Уже выполняющийся шаг использует собранный ранее контекст. Изменять SOUL через инструмент можно только в личном интерактивном диалоге; в группах, задачах и проверках инициативы запись запрещена. Не редактируй файл вручную одновременно с выполняющейся правкой агента.
 
@@ -105,7 +105,7 @@ HTTP-журнал UI сохраняется полностью; ссылка «�
 Нужен Go 1.26. Для запуска инфраструктуры без бота и внешних ключей:
 
 ```sh
-docker compose -f compose.local.yaml up -d --build log-gateway postgres temporal victorialogs minio minio-init
+docker compose --project-directory . -f deploy/compose.local.yaml up -d --build log-gateway postgres temporal victorialogs minio minio-init
 ```
 
 Для локального запуска `.env` нужно загрузить в окружение процесса; само приложение не читает dotenv-файлы. Для примера `.env.example` с простыми значениями подходит:
@@ -114,7 +114,7 @@ docker compose -f compose.local.yaml up -d --build log-gateway postgres temporal
 set -a
 . ./.env
 set +a
-go run ./cmd/openalbert
+go run ./apps/backend/cmd/openalbert
 ```
 
 Произвольные токены и пароли в shell-файле требуют корректного quoting; удобнее передать переменные средствами IDE или менеджера секретов. Секреты не передаются через аргументы командной строки и не выводятся в сообщения об ошибках конфигурации.
@@ -123,8 +123,8 @@ go run ./cmd/openalbert
 go test ./...
 go test -race ./...
 go vet ./...
-docker compose -f compose.local.yaml config -q
-python3 deploy/check-compose.py
+docker compose --project-directory . -f deploy/compose.local.yaml config -q
+python3 tools/checks/check-compose.py
 ```
 
 Проверки интеграций используют локальные HTTP-имитаторы, чтобы не расходовать деньги и не отправлять сообщения настоящим пользователям. Проверка с реальными ключами — отдельный запуск владельца; успешные локальные проверки не доказывают доступность выбранного провайдера или поддержку конкретной моделью tool calls и изображений.
@@ -132,7 +132,7 @@ python3 deploy/check-compose.py
 Для проверки инструкций поиска на выбранной модели есть отдельная opt-in оценка. Передай `LLM_BASE_URL`, `LLM_API_KEY` и `LLM_MODEL` через окружение процесса теста и запусти:
 
 ```sh
-OPENALBERT_LIVE_RETRIEVAL_EVAL=1 go test ./internal/agent -run '^TestLiveRetrievalPrompts$' -v -count=1
+OPENALBERT_LIVE_RETRIEVAL_EVAL=1 go test ./apps/backend/internal/agent -run '^TestLiveRetrievalPrompts$' -v -count=1
 ```
 
 Она вызывает реальную модель с рабочими инструкциями и описаниями инструментов, но использует временную память, задачи и outbox без доставки в Telegram. Проверяет использование готового профиля, поиск конкретного факта, восстановление после несовпадения написания названия, обзор последних записей и поиск расписания в задачах. В обычном `go test` оценка пропускается; результат зависит от выбранной модели и не гарантирует успех всех будущих запросов.
@@ -140,7 +140,7 @@ OPENALBERT_LIVE_RETRIEVAL_EVAL=1 go test ./internal/agent -run '^TestLiveRetriev
 Отдельная оценка проверяет решение модели об отправке: прямой вопрос, приветствие и запрос статуса должны привести к явному `send_message`; просьба не отвечать, фоновая задача без новых данных и инициатива без новостей — завершиться без доставки. Она также использует изолированную память и outbox, реальные сообщения в Telegram не отправляет. С теми же `LLM_*`:
 
 ```sh
-OPENALBERT_LIVE_DELIVERY_EVAL=1 go test ./internal/agent -run '^TestLiveDeliveryPrompts$' -v -count=1
+OPENALBERT_LIVE_DELIVERY_EVAL=1 go test ./apps/backend/internal/agent -run '^TestLiveDeliveryPrompts$' -v -count=1
 ```
 
 ## Сквозная проверка контейнера
@@ -148,10 +148,10 @@ OPENALBERT_LIVE_DELIVERY_EVAL=1 go test ./internal/agent -run '^TestLiveDelivery
 После сборки образа и запуска инфраструктуры можно воспроизвести реальный путь сообщения без внешних ключей:
 
 ```sh
-docker compose -f compose.local.yaml build openalbert
-python3 deploy/mvp-smoke.py
+docker compose --project-directory . -f deploy/compose.local.yaml build openalbert
+python3 tools/smoke/mvp-smoke.py
 # Проверка запуска и работы без Яндекса:
-python3 deploy/mvp-smoke.py --without-search
+python3 tools/smoke/mvp-smoke.py --without-search
 ```
 
 Требуется Python 3 и свободный порт 18089. Harness поднимает локальные имитаторы Telegram, OpenAI-совместимого API и Yandex, затем запускает настоящий контейнер OpenAlbert через временный Compose override. В Docker Desktop контейнер обращается к ним через `host.docker.internal`; для другого Docker Engine передай `--host-address` с доступным из контейнера адресом хоста.
@@ -160,7 +160,7 @@ python3 deploy/mvp-smoke.py --without-search
 
 Проверяются приём сообщения, агентский цикл в Temporal, поиск, автоматическое сохранение памяти, длительная задача, две доставки через outbox, закрытие сессий и анализ, сохранение текстового вложения в S3, wide events в VictoriaLogs. После перезапуска приложения тот же Telegram update воспроизводится повторно: модель и отправка не должны повториться, память должна сохраниться.
 
-Проверка использует отдельные PostgreSQL database, bucket и volume, затем удаляет их и тестовый контейнер приложения. Работающая инфраструктура и сайт документации сохраняются. Если OpenAlbert уже работает, harness завершится без замены контейнера; сначала останови свой экземпляр. История тестовых workflows и диагностические события остаются в Temporal и VictoriaLogs до истечения retention. Для обычного запуска после smoke снова выполни `docker compose -f compose.local.yaml up -d openalbert` с собственными настройками.
+Проверка использует отдельные PostgreSQL database, bucket и volume, затем удаляет их и тестовый контейнер приложения. Работающая инфраструктура и сайт документации сохраняются. Если OpenAlbert уже работает, harness завершится без замены контейнера; сначала останови свой экземпляр. История тестовых workflows и диагностические события остаются в Temporal и VictoriaLogs до истечения retention. Для обычного запуска после smoke снова выполни `docker compose --project-directory . -f deploy/compose.local.yaml up -d openalbert` с собственными настройками.
 
 ## Логирование
 
@@ -173,7 +173,7 @@ python3 deploy/mvp-smoke.py --without-search
 Для разрыва стартовой зависимости VictoriaLogs от собственных логов отключена синхронная проверка соединения. Неблокирующий буфер драйвера ограничен `4m`; у Splunk-драйвера также есть собственный ограниченный буфер повторных отправок. Приложение продолжает работать при недоступности сборщика; при переполнении или перезапуске daemon часть логов может потеряться. Это не архив с гарантированной доставкой. Операционное состояние хранится в PostgreSQL и Temporal, а не восстанавливается по логам. [Настройки и ограничения драйвера](https://docs.docker.com/engine/logging/drivers/splunk/).
 
 ```sh
-docker compose -f compose.local.yaml logs --tail=100 openalbert
+docker compose --project-directory . -f deploy/compose.local.yaml logs --tail=100 openalbert
 curl -fsSG http://localhost:9428/select/logsql/query --data-urlencode 'query=*' --data-urlencode 'limit=10'
 ```
 
@@ -188,7 +188,7 @@ curl -fsSG http://localhost:9428/select/logsql/query --data-urlencode 'query=*' 
 HTTP-контракт адаптера можно проверить на отдельном одноразовом VictoriaLogs:
 
 ```sh
-OPENALBERT_TEST_VICTORIALOGS_URL=http://127.0.0.1:19428 go test -count=1 -run '^TestVictoriaLogsContract$' -v ./internal/integrations
+OPENALBERT_TEST_VICTORIALOGS_URL=http://127.0.0.1:19428 go test -count=1 -run '^TestVictoriaLogsContract$' -v ./apps/backend/internal/integrations
 ```
 
 Тест записывает собственные фикстуры и проверяет точные фильтры, временные границы, сводку и изоляцию разговоров. Адрес должен вести в отдельный тестовый экземпляр. Обычный `go test -race ./...` также проверяет запрет вызовов из групп и других личных чатов, ограничение кэша правами владельца, размер ответа, отмену, перенаправления и Workflow «прочитать диагностику → ответить владельцу» на имитаторе модели.
@@ -204,28 +204,28 @@ OPENALBERT_TEST_VICTORIALOGS_URL=http://127.0.0.1:19428 go test -count=1 -run '^
 | `container_data/victorialogs/` | Логи всех сервисов | `/storage` |
 | `container_data/knowledge/` | SOUL, профили, память и skills | `/data/knowledge` |
 
-`docker compose -f compose.local.yaml down`, включая вариант `-v`, не удаляет эти каталоги. Не удаляй `container_data/`, если данные нужно сохранить. Скрипты и настройки инфраструктуры подключаются из `deploy/` только для чтения. Изменяемый характер хранится вместе с памятью.
+`docker compose --project-directory . -f deploy/compose.local.yaml down`, включая вариант `-v`, не удаляет эти каталоги. Не удаляй `container_data/`, если данные нужно сохранить. Скрипты и настройки инфраструктуры подключаются из `services/` только для чтения. Изменяемый характер хранится вместе с памятью.
 
 Для согласованной файловой резервной копии останови все сервисы, скопируй `container_data/` с сохранением владельцев и прав, а также настройки `.env`. После копирования снова запусти сервисы. Файлы PostgreSQL можно копировать только после его корректной остановки; для переносимой копии баз дополнительно используй `pg_dumpall`. При восстановлении файлов PostgreSQL нужна совместимая версия сервера. После восстановления все базы должны соответствовать одной версии приложения; Temporal использует свои схемы, приложение — свои миграции.
 
 ```sh
 # Необязательная переносимая копия баз перед полной остановкой:
-docker compose -f compose.local.yaml stop openalbert temporal
-docker compose -f compose.local.yaml exec -T postgres pg_dumpall -U openalbert > /safe/backup/openalbert.sql
-docker compose -f compose.local.yaml stop
+docker compose --project-directory . -f deploy/compose.local.yaml stop openalbert temporal
+docker compose --project-directory . -f deploy/compose.local.yaml exec -T postgres pg_dumpall -U openalbert > /safe/backup/openalbert.sql
+docker compose --project-directory . -f deploy/compose.local.yaml stop
 # Скопируй container_data/ и .env с сохранением прав.
-docker compose -f compose.local.yaml up -d
+docker compose --project-directory . -f deploy/compose.local.yaml up -d
 ```
 
 При миграции текущей установки данные перенесены после остановки сервисов и проверены по контрольным суммам и числу записей в таблицах. Прежние именованные Docker-тома удалены; постоянные данные находятся только в `container_data/`.
 
 Каталог `/safe/backup` в примере нужно создать заранее вне репозитория; резервные копии содержат личные данные. При перезапуске workers Temporal продолжает незавершённые workflows. Для внешних вызовов с неопределённым исходом повторная отправка может требовать отдельного решения: Telegram не гарантирует идемпотентную доставку сообщения при сетевом обрыве после приёма запроса.
 
-Образы инфраструктуры закреплены в `compose.local.yaml`. Temporal auto-setup выбран по [официальному примеру Temporal](https://github.com/temporalio/docker-compose/blob/main/docker-compose-postgres.yml); это удобная среда одного сервера без TLS и отказоустойчивости. Перед публичным развёртыванием нужны отдельные сервисные учётные записи, защита endpoints и проверка обновлений образов. В MVP MinIO и приложение используют одну локальную учётную запись; пароли из примера предназначены для loopback-среды разработки.
+Образы инфраструктуры закреплены в `deploy/compose.local.yaml`. Temporal auto-setup выбран по [официальному примеру Temporal](https://github.com/temporalio/docker-compose/blob/main/docker-compose-postgres.yml); это удобная среда одного сервера без TLS и отказоустойчивости. Перед публичным развёртыванием нужны отдельные сервисные учётные записи, защита endpoints и проверка обновлений образов. В MVP MinIO и приложение используют одну локальную учётную запись; пароли из примера предназначены для loopback-среды разработки.
 
 ## Ubuntu-компьютер Альберта
 
-`docker compose -f compose.local.yaml up -d --build` собирает `computer` и запускает
+`docker compose --project-directory . -f deploy/compose.local.yaml up -d --build` собирает `computer` и запускает
 одноразовый `computer-init`. Инициализатор создаёт отдельные ключи клиента и сервера.
 Клиентские файлы доступны процессу OpenAlbert (UID 10001) только на чтение; на
 компьютере есть лишь публичный ключ клиента и собственный ключ сервера. Приватные
@@ -255,14 +255,14 @@ docker compose -f compose.local.yaml up -d
 Для ручного терминала владельца:
 
 ```sh
-docker compose -f compose.local.yaml exec --user albert computer bash
+docker compose --project-directory . -f deploy/compose.local.yaml exec --user albert computer bash
 ```
 
 Чтобы проверить адаптер на одноразовом компьютере без настоящих Telegram/LLM:
 
 ```sh
-docker build -f deploy/computer/Dockerfile -t openalbert-dev:computer .
-python3 deploy/computer-smoke.py
+docker build -f services/computer/Dockerfile -t openalbert-dev:computer .
+python3 tools/smoke/computer-smoke.py
 ```
 
 Проверка создаёт свои Docker volumes и контейнеры и удаляет их после запуска.
