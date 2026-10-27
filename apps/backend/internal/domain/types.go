@@ -102,18 +102,21 @@ type Messenger interface {
 	Download(context.Context, string) ([]byte, error)
 }
 type Task struct {
-	ID              string    `json:"id"`
-	ConversationID  string    `json:"conversation_id"`
-	Title           string    `json:"title"`
-	Goal            string    `json:"goal"`
-	Reason          string    `json:"reason,omitempty"`
-	Status          string    `json:"status"`
-	Result          string    `json:"result,omitempty"`
-	ScheduleSeconds int       `json:"schedule_seconds,omitempty"`
-	NextRunAt       time.Time `json:"next_run_at,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-	Version         int64     `json:"version"`
+	ID               string    `json:"id"`
+	ConversationID   string    `json:"conversation_id"`
+	Title            string    `json:"title"`
+	Goal             string    `json:"goal"`
+	Reason           string    `json:"reason,omitempty"`
+	Status           string    `json:"status"`
+	Result           string    `json:"result,omitempty"`
+	ScheduleSeconds  int       `json:"schedule_seconds,omitempty"`
+	ScheduleCron     string    `json:"schedule_cron,omitempty"`
+	ScheduleTimezone string    `json:"schedule_timezone,omitempty"`
+	Maintenance      bool      `json:"maintenance,omitempty"`
+	NextRunAt        time.Time `json:"next_run_at,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	Version          int64     `json:"version"`
 }
 type Outgoing struct {
 	Markdown        string       `json:"markdown,omitempty"`
@@ -216,6 +219,7 @@ type Repository interface {
 	Messages(context.Context, string) ([]Message, error)
 	CreateTask(context.Context, Task) (Task, error)
 	UpdateTask(context.Context, Task) (Task, error)
+	MaintainTask(context.Context, string, string, string, Task) (Task, error)
 	FindTasks(context.Context, string, string) ([]Task, error)
 	Task(context.Context, string, string) (Task, bool, error)
 	RunnableTasks(context.Context) ([]Task, error)
