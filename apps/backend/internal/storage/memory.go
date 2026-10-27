@@ -476,3 +476,45 @@ func (m *Memory) SaveTrace(ctx context.Context, tr domain.Trace) error {
 	m.traces[tr.ID] = clone(tr)
 	return ctx.Err()
 }
+
+// MaintainTask commits the restricted update and its durable audit under one lock.
+func (m *Memory) MaintainTask(ctx context.Context, actorID, runID, key string, t domain.Task) (domain.Task, error) {
+	if err := ctx.Err(); err != nil {
+		return t, err
+	}
+	if err := validID(key); err != nil {
+		return t, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	actor, ok := m.tasks[taskKey(t.ConversationID, actorID)]
+	if !ok {
+		return t, ErrNotFound
+	}
+	before, ok := m.tasks[taskKey(t.ConversationID, t.ID)]
+	if !ok {
+		return t, ErrNotFound
+	}
+	if raw, ok := m.checkpoints["task-maintenance/"+key]; ok {
+		var audit TaskMaintenanceAudit
+		if err := json.Unmarshal(raw, &audit); err != nil {
+			return t, err
+		}
+		if audit.ActorTaskID != actorID || audit.TargetTaskID != t.ID || audit.RunID != runID || audit.ConversationID != t.ConversationID {
+			return t, ErrConflict
+		}
+		return before, nil
+	}
+	if err := validateMaintenance(actor, before, t, time.Now()); err != nil {
+		return t, err
+	}
+	t.Version++
+	t.UpdatedAt = time.Now().UTC()
+	raw, err := json.Marshal(maintenanceAudit(actorID, runID, key, before, t))
+	if err != nil {
+		return t, err
+	}
+	m.tasks[taskKey(t.ConversationID, t.ID)] = t
+	m.checkpoints["task-maintenance/"+key] = raw
+	return t, nil
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"openalbert/apps/backend/internal/domain"
+	"openalbert/apps/backend/internal/scheduling"
 )
 
 //go:embed schema.sql
@@ -366,10 +367,7 @@ func validateTask(t domain.Task) error {
 	if t.Status != "" && !taskStatus(t.Status) {
 		return fmt.Errorf("invalid task status %q", t.Status)
 	}
-	if t.ScheduleSeconds < 0 {
-		return errors.New("negative task interval")
-	}
-	return nil
+	return scheduling.Validate(t)
 }
 func (s *Store) UpdateTask(ctx context.Context, t domain.Task) (domain.Task, error) {
 	if err := validateTask(t); err != nil {
@@ -628,4 +626,82 @@ func (s *Store) ActiveSessions(ctx context.Context) ([]domain.Session, error) {
 		out = append(out, session)
 	}
 	return out, rows.Err()
+}
+
+// MaintainTask locks the authority and target rows before checking privileges.
+// The audit receipt and mutation commit together, including across activity retries.
+func (s *Store) MaintainTask(ctx context.Context, actorID, runID, key string, t domain.Task) (domain.Task, error) {
+	if err := validID(key); err != nil {
+		return t, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return t, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, "SELECT data FROM openalbert_tasks WHERE conversation_id=$1 AND id IN ($2,$3) ORDER BY id FOR UPDATE", t.ConversationID, actorID, t.ID)
+	if err != nil {
+		return t, err
+	}
+	var actor, before domain.Task
+	for rows.Next() {
+		var raw []byte
+		if err = rows.Scan(&raw); err != nil {
+			rows.Close()
+			return t, err
+		}
+		task, e := decode[domain.Task](raw)
+		if e != nil {
+			rows.Close()
+			return t, e
+		}
+		if task.ID == actorID {
+			actor = task
+		}
+		if task.ID == t.ID {
+			before = task
+		}
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return t, err
+	}
+	if actor.ID == "" || before.ID == "" {
+		return t, ErrNotFound
+	}
+	var receipt []byte
+	err = tx.QueryRow(ctx, "SELECT data FROM openalbert_checkpoints WHERE id=$1", "task-maintenance/"+key).Scan(&receipt)
+	if err == nil {
+		audit, e := decode[TaskMaintenanceAudit](receipt)
+		if e != nil {
+			return t, e
+		}
+		if audit.ActorTaskID != actorID || audit.TargetTaskID != t.ID || audit.RunID != runID || audit.ConversationID != t.ConversationID {
+			return t, ErrConflict
+		}
+		return before, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return t, err
+	}
+	if err = validateMaintenance(actor, before, t, time.Now()); err != nil {
+		return t, err
+	}
+	t.Version++
+	t.UpdatedAt = time.Now().UTC()
+	raw, err := encode(t)
+	if err != nil {
+		return t, err
+	}
+	if _, err = tx.Exec(ctx, "UPDATE openalbert_tasks SET data=$3 WHERE conversation_id=$1 AND id=$2", t.ConversationID, t.ID, raw); err != nil {
+		return t, err
+	}
+	audit, err := encode(maintenanceAudit(actorID, runID, key, before, t))
+	if err != nil {
+		return t, err
+	}
+	if _, err = tx.Exec(ctx, "INSERT INTO openalbert_checkpoints(id,data) VALUES($1,$2)", "task-maintenance/"+key, audit); err != nil {
+		return t, err
+	}
+	return t, tx.Commit(ctx)
 }
