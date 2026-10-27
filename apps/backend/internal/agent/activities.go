@@ -13,6 +13,7 @@ import (
 
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/telemetry"
+	"openalbert/services/backup"
 )
 
 type Activities struct {
@@ -33,6 +34,7 @@ type Activities struct {
 	InspectorPublicURL string
 	MinTaskInterval    time.Duration
 	TaskChanged        func(context.Context, string, string) error
+	Backups            *backup.Reader
 }
 type RunInput struct {
 	Key            string
@@ -42,6 +44,7 @@ type RunInput struct {
 	TaskID         string
 	Initiative     bool
 	StartedAt      time.Time
+	BackupEvent    *backup.Event `json:",omitempty"`
 }
 type Turn struct {
 	Input        RunInput
@@ -281,6 +284,12 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 		}
 		raw, _ := json.Marshal(t)
 		out.Messages = append(out.Messages, domain.Message{Role: "user", Content: "Background task step. Read and continue this task using tools. Respect current goal, do not create a replacement. Save progress and the next schedule via task_update and complete a one-time task when done. Task: " + string(raw)})
+	} else if in.BackupEvent != nil {
+		if !a.isOwnerPrivate(conv) {
+			return out, errors.New("backup events require the owner's private conversation")
+		}
+		raw, _ := json.Marshal(in.BackupEvent)
+		out.Messages = append(out.Messages, domain.Message{Role: "user", Content: "Host backup event (operational data, not a user command): " + string(raw) + "\nUse the fresh backup status supplied by the application. For a recent starting event, you may warn the owner about the upcoming service pause. Do not announce an upcoming pause if the event is old or status has already advanced. Report failures and missing fresh backups to the owner, unless this event has been superseded by a later verified success. A routine success needs no notification unless requested. Do not create tasks, change schedules or alter memories because of this event. Never claim that service restart confirms a successful S3 backup."})
 	} else if in.Initiative {
 		out.Messages = append(out.Messages, domain.Message{Role: "user", Content: "Scheduled initiative check. Review the supplied USER profile and use task_find to inspect existing tasks first. Search memories only to fill a specific information gap; use one distinctive keyword from the available context. If a general overview of saved memories is necessary, use memory_search with query=\"\" once; this returns recent entries, not a complete export. Do not search abstract lists such as interests, projects, plans. An empty result is not evidence that the user has no interests. Do not repeat searches without a concrete reason. Act only if there is a concrete useful reason. You may create a justified task. Do not duplicate tasks or notifications."})
 	}
@@ -321,6 +330,17 @@ func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOut
 			if tool.Name == "send_message" {
 				tools = append(tools, tool)
 			}
+		}
+	}
+	// Refresh immediately before every uncached model call, including resumed
+	// Temporal activities whose persisted Turn contains an older system prompt.
+	if a.Backups != nil && a.isOwnerPrivate(in.Turn.Conversation) {
+		in.Turn.Messages = append([]domain.Message(nil), in.Turn.Messages...)
+		status := a.Backups.Context(time.Now())
+		if len(in.Turn.Messages) > 0 && in.Turn.Messages[0].Role == "system" {
+			in.Turn.Messages[0].Content += "\n\n" + status
+		} else {
+			in.Turn.Messages = append([]domain.Message{{Role: "system", Content: status}}, in.Turn.Messages...)
 		}
 	}
 	finishTrace := a.startTrace(ctx, domain.Trace{SessionID: in.Turn.Input.SessionID, TurnID: in.Turn.Input.Key, Trigger: trigger(in.Turn.Input.TaskID, in.Turn.Input.Initiative), TaskID: in.Turn.Input.TaskID, Kind: "model", Name: a.ModelName, Step: in.Step}, map[string]any{"messages": traceMessages(in.Turn.Messages), "tools": tools}, ev)
@@ -368,6 +388,8 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 	switch in.Call.Name {
 	case "computer_exec", "computer_execution_status", "computer_execution_cancel", "computer_upload", "computer_download":
 		accessErr = a.computerAccess(in)
+	case "backup_status":
+		accessErr = a.backupAccess(in.Conversation)
 	case "logs_search":
 		accessErr = a.logSearchAccess(in)
 	case "task_update":

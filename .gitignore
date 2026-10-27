@@ -5,6 +5,7 @@
 /data/
 /knowledge/
 /container_data
+/backup-config/
 /bin/
 /coverage.out
 *.test

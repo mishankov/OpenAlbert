@@ -35,6 +35,7 @@ type Config struct {
 	ComputerSSHUser                                         string
 	ComputerSSHKeyFile                                      string
 	ComputerSSHKnownHostsFile                               string
+	BackupStateDir                                          string
 }
 
 func Load() (Config, error) { return load(os.Getenv) }
@@ -58,6 +59,7 @@ func load(get func(string) string) (Config, error) {
 		ComputerSSHUser:           value("COMPUTER_SSH_USER", "albert"),
 		ComputerSSHKeyFile:        value("COMPUTER_SSH_KEY_FILE", "/data/computer/id_ed25519"),
 		ComputerSSHKnownHostsFile: value("COMPUTER_SSH_KNOWN_HOSTS_FILE", "/data/computer/known_hosts"),
+		BackupStateDir:            value("BACKUP_STATE_DIR", ""),
 	}
 	var problems []error
 	if c.DesktopAPIToken != "" && len(c.DesktopAPIToken) < 32 {

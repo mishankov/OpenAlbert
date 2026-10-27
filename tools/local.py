@@ -21,8 +21,8 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports/local"
-COMPONENTS = ("openalbert", "computer", "stt", "log-gateway", "minio", "minio-init")
-COMMANDS = ("check", "test", "test:go", "test:web", "test:macos", "images", "verify", "publish",
+COMPONENTS = ("openalbert", "computer", "stt", "log-gateway", "minio", "minio-init", "backup")
+COMMANDS = ("check", "test", "test:go", "test:backup", "test:web", "test:macos", "images", "verify", "publish",
             "release:macos", "release:macos:draft", "screenshots", "reports")
 
 
@@ -192,6 +192,9 @@ class Run:
             finally:
                 self.command("go-cleanup", compose + ["down", "--volumes", "--remove-orphans", "--rmi", "local"], timeout=120)
 
+    def backup(self):
+        self.command("backup-restore", [sys.executable, "tools/smoke/backup-smoke.py"], timeout=1200)
+
     def web(self):
         self.command("npm-install", ["npm", "ci"], cwd=ROOT / "docs")
         self.command("playwright-install", ["./node_modules/.bin/playwright", "install", "chromium"], cwd=ROOT / "docs")
@@ -237,7 +240,7 @@ class Run:
         if deployment:
             args = [sys.executable, "tools/smoke/release-smoke.py"]
             for component, image in images.items():
-                if component != "stt":
+                if component not in {"stt", "backup"}:
                     args += ["--image", component + "=" + image]
             self.command("deployment-" + arch, args, env=env, timeout=1200)
 
@@ -258,6 +261,7 @@ class Run:
 
     def tests(self):
         self.go()
+        self.backup()
         self.web()
         self.macos()
 
@@ -333,7 +337,7 @@ def main():
     run = Run(args.command)
     code = 0
     try:
-        actions = {"check": run.check, "test": run.tests, "test:go": run.go, "test:web": run.web, "test:macos": run.macos,
+        actions = {"check": run.check, "test": run.tests, "test:go": run.go, "test:backup": run.backup, "test:web": run.web, "test:macos": run.macos,
                    "images": lambda: run.images(run.native_arch()), "verify": lambda: (run.check(), run.tests(), run.images(run.native_arch(), deployment=True)),
                    "publish": run.publish, "release:macos": run.release_macos, "release:macos:draft": lambda: run.release_macos(draft=True),
                    "screenshots": lambda: run.vm("screenshots")}

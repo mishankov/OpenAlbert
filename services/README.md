@@ -5,6 +5,7 @@
 
 | Компонент | Содержимое |
 | --- | --- |
+| [backup](backup/) | Планировщик S3-копий, шифрование, ротация, восстановление и чтение статуса backend |
 | [computer](computer/) | Ubuntu-образ, SSH, исполнитель команд |
 | [stt](stt/) | Go HTTP-прокси, NeMo-Speech.cpp, запуск распознавания |
 | [log-gateway](log-gateway/) | Go-приёмник и нормализация Docker-логов |

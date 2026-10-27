@@ -3,6 +3,7 @@ module openalbert
 go 1.26.0
 
 require (
+	filippo.io/age v1.3.2
 	github.com/chromedp/cdproto v0.157.8
 	github.com/chromedp/chromedp v0.21.0
 	github.com/jackc/pgx/v5 v5.11.0
@@ -16,6 +17,7 @@ require (
 )
 
 require (
+	filippo.io/hpke v0.4.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a // indirect

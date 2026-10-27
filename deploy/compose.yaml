@@ -53,6 +53,29 @@ services:
     logging: *logging
     stop_grace_period: 10s
 
+  backup:
+    profiles: [backup]
+    labels:
+      compose_service: backup
+    image: "${OPENALBERT_IMAGE_PREFIX:?Set OPENALBERT_IMAGE_PREFIX to ghcr.io/owner/repository}/backup:${OPENALBERT_IMAGE_TAG:?Set OPENALBERT_IMAGE_TAG to a published sha tag or master}"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    stop_grace_period: 5m
+    environment:
+      BACKUP_CONTAINER: "true"
+    tmpfs:
+      - /tmp
+    volumes:
+      - .:/installation:ro
+      - ./backup-config:/etc/openalbert-backup:ro
+      - ./container_data/backup-state:/installation/container_data/backup-state
+      - ./container_data/backup-work:/var/lib/openalbert-backup
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Independent of the log gateway that is paused during cold backups.
+    logging:
+      driver: local
+
   stt:
     profiles: [local-stt]
     labels:
@@ -285,11 +308,13 @@ services:
       S3_SECRET_KEY: "${S3_SECRET_KEY:?Set S3_SECRET_KEY in .env}"
       S3_BUCKET: "${S3_BUCKET:-openalbert}"
       S3_SECURE: "false"
+      BACKUP_STATE_DIR: /data/backup-state
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
       - ./container_data/knowledge:/data/knowledge
       - ./container_data/computer/client:/data/computer:ro
+      - ./container_data/backup-state:/data/backup-state:ro
     logging: *logging
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]

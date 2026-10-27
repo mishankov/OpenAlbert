@@ -1,0 +1,17 @@
+{
+  "root": "/installation",
+  "compose_file": "compose.yaml",
+  "work_dir": "/var/lib/openalbert-backup",
+  "enabled": true,
+  "time": "03:00",
+  "timezone": "Europe/Moscow",
+  "keep_days": 14,
+  "notice_seconds": 60,
+  "s3_endpoint": "s3.example.com",
+  "s3_region": "us-east-1",
+  "s3_secure": true,
+  "s3_bucket": "albert-backups",
+  "s3_prefix": "production/",
+  "credentials_file": "/etc/openalbert-backup/s3.json",
+  "age_recipient": "REPLACE_WITH_PUBLIC_AGE_RECIPIENT"
+}

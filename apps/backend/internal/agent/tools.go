@@ -122,6 +122,9 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 	if strings.HasPrefix(in.Call.Name, "computer_") {
 		return a.executeComputer(ctx, in)
 	}
+	if in.Call.Name == "backup_status" {
+		return a.backupStatus(in)
+	}
 	if in.Call.Name == "logs_search" {
 		return a.searchLogs(ctx, in)
 	}
@@ -443,6 +446,9 @@ func backgroundPlaceholder(text string) bool {
 
 func (a *Activities) toolDefinitions() []domain.Tool {
 	tools := Definitions()
+	if a.Backups != nil {
+		tools = append(tools, backupDefinition())
+	}
 	if a.Logs != nil {
 		tools = append(tools, logDefinition())
 	}
@@ -468,6 +474,9 @@ func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 	filtered := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
 		if strings.HasPrefix(tool.Name, "computer_") && (!a.isOwnerPrivate(turn.Conversation) || turn.Input.Initiative) {
+			continue
+		}
+		if tool.Name == "backup_status" && !a.isOwnerPrivate(turn.Conversation) {
 			continue
 		}
 		if tool.Name == "task_update" && turn.Input.Initiative {
