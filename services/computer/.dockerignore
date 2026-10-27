@@ -1,0 +1,6 @@
+# A user's copied template contains SSH keys and personal files after creation.
+*
+!Dockerfile
+!entrypoint.sh
+!runner.py
+!sshd_config

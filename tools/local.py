@@ -21,8 +21,8 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports/local"
-COMPONENTS = ("openalbert", "computer", "stt", "log-gateway", "minio", "minio-init", "backup")
-COMMANDS = ("check", "test", "test:go", "test:backup", "test:web", "test:macos", "images", "verify", "publish",
+COMPONENTS = ("openalbert", "stt", "log-gateway", "minio", "minio-init", "backup")
+COMMANDS = ("check", "test", "test:go", "test:computer", "test:backup", "test:web", "test:macos", "images", "verify", "publish",
             "release:macos", "release:macos:draft", "screenshots", "reports")
 
 
@@ -192,6 +192,18 @@ class Run:
             finally:
                 self.command("go-cleanup", compose + ["down", "--volumes", "--remove-orphans", "--rmi", "local"], timeout=120)
 
+    def computer(self):
+        image = self.repository + ":computer-test"
+        built = False
+        try:
+            self.command("computer-test-build", ["docker", "build", "-t", image, "services/computer"], timeout=1200)
+            built = True
+            self.command("computer-lifecycle", [sys.executable, "tools/smoke/computer-lifecycle.py", "--image", image], timeout=300)
+            self.command("computer-ssh", [sys.executable, "tools/smoke/computer-smoke.py", "--image", image], timeout=900)
+        finally:
+            if built:
+                self.command("computer-test-cleanup", ["docker", "image", "rm", image], timeout=60)
+
     def backup(self):
         self.command("backup-restore", [sys.executable, "tools/smoke/backup-smoke.py"], timeout=1200)
 
@@ -337,7 +349,7 @@ def main():
     run = Run(args.command)
     code = 0
     try:
-        actions = {"check": run.check, "test": run.tests, "test:go": run.go, "test:backup": run.backup, "test:web": run.web, "test:macos": run.macos,
+        actions = {"check": run.check, "test": run.tests, "test:go": run.go, "test:computer": run.computer, "test:backup": run.backup, "test:web": run.web, "test:macos": run.macos,
                    "images": lambda: run.images(run.native_arch()), "verify": lambda: (run.check(), run.tests(), run.images(run.native_arch(), deployment=True)),
                    "publish": run.publish, "release:macos": run.release_macos, "release:macos:draft": lambda: run.release_macos(draft=True),
                    "screenshots": lambda: run.vm("screenshots")}

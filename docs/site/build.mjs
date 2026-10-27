@@ -15,6 +15,7 @@ export const navigation = [
   ['browser', 'browser.md', 'Браузер', 'layers'],
   ['speech', 'speech.md', 'Голосовые сообщения', 'layers'],
   ['tools', 'tools.md', 'Инструменты', 'tool'],
+  ['computer', 'computer.md', 'Компьютер пользователя', 'tool'],
   ['background', 'background.md', 'Фоновая работа', 'pulse'],
   ['observability', 'observability.md', 'Логирование', 'pulse'],
   ['inspector', 'inspector.md', 'Инспектор сессий', 'layers'],

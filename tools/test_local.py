@@ -94,6 +94,28 @@ class LocalRunTests(unittest.TestCase):
                 command.assert_not_called()
             self.assertEqual(calls, ["amd64", "arm64"])
 
+    def test_computer_checks_are_opt_in_and_clean_up_after_failure(self):
+        self.assertNotIn("computer", local.COMPONENTS)
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.make_run(directory)
+            calls = []
+
+            def command(name, args, **kwargs):
+                calls.append((name, args))
+                if name == "computer-lifecycle":
+                    raise RuntimeError("synthetic update failure")
+
+            with mock.patch.object(run, "command", side_effect=command), self.assertRaises(RuntimeError):
+                run.computer()
+            self.assertEqual(calls[-1][0], "computer-test-cleanup")
+            self.assertIn(run.repository + ":computer-test", calls[-1][1])
+            self.assertNotIn("computer-ssh", [name for name, _ in calls])
+            with mock.patch.object(run, "go"), mock.patch.object(run, "backup"), \
+                    mock.patch.object(run, "web"), mock.patch.object(run, "macos"), \
+                    mock.patch.object(run, "computer") as computer:
+                run.tests()
+                computer.assert_not_called()
+
     def test_publication_rechecks_sources_before_first_upload(self):
         with tempfile.TemporaryDirectory() as directory:
             run = self.make_run(directory, "publish")

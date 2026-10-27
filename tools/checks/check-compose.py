@@ -2,13 +2,14 @@
 import copy
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-OWN_IMAGES = {"openalbert", "stt", "log-gateway", "minio", "minio-init", "computer", "computer-init", "backup"}
+OWN_IMAGES = {"openalbert", "stt", "log-gateway", "minio", "minio-init", "backup"}
 TEST_ENV = {
     "OPENALBERT_IMAGE_PREFIX": "ghcr.io/example/openalbert",
     "OPENALBERT_IMAGE_TAG": "sha-" + "1" * 40,
@@ -61,8 +62,7 @@ def check_pair(overrides):
             build = expected["build"]
             assert Path(build["context"]) == ROOT, f"{name}: build context moved away from the repository root"
             assert (ROOT / build["dockerfile"]).is_file(), f"{name}: Dockerfile is missing"
-            component = "computer" if name == "computer-init" else name
-            image = f'{TEST_ENV["OPENALBERT_IMAGE_PREFIX"]}/{component}:{TEST_ENV["OPENALBERT_IMAGE_TAG"]}'
+            image = f'{TEST_ENV["OPENALBERT_IMAGE_PREFIX"]}/{name}:{TEST_ENV["OPENALBERT_IMAGE_TAG"]}'
             assert actual.pop("image") == image, f"{name}: unexpected published image"
             expected.pop("build")
         else:
@@ -82,6 +82,37 @@ def check_pair(overrides):
             assert volume["type"] == "bind" and "/container_data/" in volume["source"], f"{name}: release requires checkout files"
             assert Path(volume["source"]).is_relative_to(ROOT / "container_data"), f"{name}: persistent data moved away from the repository root"
     return release
+
+
+def check_user_computer():
+    # The copied template builds only on the user's host and has its own lifecycle.
+    with tempfile.TemporaryDirectory(prefix="openalbert-user-computer-") as directory:
+        destination = Path(directory) / "computer"
+        shutil.copytree(ROOT / "services/computer", destination)
+        computer = config("compose.yaml", env_file="/dev/null", cwd=destination)
+        assert set(computer["services"]) == {"computer", "computer-init"}
+        assert computer["name"] != "openalbert"
+        service = computer["services"]["computer"]
+        assert Path(service["build"]["context"]) == destination
+        assert service["image"] == "openalbert-computer:local"
+        assert service["pull_policy"] == "never" and not service.get("ports")
+        for name in ("computer", "computer-init"):
+            for volume in computer["services"][name]["volumes"]:
+                assert Path(volume["source"]).is_relative_to(destination)
+        for address in ("", "computer:22"):
+            for base in ("deploy/compose.yaml", "deploy/compose.local.yaml"):
+                attached = config([base, str(destination / "app.compose.yaml")], overrides={
+                    "COMPUTER_DIRECTORY": str(destination), "COMPUTER_SSH_ADDRESS": address,
+                })
+                app = attached["services"]["openalbert"]
+                assert not {"computer", "computer-init"} & attached["services"].keys()
+                assert app["environment"]["COMPUTER_SSH_ADDRESS"] == address
+                assert set(app["networks"]) == {"default", "user-computer"}
+                assert attached["networks"]["user-computer"]["external"]
+                assert attached["networks"]["user-computer"]["name"] == computer["networks"]["default"]["name"]
+                keys = [v for v in app["volumes"] if v["target"] == "/data/computer"]
+                assert len(keys) == 1 and keys[0]["read_only"]
+                assert Path(keys[0]["source"]) == destination / "client"
 
 
 def main():
@@ -110,9 +141,15 @@ def main():
         assert "stt" not in external["services"], "Disabled bundled speech recognition must not start"
         dependency = external["services"]["openalbert"].get("depends_on", {}).get("stt")
         assert dependency is None or dependency.get("required") is False, "External speech recognition still requires the bundled service"
-    assert not current["services"]["computer"].get("ports"), "SSH must not be published"
-    assert set(current["services"]["computer"]["networks"]) == {"computer"}
-    assert set(current["services"]["openalbert"]["networks"]) == {"computer", "default"}
+    assert not {"computer", "computer-init"} & current["services"].keys(), "Albert must not manage a user computer"
+    assert set(current["services"]["openalbert"]["networks"]) == {"default"}
+    assert current["services"]["openalbert"]["environment"]["COMPUTER_SSH_ADDRESS"] == ""
+    bake = json.loads(subprocess.check_output(
+        ["docker", "buildx", "bake", "-f", "deploy/docker-bake.hcl", "--print"], cwd=ROOT, text=True,
+    ))
+    assert set(bake["group"]["default"]["targets"]) == OWN_IMAGES, "Release build catalogue drifted"
+    assert "computer" not in bake["target"], "User computers must not be built/published with Albert"
+    check_user_computer()
     for address in ["", "remote.example:2222"]:
         configured = check_pair({"COMPUTER_SSH_ADDRESS": address})
         assert configured["services"]["openalbert"]["environment"]["COMPUTER_SSH_ADDRESS"] == address

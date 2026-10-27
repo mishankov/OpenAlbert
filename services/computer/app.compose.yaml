@@ -1,0 +1,13 @@
+# Opt-in adapter for Albert's Compose project; this file creates no computer.
+services:
+  openalbert:
+    networks: [default, user-computer]
+    environment:
+      COMPUTER_SSH_ADDRESS: "${COMPUTER_SSH_ADDRESS-computer:22}"
+    volumes:
+      - ${COMPUTER_DIRECTORY:?Set COMPUTER_DIRECTORY to the absolute user-computer directory}/client:/data/computer:ro
+
+networks:
+  user-computer:
+    external: true
+    name: ${COMPUTER_NETWORK_NAME:-openalbert-computer}

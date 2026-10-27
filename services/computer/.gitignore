@@ -1,0 +1,7 @@
+# Runtime files belong to the user's copied directory, never to source control.
+.env
+.env.*
+/client/
+/server/
+/home/
+/workspace/

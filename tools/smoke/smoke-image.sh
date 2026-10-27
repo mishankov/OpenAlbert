@@ -14,9 +14,6 @@ case "$component" in
     docker run --rm --entrypoint /bin/sh "$image" -ec \
       'test -x /usr/local/bin/openalbert; test "$(id -u)" = 10001; chromium --version'
     ;;
-  computer)
-    python3 tools/smoke/computer-smoke.py --image "$image"
-    ;;
   stt)
     docker run --rm --entrypoint /bin/sh "$image" -ec \
       'test -x /usr/local/bin/stt-proxy; ffmpeg -version >/dev/null; /opt/nemo/bin/nemo-speech --help >/dev/null; python3 -c "import ast; ast.parse(open(\"/usr/local/bin/stt-entrypoint\").read())"'

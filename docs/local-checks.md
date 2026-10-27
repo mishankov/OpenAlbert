@@ -36,11 +36,12 @@ Chromium и FFmpeg. На хосте эти два инструмента для 
 | --- | --- |
 | `task check` | gofmt без изменения файлов, go vet, тесты runner, проверка Compose и Bake |
 | `task test:go` | Go race-тесты в Linux с временными PostgreSQL/VictoriaLogs, Chromium и FFmpeg |
+| `task test:computer` | Явная одноразовая сборка шаблона пользователя, SSH-контракт и независимость от обновлений приложения; не входит в test/verify/publish |
 | `task test:backup` | Зашифрованная копия, ротация S3 и восстановление PostgreSQL/MinIO в отдельных контейнерах |
 | `task test:web` | Тесты/сборка docs, Playwright docs и inspector, включая клавиатуру |
 | `task test:macos` | Python tooling, реальный Go/Swift-контракт, XCTest в Tart и smoke release bundle |
 | `task test` | Все четыре набора тестов |
-| `task images` | Семь образов для архитектуры Docker engine и smoke каждого |
+| `task images` | Шесть образов для архитектуры Docker engine и smoke каждого |
 | `task verify` | check, все тесты, images и чистое развёртывание с перезапуском |
 | `task screenshots` | Нативные скриншоты в Tart |
 | `task reports` | Сводка последнего завершившегося прогона |
@@ -54,7 +55,8 @@ images; `test`/`verify` завершатся ошибкой на native-этап
 Bake может собирать независимые образы параллельно.
 
 В Go-наборе явно включены PostgreSQL, VictoriaLogs, реальный браузер и декодирование
-аудио. S3 и SSH-контракты выполняются на этапе smoke образов. Live LLM evaluations
+аудио. S3-контракт выполняется на этапе smoke образов. SSH и независимость
+компьютера проверяются отдельно через `task test:computer`. Live LLM evaluations
 требуют отдельного явного запуска и не входят в проверку. Отсутствующая VM или
 Docker, сбой тестов и нездоровый сервис означают ошибку всего прогона.
 
@@ -102,7 +104,7 @@ docker login ghcr.io
 OPENALBERT_IMAGE_PREFIX=ghcr.io/mishankov/openalbert task publish
 ```
 
-Команда повторяет проверки, собирает все семь компонентов через Bake отдельно
+Команда повторяет проверки, собирает все шесть релизных компонентов через Bake отдельно
 для AMD64 и ARM64, проверяет smoke и развёртывание каждой архитектуры. До завершения
 обоих наборов ничего не загружается. Используются именно проверенные локальные
 образы. SHA и чистота checkout проверяются снова непосредственно перед загрузкой.

@@ -14,6 +14,9 @@ tasks:
   test:go:
     desc: Run race tests with disposable PostgreSQL, VictoriaLogs, Chromium and FFmpeg
     cmds: [python3 tools/local.py test:go]
+  test:computer:
+    desc: Build a disposable user-computer template and test the SSH adapter
+    cmds: [python3 tools/local.py test:computer]
   test:backup:
     desc: Verify encrypted S3 backup, retention and PostgreSQL/MinIO restore in disposable containers
     cmds: [python3 tools/local.py test:backup]
@@ -24,7 +27,7 @@ tasks:
     desc: Test tooling, Go/Swift contract, native keyboard flows and release bundle in Tart
     cmds: [python3 tools/local.py test:macos]
   images:
-    desc: Build and smoke-test all seven images for the Docker engine architecture
+    desc: Build and smoke-test all six images for the Docker engine architecture
     cmds: [python3 tools/local.py images]
   verify:
     desc: Run all checks, tests, image builds and a fresh deployment/restart test

@@ -1,0 +1,41 @@
+# Optional template: copy this directory OUTSIDE the Albert installation first.
+# Build once on the user's host. Never include this project in Albert updates.
+name: openalbert-computer
+
+services:
+  computer-init:
+    image: ${COMPUTER_IMAGE:-openalbert-computer:local}
+    pull_policy: never
+    command: [initialize]
+    network_mode: none
+    volumes:
+      - ./client:/client
+      - ./server:/server
+
+  computer:
+    image: ${COMPUTER_IMAGE:-openalbert-computer:local}
+    pull_policy: never
+    build: .
+    restart: unless-stopped
+    depends_on:
+      computer-init:
+        condition: service_completed_successfully
+    cpus: "${COMPUTER_CPUS:-2}"
+    mem_limit: "${COMPUTER_MEMORY_LIMIT:-2g}"
+    pids_limit: 256
+    volumes:
+      - ./server:/etc/openalbert-ssh:ro
+      - ./home:/home/albert
+      - ./workspace:/workspace
+    healthcheck:
+      test: [CMD-SHELL, "/usr/sbin/sshd -t && kill -0 $(cat /run/sshd.pid)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    stop_grace_period: 10s
+    logging:
+      driver: local
+
+networks:
+  default:
+    name: ${COMPUTER_NETWORK_NAME:-openalbert-computer}

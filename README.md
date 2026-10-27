@@ -28,7 +28,7 @@ apps/
   backend/          Основное Go-приложение: агент, API, инспектор, память и задачи
   macos/            Нативный клиент macOS
 services/
-  computer/         Ubuntu-среда исполнения команд
+  computer/         Необязательный шаблон компьютера пользователя
   stt/              Сервис распознавания речи
   log-gateway/      Приём и доставка Docker-логов
   postgres/         Инициализация PostgreSQL

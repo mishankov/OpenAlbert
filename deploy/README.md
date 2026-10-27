@@ -24,3 +24,6 @@ docker compose --project-directory . -f deploy/compose.local.yaml up -d --build
 
 Исходники, Dockerfiles и конфигурация отдельных компонентов находятся
 в `apps/` и `services/`; проверки — в `tools/`.
+
+Компьютер не входит в этот стек или каталог образов. Его создаёт и обслуживает
+пользователь отдельно; см. [создание и перенос](../docs/computer.md).

@@ -9,9 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chmod 0440 /etc/sudoers.d/albert && visudo -cf /etc/sudoers.d/albert \
     && mkdir -p /workspace /run/sshd && chown albert:albert /workspace \
     && rm -f /etc/ssh/ssh_host_*
-COPY services/computer/sshd_config /etc/ssh/sshd_config
-COPY services/computer/entrypoint.sh /usr/local/bin/computer-entrypoint
-COPY services/computer/runner.py /usr/local/bin/openalbert-computer
+COPY sshd_config /etc/ssh/sshd_config
+COPY entrypoint.sh /usr/local/bin/computer-entrypoint
+COPY runner.py /usr/local/bin/openalbert-computer
 RUN chmod 0755 /usr/local/bin/computer-entrypoint /usr/local/bin/openalbert-computer
 WORKDIR /workspace
 EXPOSE 22
