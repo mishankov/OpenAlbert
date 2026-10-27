@@ -40,6 +40,7 @@ func (r *Runtime) Worker() worker.Worker {
 	w.RegisterWorkflow(TaskWorkflow)
 	w.RegisterWorkflow(AnalysisWorkflow)
 	w.RegisterWorkflow(InitiativeWorkflow)
+	w.RegisterWorkflow(BackupEventWorkflow)
 	w.RegisterActivity(r.Activities)
 	return w
 }
@@ -192,6 +193,9 @@ func (r *Runtime) dispatch(ctx context.Context) {
 	}
 }
 func (r *Runtime) DispatchOnce(ctx context.Context) error {
+	if err := r.DispatchBackupEvents(ctx); err != nil {
+		r.record(ctx, "backup.events", err)
+	}
 	incoming, err := r.Repo.PendingIncoming(ctx, 100)
 	if err != nil {
 		return err

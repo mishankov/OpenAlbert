@@ -7,5 +7,5 @@
 - `testing/go.Dockerfile` — Go integration-тесты с Chromium и FFmpeg.
 
 Запускай локальные проверки из корня через `task check`, `task test:go`,
-`task test:web`, `task test:macos`, `task images` или `task verify`.
+`task test:backup`, `task test:web`, `task test:macos`, `task images` или `task verify`.
 См. [полное руководство](../docs/local-checks.md).

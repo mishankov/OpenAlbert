@@ -25,6 +25,7 @@ import (
 	"openalbert/apps/backend/internal/orchestration"
 	"openalbert/apps/backend/internal/storage"
 	"openalbert/apps/backend/internal/telemetry"
+	"openalbert/services/backup"
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
@@ -125,6 +126,9 @@ func run() error {
 		if err != nil {
 			return err
 		}
+	}
+	if c.BackupStateDir != "" {
+		activities.Backups = &backup.Reader{Dir: c.BackupStateDir}
 	}
 	activities.STT = speech
 	activities.STTModel = c.STTModel

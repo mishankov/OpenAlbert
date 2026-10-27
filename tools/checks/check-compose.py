@@ -8,7 +8,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-OWN_IMAGES = {"openalbert", "stt", "log-gateway", "minio", "minio-init", "computer", "computer-init"}
+OWN_IMAGES = {"openalbert", "stt", "log-gateway", "minio", "minio-init", "computer", "computer-init", "backup"}
 TEST_ENV = {
     "OPENALBERT_IMAGE_PREFIX": "ghcr.io/example/openalbert",
     "OPENALBERT_IMAGE_TAG": "sha-" + "1" * 40,
@@ -76,6 +76,9 @@ def check_pair(overrides):
             assert actual.pop("configs") == [{"source": key, "target": target}], f"{key}: unexpected config mount"
         assert actual == expected, f"{name}: development/release runtime settings drifted"
         for volume in actual.get("volumes", []):
+            if name == "backup":
+                assert volume["type"] == "bind", "backup: requires explicit host binds"
+                continue
             assert volume["type"] == "bind" and "/container_data/" in volume["source"], f"{name}: release requires checkout files"
             assert Path(volume["source"]).is_relative_to(ROOT / "container_data"), f"{name}: persistent data moved away from the repository root"
     return release
@@ -88,6 +91,16 @@ def main():
     assert {(p["host_ip"], str(p["published"]), p["target"]) for p in app_ports} == {
         ("127.0.0.1", "8080", 8080), ("10.77.0.2", "8080", 8080),
     }, "Desktop tunnel override must preserve loopback and bind only the dedicated WireGuard IP"
+    assert "backup" not in current["services"], "Backups must be opt-in"
+    with_backup = check_pair({"COMPOSE_PROFILES": "backup,local-stt"})
+    backup = with_backup["services"]["backup"]
+    assert backup["logging"]["driver"] == "local", "backup must survive the log gateway pause"
+    binds = {v["target"]: v for v in backup["volumes"]}
+    assert binds["/installation"]["read_only"] and binds["/etc/openalbert-backup"]["read_only"]
+    assert not binds["/installation/container_data/backup-state"].get("read_only", False)
+    for name, service in with_backup["services"].items():
+        if name != "backup":
+            assert not any(v["target"] == "/var/run/docker.sock" for v in service.get("volumes", [])), "Docker socket leaked to an application service"
     assert current["name"] == "openalbert", "Unexpected Compose project name"
     assert "stt" in current["services"], "Example settings must enable bundled speech recognition"
     for stt_url in ["", "http://speech.example:8080/v1"]:

@@ -6,6 +6,10 @@ component=${1:?component is required}
 image=${2:?image is required}
 
 case "$component" in
+  backup)
+    docker run --rm --entrypoint /bin/sh "$image" -ec \
+      'test -x /usr/local/bin/albert-backup; test "$(id -u)" = 0; docker --version; docker compose version; /usr/local/bin/albert-backup keygen --identity /tmp/backup.agekey'
+    ;;
   openalbert)
     docker run --rm --entrypoint /bin/sh "$image" -ec \
       'test -x /usr/local/bin/openalbert; test "$(id -u)" = 10001; chromium --version'
