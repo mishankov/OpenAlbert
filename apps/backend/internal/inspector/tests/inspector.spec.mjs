@@ -339,7 +339,12 @@ test("аудио: исходник, текст, диагностика и кла
   await expect(page.locator("#panel")).toContainText(speech.text);
   await expect(page.locator("audio")).toHaveAttribute("preload", "none");
   await expect(page.locator("audio")).toHaveAttribute("src", /artifact.*voice-file/);
-  await page.locator("audio").focus();await page.keyboard.press("Space");
+  // Native media controls need their first stable layout before keyboard input.
+  // focus() alone does not wait for actionability or the UA controls to render.
+  await page.locator("audio").scrollIntoViewIfNeeded();
+  await page.locator("audio").focus();
+  await expect(page.locator("audio")).toBeFocused();
+  await page.keyboard.press("Space");
   await expect.poll(() => page.locator("audio").evaluate((a) => a.paused)).toBe(false);
   await page.keyboard.press("Space");await expect.poll(() => page.locator("audio").evaluate((a) => a.paused)).toBe(true);
   const attempt = page.getByRole("button", { name: "Попытка 1", exact: true });
