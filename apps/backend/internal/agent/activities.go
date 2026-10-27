@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"openalbert/apps/backend/internal/domain"
+	"openalbert/apps/backend/internal/scheduling"
 	"openalbert/apps/backend/internal/telemetry"
 	"openalbert/services/backup"
 )
@@ -511,11 +512,14 @@ func (a *Activities) AdvanceTask(ctx context.Context, scope, id string, failed b
 		return t, nil
 	}
 	now = now.UTC()
-	if failed {
-		t.Status = "failed"
-	} else if t.ScheduleSeconds > 0 {
+	if scheduling.Repeats(t) {
 		t.Status = "waiting"
-		t.NextRunAt = now.Add(time.Duration(t.ScheduleSeconds) * time.Second)
+		t.NextRunAt, err = scheduling.Next(t, now)
+		if err != nil {
+			return t, err
+		}
+	} else if failed {
+		t.Status = "failed"
 	} else if t.NextRunAt.After(now.Add(time.Second)) {
 		t.Status = "waiting"
 	} else {
@@ -840,10 +844,13 @@ func (a *Activities) BeginTask(ctx context.Context, scope, id string, now time.T
 	if terminal(t.Status) || t.Status == "paused" || t.NextRunAt.After(now) {
 		return t, nil
 	}
-	if t.Status == "running" {
+	if t.Status == "running" && !t.NextRunAt.IsZero() {
 		return t, nil
 	}
 	t.Status = "running"
+	if t.NextRunAt.IsZero() {
+		t.NextRunAt = now.UTC()
+	}
 	return a.Repo.UpdateTask(ctx, t)
 }
 

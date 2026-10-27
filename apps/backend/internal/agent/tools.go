@@ -15,6 +15,7 @@ import (
 
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/messagefmt"
+	"openalbert/apps/backend/internal/scheduling"
 )
 
 func ID(parts ...string) string {
@@ -50,10 +51,10 @@ func Definitions() []domain.Tool {
 		{Name: "web_read", Description: "Fetch plain text from a known public HTTP(S) URL. Use for static articles, documentation or plain-text files when only their text is needed. Does not run JavaScript or share browser cookies. HTML extraction discards link destinations and flattens headings, lists and tables; long results may be truncated. For search results, catalogs, following links, structured tables or JavaScript content, use the listed browser tools. An HTTP success may contain a CAPTCHA or an empty page; check that the requested content is actually present. Private network addresses are forbidden.", Parameters: schema(`"url":{"type":"string"}`, "url")},
 		{Name: "send_message", Description: sendMessageDescription, Parameters: schema(`"text":{"type":"string","description":"User-facing Rich Markdown: headings, GFM tables, lists, code, spoilers, formulas and details are supported. Use an empty string for an artifact without a caption."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
 		{Name: "send_group_message", Description: "Post the text your owner explicitly requests to a known allowed Telegram group or topic, only from the owner's interactive private chat. Get the exact conversation_id from conversation_list; ask if the intended group/topic is ambiguous. Use original Rich Markdown, up to 32000 UTF-8 bytes. Send only the intended public text, never private instructions/history. Returns queued, not confirmed delivered. Does not finish this turn: acknowledge the queued post privately via send_message. Do not repost it to check delivery. Text only; attachments are not supported by this tool.", Parameters: schema(`"conversation_id":{"type":"string"},"text":{"type":"string"}`, "conversation_id", "text")},
-		{Name: "task_create", Description: "Create an independent durable task. Specify next_run_at RFC3339 for a reminder; schedule_seconds>0 for repeating checks. Explain reason for self-initiated tasks. Task continues after session closes.", Parameters: schema(`"title":{"type":"string"},"goal":{"type":"string"},"reason":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0}`, "title", "goal")},
+		{Name: "task_create", Description: "Create an independent durable task. Specify next_run_at RFC3339 for a reminder; schedule_seconds>0 for repeating checks. Explain reason for self-initiated tasks. Task continues after session closes.", Parameters: schema(`"title":{"type":"string"},"goal":{"type":"string"},"reason":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0},"schedule_cron":{"type":"string"},"schedule_timezone":{"type":"string"},"maintenance":{"type":"boolean"}`, "title", "goal")},
 		{Name: "task_find", Description: "Find assignments, reminders and monitoring tasks in the current conversation, including those created in earlier sessions. Use for schedules, progress, results and status questions, and before creating a possible duplicate; these belong to tasks, not memory_search. query is a literal case-insensitive substring of title or goal, or an exact task ID; omitted or empty query returns all saved tasks in this conversation, including completed ones. Inspect status and use task_read for details.", Parameters: schema(`"query":{"type":"string","description":"A literal substring of task title or goal, or an exact ID. Omit or use an empty string to list all saved tasks in this conversation."}`)},
 		{Name: "task_read", Description: "Read saved task status, result, last update, next check. Reading does not execute it.", Parameters: schema(`"id":{"type":"string"}`, "id")},
-		{Name: "task_update", Description: "Update a task goal, result, status or schedule. Status: queued, running, waiting, paused, completed, cancelled, failed. Completed and cancelled tasks stop. To resume use queued. Use for progress and stop requests.", Parameters: schema(`"id":{"type":"string"},"goal":{"type":"string"},"result":{"type":"string"},"status":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0}`, "id")},
+		{Name: "task_update", Description: "Update a task goal, result, status or schedule. Status: queued, running, waiting, paused, completed, cancelled, failed. Completed and cancelled tasks stop. To resume use queued. Use for progress and stop requests.", Parameters: schema(`"id":{"type":"string"},"goal":{"type":"string"},"result":{"type":"string"},"status":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0},"schedule_cron":{"type":"string"},"schedule_timezone":{"type":"string"},"maintenance":{"type":"boolean"}`, "id")},
 		{Name: "conversation_list", Description: "List readable saved conversations. In the owner's private chat includes all known groups; elsewhere only the current conversation. Use before recalling group discussions. Does not send messages to those chats.", Parameters: schema(``)},
 		{Name: "conversation_history", Description: "Search or read saved user/assistant messages across sessions, including active sessions. conversation_id defaults to this chat; only the owner's private chat can read groups. Results newest first with original scope, session and sequence. Use for earlier messages and who said what; memory_search is not a complete message log. Optional query is one literal case-insensitive substring of the message, not keywords combined with AND or OR; use a short distinctive fragment. Omit query or use an empty string to read recent messages. Use next_before_seq as before_seq to page backwards. session_started_at is the session start, not the message timestamp. Only messages actually received and processed by this bot are available. tool_calls lists the IDs and names of actual send_message calls; their text is included in content. An ordinary assistant text without send_message is internal run history. A send_message call is a request to send, not confirmation of delivery.", Parameters: schema(`"conversation_id":{"type":"string"},"query":{"type":"string","description":"One literal substring of a saved message, not a list of keywords. Omit or use an empty string to read recent messages."},"before_seq":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}`)},
 		{Name: "memory_search", Description: "Search saved memory entries by literal, case-insensitive substrings, NOT semantic search. Every whitespace-separated query term must occur in the SAME entry (content, source or kind). Punctuation is literal; commas do not mean OR. No stemming, translation, synonyms, regex or wildcard syntax. Start with one distinctive name or keyword, for example Polka; search unrelated topics in separate calls. After an empty result, shorten the query or try an alternative spelling; adding words narrows the search. An empty query returns up to 50 most recently updated readable entries, not a complete export. An empty result means no matching entries, not that no memories exist. In the owner's private chat searches this chat and saved groups by default; optional conversation_id selects an authorized scope. Results include scope and source; do not attribute group participants' facts to the owner. Use task_find/task_read for assignments and schedules, conversation_history for earlier messages.", Parameters: schema(`"query":{"type":"string","description":"Literal terms that must all match one entry. Prefer a single distinctive term, e.g. Polka. Empty string lists recent entries; do not use comma-separated topics."},"conversation_id":{"type":"string","description":"Optional authorized conversation scope. Omit to search all scopes readable from this chat."}`, "query")},
@@ -72,31 +73,34 @@ func Definitions() []domain.Tool {
 }
 
 type toolArgs struct {
-	UserID          int64  `json:"user_id"`
-	SourceMessageID string `json:"source_message_id"`
-	Evidence        string `json:"evidence"`
-	ConversationID  string `json:"conversation_id"`
-	BeforeSeq       int64  `json:"before_seq"`
-	Limit           int    `json:"limit"`
-	Query           string `json:"query"`
-	URL             string `json:"url"`
-	Text            string `json:"text"`
-	ArtifactID      string `json:"artifact_id"`
-	ID              string `json:"id"`
-	Title           string `json:"title"`
-	Goal            string `json:"goal"`
-	Reason          string `json:"reason"`
-	Status          string `json:"status"`
-	Result          string `json:"result"`
-	NextRunAt       string `json:"next_run_at"`
-	ScheduleSeconds *int   `json:"schedule_seconds"`
-	Name            string `json:"name"`
-	Description     string `json:"description"`
-	Content         string `json:"content"`
-	Kind            string `json:"kind"`
-	OldText         string `json:"old_text"`
-	NewText         string `json:"new_text"`
-	Delete          bool   `json:"delete"`
+	UserID           int64   `json:"user_id"`
+	SourceMessageID  string  `json:"source_message_id"`
+	Evidence         string  `json:"evidence"`
+	ConversationID   string  `json:"conversation_id"`
+	BeforeSeq        int64   `json:"before_seq"`
+	Limit            int     `json:"limit"`
+	Query            string  `json:"query"`
+	URL              string  `json:"url"`
+	Text             string  `json:"text"`
+	ArtifactID       string  `json:"artifact_id"`
+	ID               string  `json:"id"`
+	Title            string  `json:"title"`
+	Goal             string  `json:"goal"`
+	Reason           string  `json:"reason"`
+	Status           string  `json:"status"`
+	Result           string  `json:"result"`
+	NextRunAt        string  `json:"next_run_at"`
+	ScheduleSeconds  *int    `json:"schedule_seconds"`
+	ScheduleCron     *string `json:"schedule_cron"`
+	ScheduleTimezone *string `json:"schedule_timezone"`
+	Maintenance      *bool   `json:"maintenance"`
+	Name             string  `json:"name"`
+	Description      string  `json:"description"`
+	Content          string  `json:"content"`
+	Kind             string  `json:"kind"`
+	OldText          string  `json:"old_text"`
+	NewText          string  `json:"new_text"`
+	Delete           bool    `json:"delete"`
 }
 
 type ToolInput struct {
@@ -235,7 +239,30 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 		if interval < 0 || (interval > 0 && time.Duration(interval)*time.Second < a.MinTaskInterval) {
 			return nil, fmt.Errorf("schedule must be at least %d seconds", int(a.MinTaskInterval.Seconds()))
 		}
-		return a.Repo.CreateTask(ctx, domain.Task{ID: key, ConversationID: scope, Title: p.Title, Goal: p.Goal, Reason: p.Reason, Status: "queued", ScheduleSeconds: interval, NextRunAt: next, CreatedAt: now, UpdatedAt: now})
+		task := domain.Task{ID: key, ConversationID: scope, Title: p.Title, Goal: p.Goal, Reason: p.Reason, Status: "queued", ScheduleSeconds: interval, NextRunAt: next, CreatedAt: now, UpdatedAt: now}
+		if p.Maintenance != nil {
+			if in.Background {
+				return nil, errors.New("only an interactive request may configure maintenance authority")
+			}
+			task.Maintenance = *p.Maintenance
+		}
+		if p.ScheduleCron != nil {
+			task.ScheduleCron = *p.ScheduleCron
+		}
+		if p.ScheduleTimezone != nil {
+			task.ScheduleTimezone = *p.ScheduleTimezone
+		}
+		if err := scheduling.Validate(task); err != nil {
+			return nil, err
+		}
+		if task.ScheduleCron != "" && p.NextRunAt == "" {
+			var err error
+			task.NextRunAt, err = scheduling.Next(task, now)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return a.Repo.CreateTask(ctx, task)
 	case "task_find":
 		return a.Repo.FindTasks(ctx, scope, p.Query)
 	case "task_read":
@@ -258,10 +285,29 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 		if !found {
 			return nil, errors.New("task not found")
 		}
-		if in.TaskID != "" && in.TaskID != t.ID {
-			return nil, errors.New("task run may only update itself")
+		maintenance := in.TaskID != "" && in.TaskID != t.ID
+		if maintenance {
+			actor, found, err := a.Repo.Task(ctx, scope, in.TaskID)
+			if err != nil {
+				return nil, err
+			}
+			if !found || !actor.Maintenance {
+				return nil, errors.New("task run may only update itself")
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(in.Call.Arguments, &fields); err != nil {
+				return nil, err
+			}
+			for field := range fields {
+				if field != "id" && field != "status" && field != "next_run_at" {
+					return nil, errors.New("maintenance may only update next_run_at and status")
+				}
+			}
 		}
-		if in.TaskID != "" && (t.Status == "cancelled" || t.Status == "paused") {
+		if p.Maintenance != nil && in.TaskID != "" {
+			return nil, errors.New("task runs cannot change maintenance authority")
+		}
+		if !maintenance && in.TaskID != "" && (t.Status == "cancelled" || t.Status == "paused") {
 			return nil, errors.New("task stopped by user")
 		}
 		if p.Goal != "" {
@@ -288,8 +334,33 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 			}
 			t.ScheduleSeconds = *p.ScheduleSeconds
 		}
+		if p.ScheduleCron != nil {
+			t.ScheduleCron = *p.ScheduleCron
+		}
+		if p.ScheduleTimezone != nil {
+			t.ScheduleTimezone = *p.ScheduleTimezone
+		}
+		if p.Maintenance != nil {
+			t.Maintenance = *p.Maintenance
+		}
+		if err := scheduling.Validate(t); err != nil {
+			return nil, err
+		}
 		t.UpdatedAt = now
-		updated, updateErr := a.Repo.UpdateTask(ctx, t)
+		var updated domain.Task
+		var updateErr error
+		if maintenance {
+			audit := a.event(ctx, "task.maintenance")
+			audit.Set("actor_task_id", in.TaskID)
+			audit.Set("target_task_id", t.ID)
+			audit.Set("mutation_id", key)
+			audit.Set("next_run_at", t.NextRunAt)
+			audit.Set("status", t.Status)
+			updated, updateErr = a.Repo.MaintainTask(ctx, in.TaskID, in.RunKey, key, t)
+			audit.End(updateErr)
+		} else {
+			updated, updateErr = a.Repo.UpdateTask(ctx, t)
+		}
 		if updateErr == nil && a.Browser != nil && (terminal(updated.Status) || updated.Status == "paused") {
 			a.Browser.CloseTask(updated.ID)
 		}

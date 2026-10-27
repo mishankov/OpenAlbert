@@ -8,6 +8,7 @@ require (
 	github.com/chromedp/chromedp v0.21.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/minio/minio-go/v7 v7.4.1
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.12.1
 	github.com/yuin/goldmark v1.8.6
 	go.temporal.io/api v1.63.5
