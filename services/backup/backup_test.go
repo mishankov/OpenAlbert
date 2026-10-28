@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -392,6 +393,64 @@ func TestStateFreshnessMonitorAndInterruptedServiceRecovery(t *testing.T) {
 	defer lock.Close()
 	if err := r.Recover(context.Background()); !errors.Is(err, ErrBusy) {
 		t.Fatalf("concurrent recovery accepted: %v", err)
+	}
+}
+
+func TestRecoverValidatesServiceNames(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		services []string
+		valid    bool
+	}{
+		{"standard hyphenated services", []string{"openalbert", "log-gateway", "temporal-ui"}, true},
+		{"compose service characters", []string{"Service_1.test-2", "1worker"}, true},
+		{"empty journal", nil, false},
+		{"empty name", []string{""}, false},
+		{"controller", []string{ControllerService}, false},
+		{"option", []string{"--help"}, false},
+		{"leading hyphen", []string{"-worker"}, false},
+		{"leading dot", []string{".worker"}, false},
+		{"leading underscore", []string{"_worker"}, false},
+		{"path", []string{"../worker"}, false},
+		{"space", []string{"two workers"}, false},
+		{"tab", []string{"worker\tother"}, false},
+		{"newline", []string{"worker\nother"}, false},
+		{"carriage return", []string{"worker\rother"}, false},
+		{"nul", []string{"worker\x00"}, false},
+		{"invalid after valid", []string{"log-gateway", "--help"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := fixture(t)
+			journal := filepath.Join(c.StateDir, "resume.json")
+			if err := AtomicJSON(journal, tt.services); err != nil {
+				t.Fatal(err)
+			}
+			var steps, started []string
+			command := fakeCommands(t, c, &steps, false, nil)
+			r := &Runner{Config: c, Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				if !tt.valid {
+					t.Fatalf("invalid journal triggered command: %s %q", name, args)
+				}
+				if i := slices.Index(args, "start"); i >= 0 {
+					started = append(started, args[i+1:]...)
+				}
+				return command(ctx, name, args...)
+			}}
+			err := r.Recover(context.Background())
+			if (err == nil) != tt.valid {
+				t.Fatalf("Recover() = %v, valid = %v", err, tt.valid)
+			}
+			if tt.valid {
+				if !slices.Equal(started, tt.services) || strings.Join(steps, ",") != "start" {
+					t.Fatalf("started %q with steps %q; want exactly %q", started, steps, tt.services)
+				}
+				if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("resume journal not cleared: %v", err)
+				}
+			} else if _, err := os.Stat(journal); err != nil {
+				t.Fatalf("invalid journal not retained: %v", err)
+			}
+		})
 	}
 }
 

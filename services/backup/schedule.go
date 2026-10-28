@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -75,6 +76,9 @@ func (r *Runner) Monitor(now time.Time) error {
 	return AtomicJSON(path, Event{ID: id, Kind: "overdue", At: now.UTC(), ErrorCode: code})
 }
 
+// Compose service names allow internal hyphens, but cannot start with an option prefix.
+var composeServiceName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
 // The journal survives SIGKILL or power loss. The monitor retries service startup
 // after the backup lock is released, and never starts previously stopped services.
 func (r *Runner) Recover(ctx context.Context) error {
@@ -91,7 +95,7 @@ func (r *Runner) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, name := range services {
-		if name == "" || name == ControllerService || strings.ContainsAny(name, "/ -\r\n") {
+		if name == ControllerService || !composeServiceName.MatchString(name) {
 			return errors.New("invalid resume journal")
 		}
 	}
