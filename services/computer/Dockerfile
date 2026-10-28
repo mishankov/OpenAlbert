@@ -11,8 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -f /etc/ssh/ssh_host_*
 COPY sshd_config /etc/ssh/sshd_config
 COPY entrypoint.sh /usr/local/bin/computer-entrypoint
-COPY runner.py /usr/local/bin/openalbert-computer
-RUN chmod 0755 /usr/local/bin/computer-entrypoint /usr/local/bin/openalbert-computer
+RUN chmod 0755 /usr/local/bin/computer-entrypoint
 WORKDIR /workspace
 EXPOSE 22
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/computer-entrypoint"]

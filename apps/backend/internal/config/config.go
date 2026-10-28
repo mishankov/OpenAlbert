@@ -33,8 +33,8 @@ type Config struct {
 	VictoriaLogsURL                                         string
 	ComputerSSHAddress                                      string
 	ComputerSSHUser                                         string
+	ComputerSSHPassword                                     string
 	ComputerSSHKeyFile                                      string
-	ComputerSSHKnownHostsFile                               string
 	BackupStateDir                                          string
 }
 
@@ -53,19 +53,22 @@ func load(get func(string) string) (Config, error) {
 		TelegramBotToken: value("TELEGRAM_BOT_TOKEN", ""), TelegramBaseURL: value("TELEGRAM_BASE_URL", ""), LLMBaseURL: value("LLM_BASE_URL", "https://api.openai.com/v1"), LLMAPIKey: value("LLM_API_KEY", ""), LLMModel: value("LLM_MODEL", ""),
 		YandexAPIKey: value("YANDEX_API_KEY", ""), YandexEndpoint: value("YANDEX_SEARCH_URL", ""), YandexFolderID: value("YANDEX_FOLDER_ID", ""), KnowledgeDir: value("KNOWLEDGE_DIR", "./container_data/knowledge"), SoulFile: value("SOUL_FILE", ""), HTTPAddr: value("HTTP_ADDR", ":8080"),
 		S3Endpoint: value("S3_ENDPOINT", "localhost:9000"), S3AccessKey: value("S3_ACCESS_KEY", ""), S3SecretKey: value("S3_SECRET_KEY", ""), S3Bucket: value("S3_BUCKET", "openalbert"),
-		InspectorPublicURL:        value("INSPECTOR_PUBLIC_URL", "http://localhost:8080/inspect/"),
-		VictoriaLogsURL:           strings.TrimSpace(get("VICTORIALOGS_URL")),
-		ComputerSSHAddress:        value("COMPUTER_SSH_ADDRESS", ""),
-		ComputerSSHUser:           value("COMPUTER_SSH_USER", "albert"),
-		ComputerSSHKeyFile:        value("COMPUTER_SSH_KEY_FILE", "/data/computer/id_ed25519"),
-		ComputerSSHKnownHostsFile: value("COMPUTER_SSH_KNOWN_HOSTS_FILE", "/data/computer/known_hosts"),
-		BackupStateDir:            value("BACKUP_STATE_DIR", ""),
+		InspectorPublicURL:  value("INSPECTOR_PUBLIC_URL", "http://localhost:8080/inspect/"),
+		VictoriaLogsURL:     strings.TrimSpace(get("VICTORIALOGS_URL")),
+		ComputerSSHAddress:  value("COMPUTER_SSH_ADDRESS", ""),
+		ComputerSSHUser:     value("COMPUTER_SSH_USER", "albert"),
+		ComputerSSHPassword: get("COMPUTER_SSH_PASSWORD"),
+		ComputerSSHKeyFile:  value("COMPUTER_SSH_KEY_FILE", ""),
+		BackupStateDir:      value("BACKUP_STATE_DIR", ""),
 	}
 	var problems []error
 	if c.DesktopAPIToken != "" && len(c.DesktopAPIToken) < 32 {
 		problems = append(problems, errors.New("DESKTOP_API_TOKEN must contain at least 32 bytes"))
 	}
 	if c.ComputerSSHAddress != "" {
+		if (c.ComputerSSHPassword == "") == (c.ComputerSSHKeyFile == "") {
+			problems = append(problems, errors.New("set exactly one of COMPUTER_SSH_PASSWORD or COMPUTER_SSH_KEY_FILE"))
+		}
 		host, port, e := net.SplitHostPort(c.ComputerSSHAddress)
 		p, pe := strconv.Atoi(port)
 		if e != nil || host == "" || strings.ContainsAny(host, "/\\@ \t\r\n") || pe != nil || p < 1 || p > 65535 {

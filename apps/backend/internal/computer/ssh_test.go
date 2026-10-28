@@ -5,7 +5,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"encoding/pem"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,39 +20,140 @@ import (
 	"openalbert/apps/backend/internal/domain"
 )
 
-func TestSSHRejectsUntrustedHostAndHonorsCancellation(t *testing.T) {
+func TestSSHPasswordPreparationAndDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name, check, install   string
+		wantInstall, wantError bool
+	}{
+		{name: "first connection", check: `{"state":"install"}`, install: `{"state":"ready"}`, wantInstall: true},
+		{name: "already installed", check: `{"state":"ready"}`},
+		{name: "missing dependency", check: `{"error":"python_required"}`, wantError: true},
+		{name: "failed install", check: `{"state":"install"}`, install: `{"error":"preparation_failed"}`, wantInstall: true, wantError: true},
+		{name: "unexpected response", check: `{"state":"garbage"}`, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			commands := make(chan string, 8)
+			address := testSSHServer(t, func(command string, input []byte) string {
+				commands <- command
+				if strings.HasSuffix(command, " check; else printf '%s\\n' '{\"error\":\"python_required\"}'; fi") {
+					return tc.check
+				}
+				if strings.Contains(command, " install; else") {
+					if string(input) != runnerSource {
+						t.Error("incorrect runner uploaded")
+					}
+					return tc.install
+				}
+				if command != `python3 "$HOME/.openalbert/runners/`+runnerDigest(runnerSource)+`.py"` {
+					t.Error("wrong runner command")
+				}
+				var request domain.ComputerRequest
+				if json.Unmarshal(input, &request) != nil || request.Action != "status" {
+					t.Error("incorrect dispatch")
+				}
+				return `{"state":"unknown"}`
+			})
+			c, err := New(Config{Address: address, User: "test-user", Password: " synthetic-password "})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := c.Execute(context.Background(), domain.ComputerRequest{Action: "status"})
+			if (err != nil) != tc.wantError {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err == nil && out.State != "unknown" {
+				t.Fatal("result lost")
+			}
+			want := 1
+			if tc.wantInstall {
+				want++
+			}
+			if !tc.wantError {
+				want++
+			}
+			if len(commands) != want {
+				t.Fatal("command dispatched before successful preparation")
+			}
+		})
+	}
+}
+
+func testSSHServer(t *testing.T, respond func(string, []byte) string) string {
+	t.Helper()
 	_, private, _ := ed25519.GenerateKey(rand.Reader)
 	host, _ := ssh.NewSignerFromKey(private)
-	dir := t.TempDir()
-	key, _ := ssh.MarshalPrivateKey(private, "test")
-	if err := os.WriteFile(filepath.Join(dir, "key"), pem.EncodeToMemory(key), 0600); err != nil {
-		t.Fatal(err)
-	}
-	known := filepath.Join(dir, "known_hosts")
-	if err := os.WriteFile(known, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	server := &ssh.ServerConfig{NoClientAuth: true}
+	server := &ssh.ServerConfig{PasswordCallback: func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+		if meta.User() != "test-user" || string(password) != " synthetic-password " {
+			return nil, fmt.Errorf("unexpected credentials")
+		}
+		return nil, nil
+	}}
 	server.AddHostKey(host)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	t.Cleanup(func() { _ = listener.Close() })
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		conn, e := listener.Accept()
 		if e != nil {
 			return
 		}
 		defer conn.Close()
-		_, _, _, _ = ssh.NewServerConn(conn, server)
+		serverConn, channels, requests, err := ssh.NewServerConn(conn, server)
+		if err != nil {
+			return
+		}
+		defer serverConn.Close()
+		go ssh.DiscardRequests(requests)
+		for channel := range channels {
+			session, requests, err := channel.Accept()
+			if err != nil {
+				return
+			}
+			for request := range requests {
+				if request.Type != "exec" {
+					_ = request.Reply(false, nil)
+					continue
+				}
+				var payload struct{ Command string }
+				_ = ssh.Unmarshal(request.Payload, &payload)
+				_ = request.Reply(true, nil)
+				input, _ := io.ReadAll(session)
+				_, _ = io.WriteString(session, respond(payload.Command, input))
+				_, _ = session.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+				_ = session.Close()
+				break
+			}
+		}
 	}()
-	c, err := New(Config{Address: listener.Addr().String(), User: "albert", KeyFile: filepath.Join(dir, "key"), KnownHostsFile: known})
-	if err != nil {
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("SSH fixture did not stop")
+		}
+	})
+	return listener.Addr().String()
+}
+
+func TestSSHAuthenticationAndCancellation(t *testing.T) {
+	for _, cfg := range []Config{{}, {Password: "secret", KeyFile: "private-path"}, {KeyFile: "missing-private-path"}} {
+		if _, err := New(cfg); err == nil || strings.Contains(err.Error(), "private-path") || strings.Contains(err.Error(), "secret") {
+			t.Fatal("invalid auth accepted or leaked")
+		}
+	}
+	_, private, _ := ed25519.GenerateKey(rand.Reader)
+	key, _ := ssh.MarshalPrivateKey(private, "test")
+	keyPath := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(key), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = c.Execute(context.Background(), domain.ComputerRequest{Action: "status"}); err == nil || !strings.Contains(err.Error(), "verification") {
-		t.Fatalf("untrusted server accepted: %v", err)
+	c, err := New(Config{User: "test-user", KeyFile: keyPath})
+	if err != nil {
+		t.Fatal(err)
 	}
 	// A peer that accepts TCP but never speaks SSH must not pin a worker.
 	listener2, err := net.Listen("tcp", "127.0.0.1:0")
@@ -88,7 +192,7 @@ func realClient(t *testing.T) *Client {
 	if address == "" {
 		t.Skip("set OPENALBERT_TEST_COMPUTER_ADDRESS using tools/smoke/computer-smoke.py")
 	}
-	c, err := New(Config{Address: address, User: "albert", KeyFile: os.Getenv("OPENALBERT_TEST_COMPUTER_KEY"), KnownHostsFile: os.Getenv("OPENALBERT_TEST_COMPUTER_KNOWN_HOSTS")})
+	c, err := New(Config{Address: address, User: "albert", KeyFile: os.Getenv("OPENALBERT_TEST_COMPUTER_KEY")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +226,45 @@ func execRequest(id, command string) domain.ComputerRequest {
 
 func TestRealComputer(t *testing.T) {
 	c := realClient(t)
+	t.Run("first connection, home workspace and immutable updates", func(t *testing.T) {
+		out := execute(t, c, domain.ComputerRequest{Action: "exec", ExecutionID: "dddddddddddddddddddddddddddddddd", Command: `pwd; test ! -e /usr/local/bin/openalbert-computer`, TimeoutSeconds: 20, WaitSeconds: 1})
+		if out.State != "completed" || out.Stdout != "/home/albert/.openalbert/workspace\n" {
+			t.Fatalf("automatic installation/default cwd failed: %+v", out)
+		}
+		old := execRequest("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", `echo started; sleep 30; touch update-should-not-exist`)
+		out = execute(t, c, old)
+		if out.State != "running" || out.Stdout != "started\n" {
+			t.Fatalf("old version did not start: %+v", out)
+		}
+		updated := *c
+		updated.runner += "\n# synthetic updated runner\n"
+		queued := execRequest("ffffffffffffffffffffffffffffffff", `printf updated`)
+		queued.WaitSeconds = 0
+		out = execute(t, &updated, queued)
+		if out.State != "queued" {
+			t.Fatalf("update lost shared machine lock: %+v", out)
+		}
+		for _, source := range []string{c.runner, updated.runner} {
+			file := execute(t, &updated, domain.ComputerRequest{Action: "download", Path: "/home/albert/.openalbert/runners/" + runnerDigest(source) + ".py"})
+			if string(file.Data) != source {
+				t.Fatal("update replaced or corrupted a runner version")
+			}
+		}
+		out = execute(t, &updated, domain.ComputerRequest{Action: "status", ExecutionID: old.ExecutionID})
+		if out.State != "running" {
+			t.Fatalf("update interrupted old worker: %+v", out)
+		}
+		out = execute(t, &updated, domain.ComputerRequest{Action: "cancel", ExecutionID: old.ExecutionID})
+		if out.State != "cancelled" {
+			t.Fatalf("new runner cannot cancel old worker: %+v", out)
+		}
+		if out = await(t, &updated, queued.ExecutionID); out.State != "completed" || out.Stdout != "updated" {
+			t.Fatalf("new worker failed: %+v", out)
+		}
+		if out = execute(t, &updated, old); out.State != "cancelled" {
+			t.Fatal("update replayed an existing execution")
+		}
+	})
 	t.Run("sudo, binary files and replay", func(t *testing.T) {
 		id := "11111111111111111111111111111111"
 		r := execRequest(id, `printf 'one\n' >> counter; sudo -n id -u; printf 'error' >&2`)
@@ -238,6 +381,21 @@ func TestRealComputer(t *testing.T) {
 			t.Fatal(out)
 		}
 	})
+}
+
+func TestRealComputerPassword(t *testing.T) {
+	address, password := os.Getenv("OPENALBERT_TEST_COMPUTER_ADDRESS"), os.Getenv("OPENALBERT_TEST_COMPUTER_PASSWORD")
+	if address == "" || password == "" {
+		t.Skip("password smoke phase")
+	}
+	c, err := New(Config{Address: address, User: "worker", Password: password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := execute(t, c, domain.ComputerRequest{Action: "exec", ExecutionID: "01010101010101010101010101010101", Command: `id -un; pwd; ! sudo -n true 2>/dev/null`, TimeoutSeconds: 10, WaitSeconds: 1})
+	if out.State != "completed" || out.Stdout != "worker\n/home/worker/.openalbert/workspace\n" {
+		t.Fatalf("password execution failed: %+v", out)
+	}
 }
 
 // The smoke harness recreates the container, retaining its home/workspace and

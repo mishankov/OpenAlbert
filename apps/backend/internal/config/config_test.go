@@ -26,13 +26,44 @@ func TestComputerConnectionSettings(t *testing.T) {
 	for _, address := range []string{"", "computer:22", "[::1]:2222", "secret-invalid", "user@host:22", "host:0", "host:65536"} {
 		env := validEnv()
 		env["COMPUTER_SSH_ADDRESS"] = address
+		env["COMPUTER_SSH_KEY_FILE"] = "/data/computer/key"
 		c, err := load(func(k string) string { return env[k] })
 		valid := address == "" || address == "computer:22" || address == "[::1]:2222"
 		if (err == nil) != valid || (err != nil && strings.Contains(err.Error(), "secret-invalid")) {
 			t.Fatalf("computer address: %v", err)
 		}
-		if valid && (c.ComputerSSHUser != "albert" || c.ComputerSSHKnownHostsFile == "") {
+		if valid && (c.ComputerSSHUser != "albert" || c.ComputerSSHKeyFile != "/data/computer/key") {
 			t.Fatal("missing SSH defaults")
+		}
+	}
+}
+
+func TestComputerAuthenticationSettings(t *testing.T) {
+	for _, tc := range []struct {
+		password, key string
+		valid         bool
+	}{
+		{}, {password: " private-password ", valid: true},
+		{key: "/private-key", valid: true}, {password: "private-password", key: "/private-key"},
+	} {
+		env := validEnv()
+		env["COMPUTER_SSH_ADDRESS"] = "computer:22"
+		env["COMPUTER_SSH_PASSWORD"] = tc.password
+		env["COMPUTER_SSH_KEY_FILE"] = tc.key
+		cfg, err := load(func(k string) string { return env[k] })
+		if (err == nil) != tc.valid {
+			t.Fatalf("unexpected auth validation: %v", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "private-") {
+			t.Fatal("credentials leaked")
+		}
+		if tc.valid && cfg.ComputerSSHPassword != tc.password {
+			t.Fatal("password whitespace changed")
+		}
+		// A disabled computer does not validate or use leftover credentials.
+		env["COMPUTER_SSH_ADDRESS"] = ""
+		if _, err := load(func(k string) string { return env[k] }); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

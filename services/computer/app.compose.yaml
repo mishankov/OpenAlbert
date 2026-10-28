@@ -4,6 +4,7 @@ services:
     networks: [default, user-computer]
     environment:
       COMPUTER_SSH_ADDRESS: "${COMPUTER_SSH_ADDRESS-computer:22}"
+      COMPUTER_SSH_KEY_FILE: "${COMPUTER_SSH_KEY_FILE:-/data/computer/id_ed25519}"
     volumes:
       - ${COMPUTER_DIRECTORY:?Set COMPUTER_DIRECTORY to the absolute user-computer directory}/client:/data/computer:ro
 

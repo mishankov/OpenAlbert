@@ -102,7 +102,7 @@ def status(job, request):
 
 def validate_execution(request):
     command = request.get("command")
-    cwd = request.get("cwd", "/workspace")
+    cwd = request.get("cwd") or str(Path.home() / ".openalbert" / "workspace")
     timeout = request.get("timeout_seconds", 300)
     if not isinstance(command, str) or not command.strip() or len(command.encode()) > 32000 or "\0" in command:
         raise ValueError("command must contain 1–32000 bytes without NUL")

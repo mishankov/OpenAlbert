@@ -13,30 +13,34 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 	"openalbert/apps/backend/internal/domain"
 )
 
-type Config struct{ Address, User, KeyFile, KnownHostsFile string }
+type Config struct{ Address, User, Password, KeyFile string }
 type Client struct {
 	address string
 	config  *ssh.ClientConfig
+	runner  string
 }
 
 func New(c Config) (*Client, error) {
-	key, err := os.ReadFile(c.KeyFile)
-	if err != nil {
-		return nil, errors.New("cannot read computer SSH identity")
+	if (c.Password == "") == (c.KeyFile == "") {
+		return nil, errors.New("set exactly one of COMPUTER_SSH_PASSWORD or COMPUTER_SSH_KEY_FILE")
 	}
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		return nil, errors.New("invalid computer SSH identity")
+	auth := ssh.Password(c.Password)
+	if c.KeyFile != "" {
+		key, err := os.ReadFile(c.KeyFile)
+		if err != nil {
+			return nil, errors.New("cannot read computer SSH identity")
+		}
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			return nil, errors.New("invalid computer SSH identity")
+		}
+		auth = ssh.PublicKeys(signer)
 	}
-	verify, err := knownhosts.New(c.KnownHostsFile)
-	if err != nil {
-		return nil, errors.New("cannot read computer SSH known hosts")
-	}
-	return &Client{address: c.Address, config: &ssh.ClientConfig{User: c.User, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: verify}}, nil
+	// User-managed computers intentionally do not require known_hosts or pinning.
+	return &Client{address: c.Address, config: &ssh.ClientConfig{User: c.User, Auth: []ssh.AuthMethod{auth}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}, runner: runnerSource}, nil
 }
 
 // Limit transport time independently of the remote job's execution timeout.
@@ -56,10 +60,14 @@ func (c *Client) Execute(ctx context.Context, req domain.ComputerRequest) (domai
 	_ = conn.SetDeadline(deadline)
 	sshConn, channels, requests, err := ssh.NewClientConn(conn, c.address, c.config)
 	if err != nil {
-		return out, errors.New("computer SSH authentication or host verification failed")
+		return out, errors.New("computer SSH authentication failed")
 	}
 	client := ssh.NewClient(sshConn, channels, requests)
 	defer client.Close()
+	command, err := prepareRunner(client, c.runner)
+	if err != nil {
+		return out, err
+	}
 	session, err := client.NewSession()
 	if err != nil {
 		return out, errors.New("cannot open computer SSH session")
@@ -73,7 +81,7 @@ func (c *Client) Execute(ctx context.Context, req domain.ComputerRequest) (domai
 	response := &boundedBuffer{limit: 30 << 20}
 	session.Stdout = response
 	session.Stderr = io.Discard // Never echo remote diagnostics or credentials into transport errors.
-	if err = session.Run("openalbert-computer"); err != nil {
+	if err = session.Run(command); err != nil {
 		return out, errors.New("computer response lost; use computer_execution_status with the same execution ID; do not blindly repeat the command")
 	}
 	if response.overflow || json.Unmarshal(response.Bytes(), &out) != nil {

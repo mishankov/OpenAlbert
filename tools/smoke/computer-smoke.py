@@ -39,17 +39,13 @@ def main():
             run(["docker", "create", "--name", holder, *mounts, args.image], stdout=subprocess.DEVNULL)
             try:
                 run(["docker", "cp", holder + ":/client/id_ed25519", str(folder / "key")])
-                run(["docker", "cp", holder + ":/client/known_hosts", str(folder / "known_hosts")])
             finally:
                 run(["docker", "rm", holder], stdout=subprocess.DEVNULL)
 
             def environment():
                 address = subprocess.check_output(["docker", "port", name, "22/tcp"], text=True).strip()
-                trusted = (folder / "known_hosts").read_text().split(" ", 1)[1]
-                (folder / "test_known_hosts").write_text("[" + address.replace(":", "]:", 1) + " " + trusted)
                 env = dict(os.environ, OPENALBERT_TEST_COMPUTER_ADDRESS=address,
-                           OPENALBERT_TEST_COMPUTER_KEY=str(folder / "key"),
-                           OPENALBERT_TEST_COMPUTER_KNOWN_HOSTS=str(folder / "test_known_hosts"))
+                           OPENALBERT_TEST_COMPUTER_KEY=str(folder / "key"))
                 return env
 
             def ready():
@@ -63,6 +59,18 @@ def main():
 
             ready()
             run(["go", "test", "-race", "-count=1", "./apps/backend/internal/computer", "-run", "^TestRealComputer$"], env=environment())
+            # Only this disposable fixture enables a synthetic password. The
+            # optional user-computer template remains public-key-only by default.
+            run(["docker", "exec", name, "sh", "-ec",
+                 "useradd --create-home --shell /bin/bash worker; "
+                 "printf 'worker:synthetic-smoke-password\\n' | chpasswd; "
+                 "sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/; "
+                 "s/^AuthenticationMethods publickey/AuthenticationMethods any/; "
+                 "s/^AllowUsers albert/AllowUsers albert worker/' /etc/ssh/sshd_config; "
+                 "kill -HUP $(cat /run/sshd.pid)"])
+            env = environment()
+            env["OPENALBERT_TEST_COMPUTER_PASSWORD"] = "synthetic-smoke-password"
+            run(["go", "test", "-race", "-count=1", "./apps/backend/internal/computer", "-run", "^TestRealComputerPassword$"], env=env)
             # Ensure the command started before destroying its supervisor.
             time.sleep(0.3)
             run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL)
@@ -71,7 +79,10 @@ def main():
             env = environment()
             env["OPENALBERT_TEST_COMPUTER_RESTARTED"] = "1"
             run(["go", "test", "-race", "-count=1", "./apps/backend/internal/computer", "-run", "^TestRealComputerAfterRestart$"], env=env)
-            print("Computer SSH, sudo, transfers, retries, cancellation, output limits and recreation: OK")
+            print("Computer bootstrap, updates, key/password auth, transfers, retries, cancellation and recreation: OK")
+    except BaseException:
+        subprocess.run(["docker", "logs", name], check=False)
+        raise
     finally:
         subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for volume in volumes:
