@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
 	"unicode/utf8"
 
 	"openalbert/apps/backend/internal/domain"
@@ -38,7 +37,6 @@ type Telegram struct {
 	users    map[int64]bool
 	groups   map[int64]bool
 	username string // Set by ConfigureCommands before polling starts.
-	botID    int64
 }
 type Update struct {
 	Offset   int64
@@ -119,7 +117,6 @@ func NewTelegram(c TelegramConfig) (*Telegram, error) {
 // command menu. Call before Poll; getMe identifies commands addressed to this bot.
 func (t *Telegram) ConfigureCommands(ctx context.Context) error {
 	var me struct {
-		ID       int64  `json:"id"`
 		Username string `json:"username"`
 	}
 	if err := t.api(ctx, "getMe", map[string]any{}, &me); err != nil {
@@ -129,7 +126,6 @@ func (t *Telegram) ConfigureCommands(ctx context.Context) error {
 		return errors.New("Telegram bot username missing")
 	}
 	t.username = me.Username
-	t.botID = me.ID
 	commands := []map[string]string{
 		{"command": "new", "description": "Начать новый диалог"},
 		{"command": "stop", "description": "Остановить текущую работу"},
@@ -217,18 +213,16 @@ type telegramFile struct {
 	Size     int64  `json:"file_size"`
 }
 type telegramMessage struct {
-	Entities        []telegramEntity     `json:"entities"`
-	CaptionEntities []telegramEntity     `json:"caption_entities"`
-	ID              int64                `json:"message_id"`
-	ThreadID        int                  `json:"message_thread_id"`
-	IsTopicMessage  bool                 `json:"is_topic_message"`
-	Date            int64                `json:"date"`
-	Text            string               `json:"text"`
-	Caption         string               `json:"caption"`
-	ReplyTo         *telegramMessage     `json:"reply_to_message"`
-	Quote           *domain.MessageQuote `json:"quote"`
-	RichMessage     json.RawMessage      `json:"rich_message"`
-	From            *struct {
+	ID             int64                `json:"message_id"`
+	ThreadID       int                  `json:"message_thread_id"`
+	IsTopicMessage bool                 `json:"is_topic_message"`
+	Date           int64                `json:"date"`
+	Text           string               `json:"text"`
+	Caption        string               `json:"caption"`
+	ReplyTo        *telegramMessage     `json:"reply_to_message"`
+	Quote          *domain.MessageQuote `json:"quote"`
+	RichMessage    json.RawMessage      `json:"rich_message"`
+	From           *struct {
 		ID        int64  `json:"id"`
 		FirstName string `json:"first_name"`
 		LastName  string `json:"last_name"`
@@ -245,47 +239,6 @@ type telegramMessage struct {
 	Voice    *telegramFile  `json:"voice"`
 	Audio    *telegramFile  `json:"audio"`
 	Video    *telegramFile  `json:"video"`
-}
-
-type telegramEntity struct {
-	Type   string `json:"type"`
-	Offset int    `json:"offset"`
-	Length int    `json:"length"`
-	User   *struct {
-		ID int64 `json:"id"`
-	} `json:"user"`
-}
-
-// Use Telegram entity boundaries (UTF-16), not substring matching or the
-// model's interpretation. Replies to other bots do not address this bot.
-func (t *Telegram) addressedToBot(m *telegramMessage) bool {
-	if m.ReplyTo != nil && m.ReplyTo.From != nil && m.ReplyTo.From.IsBot {
-		from := m.ReplyTo.From
-		if (t.botID > 0 && from.ID == t.botID) || (t.botID == 0 && t.username != "" && strings.EqualFold(from.Username, t.username)) {
-			return true
-		}
-	}
-	text, entities := m.Text, m.Entities
-	if text == "" {
-		text, entities = m.Caption, m.CaptionEntities
-	}
-	units := utf16.Encode([]rune(text))
-	for _, entity := range entities {
-		if entity.Offset < 0 || entity.Length <= 0 || entity.Offset > len(units) || entity.Length > len(units)-entity.Offset {
-			continue
-		}
-		if entity.Type == "text_mention" && t.botID > 0 && entity.User != nil && entity.User.ID == t.botID {
-			return true
-		}
-		if entity.Type != "mention" || t.username == "" {
-			continue
-		}
-		mention := string(utf16.Decode(units[entity.Offset : entity.Offset+entity.Length]))
-		if strings.EqualFold(mention, "@"+t.username) {
-			return true
-		}
-	}
-	return false
 }
 
 func telegramReplyContext(m *telegramMessage) *domain.ReplyContext {
@@ -362,7 +315,6 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 			incoming.Text = m.Caption
 		}
 		incoming.ReplyTo = telegramReplyContext(m.ReplyTo)
-		incoming.AddressedToBot = t.addressedToBot(m)
 		incoming.Quote = m.Quote
 		add := func(f *telegramFile, kind, name, mime string) {
 			if f == nil {
