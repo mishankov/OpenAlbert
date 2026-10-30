@@ -590,7 +590,7 @@ function memoryShell() {
   state.memories = [];
   state.memoryNext = 0;
   document.title = "Память · OpenAlbert Inspector";
-  main.innerHTML = `<div class="session-toolbar memory-toolbar"><div class="session-heading"><h2>Память</h2><span class="muted">Текущие записи · сначала обновлённые</span></div><div class="memory-filters"><label>Разговор<select id="memory-scope"><option value="">Загружаем разговоры…</option></select></label><label>Поиск<div class="search-wrap"><input id="memory-search" type="search" placeholder="Текст, ID, источник или участник…" autocomplete="off" value="${esc(state.memoryQuery)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></label><label>Тип<select id="memory-kind"><option value="">Все типы</option>${Object.entries(memoryKinds).map(([key, title]) => `<option value="${key}" ${state.memoryKind === key ? "selected" : ""}>${title}</option>`).join("")}</select></label></div><p class="memory-hint">Все слова запроса должны встречаться в одной записи. Поиск без учёта регистра.</p></div><div id="memory-error" class="error hidden" role="alert"></div><details id="memory-soul" class="analysis-row"><summary title="Раскрыть или свернуть SOUL.md · Enter" aria-keyshortcuts="Enter">Личность SOUL.md <span class="muted">Имя, характер и правила общения OpenAlbert · общие для всех разговоров</span></summary><div class="run-body" aria-busy="true"><div id="soul-error" class="error hidden" role="alert"></div><pre class="prose" role="status">Загружаем SOUL.md…</pre></div></details><details id="memory-profile" class="analysis-row hidden"><summary>Профиль USER.md <span class="muted">Контекст новых сессий этого разговора</span></summary><div class="run-body"><pre class="prose"></pre></div></details><div id="memory-list" aria-busy="true"><div class="loading-line" role="status">Загружаем память…</div></div><div class="pagination"><span id="memory-count" role="status"></span><button id="more-memory" class="button hidden" title="Загрузить ещё записи · Enter" aria-keyshortcuts="Enter">Ещё записи</button></div>`;
+  main.innerHTML = `<div class="session-toolbar memory-toolbar"><div class="session-heading"><h2>Память</h2><span class="muted">Текущие записи · сначала обновлённые</span></div><div class="memory-filters"><label>Разговор<select id="memory-scope"><option value="">Загружаем разговоры…</option></select></label><label>Поиск<div class="search-wrap"><input id="memory-search" type="search" placeholder="Текст, ID, источник или участник…" autocomplete="off" value="${esc(state.memoryQuery)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></label><label>Тип<select id="memory-kind"><option value="">Все типы</option>${Object.entries(memoryKinds).map(([key, title]) => `<option value="${key}" ${state.memoryKind === key ? "selected" : ""}>${title}</option>`).join("")}</select></label></div><p class="memory-hint">Все слова запроса должны встречаться в одной записи. Поиск без учёта регистра.</p></div><div id="memory-error" class="error hidden" role="alert"></div><details id="memory-soul" class="analysis-row"><summary title="Раскрыть или свернуть SOUL.md · Enter" aria-keyshortcuts="Enter">Личность SOUL.md <span class="muted">Имя, характер и правила общения OpenAlbert · общие для всех разговоров</span></summary><div class="run-body" aria-busy="true"><div id="soul-error" class="error hidden" role="alert"></div><pre class="prose" role="status">Загружаем SOUL.md…</pre></div></details><details id="memory-group" class="analysis-row hidden"><summary title="Раскрыть или свернуть GROUP.md · Enter / Пробел" aria-keyshortcuts="Enter Space">Правила группы GROUP.md <span class="muted">Общие для всех топиков выбранной группы</span></summary><div class="run-body" aria-busy="false"><div id="group-error" class="error hidden" role="alert"></div><pre class="prose" role="status"></pre></div></details><details id="memory-profile" class="analysis-row hidden"><summary>Профиль USER.md <span class="muted">Контекст новых сессий этого разговора</span></summary><div class="run-body"><pre class="prose"></pre></div></details><div id="memory-list" aria-busy="true"><div class="loading-line" role="status">Загружаем память…</div></div><div class="pagination"><span id="memory-count" role="status"></span><button id="more-memory" class="button hidden" title="Загрузить ещё записи · Enter" aria-keyshortcuts="Enter">Ещё записи</button></div>`;
 }
 async function loadSoul() {
   if (state.view !== "memory") return;
@@ -617,6 +617,33 @@ async function loadSoul() {
   }
 }
 
+async function loadGroupRules(scope, isGroup, token) {
+  const section = $("#memory-group");
+  section.dataset.scope = scope;
+  section.classList.toggle("hidden", !isGroup);
+  $("#group-error").classList.add("hidden");
+  $("#memory-group pre").textContent = "";
+  $("#memory-group .run-body").setAttribute("aria-busy", "false");
+  if (!isGroup) return;
+  $("#memory-group .run-body").setAttribute("aria-busy", "true");
+  $("#memory-group pre").textContent = "Загружаем GROUP.md…";
+  try {
+    const { group } = await api("memory/group?" + new URLSearchParams({ conversation_id: scope }));
+    if (token !== state.memoryToken || state.view !== "memory") return;
+    $("#memory-group pre").textContent = group?.trim()
+      ? group
+      : "Дополнительные правила не заданы: GROUP.md не создан или пуст. Действуют общие правила и SOUL.md.";
+  } catch (error) {
+    if (token !== state.memoryToken || state.view !== "memory") return;
+    $("#group-error").textContent = `Не удалось загрузить GROUP.md. ${error.message} Нажмите «Обновить» (Alt+R).`;
+    $("#group-error").classList.remove("hidden");
+    $("#memory-group pre").textContent = "";
+  } finally {
+    if (token === state.memoryToken && state.view === "memory")
+      $("#memory-group .run-body").setAttribute("aria-busy", "false");
+  }
+}
+
 function scheduleMemory() {
   clearTimeout(memoryDebounce);
   ++state.memoryToken;
@@ -629,6 +656,11 @@ function scheduleMemory() {
   $("#memory-count").textContent = "";
   $("#more-memory").classList.add("hidden");
   $("#memory-profile").classList.add("hidden");
+  if ($("#memory-group").dataset.scope !== state.memoryScope) {
+    $("#memory-group").classList.add("hidden");
+    $("#memory-group pre").textContent = "";
+    $("#group-error").classList.add("hidden");
+  }
   $("#memory-error").classList.add("hidden");
   memoryDebounce = setTimeout(() => loadMemory(), 250);
 }
@@ -642,6 +674,7 @@ async function loadMemory(more = false) {
   $("#memory-list").setAttribute("aria-busy", "true");
   $("#more-memory").disabled = true;
   $("#memory-error").classList.add("hidden");
+  let groupLoad;
   try {
     if (!more) {
       const { conversations } = await api("memory/conversations");
@@ -655,6 +688,8 @@ async function loadMemory(more = false) {
         ? choices.map((c) => `<option value="${esc(c.id)}" ${c.id === state.memoryScope ? "selected" : ""}>${esc(c.title || (c.private ? "Личный разговор" : "Групповой разговор"))} · ${esc(c.id)}</option>`).join("")
         : '<option value="">Разговоров пока нет</option>';
       $("#memory-scope").disabled = !choices.length;
+      const selected = conversations.find((c) => c.id === state.memoryScope);
+      groupLoad = loadGroupRules(state.memoryScope, selected && !selected.private && selected.chat_id < 0, token);
     }
     const result = state.memoryScope
       ? await api("memory?" + new URLSearchParams({
@@ -677,6 +712,7 @@ async function loadMemory(more = false) {
       [...main.querySelectorAll("[data-memory]")].find((el) => el.dataset.memory === focusedID)?.focus({ preventScroll: true });
     $("#memory-count").textContent = `Записи: ${state.memories.length} из ${result.total}`;
     $("#more-memory").classList.toggle("hidden", !state.memoryNext);
+    $("#memory-list").setAttribute("aria-busy", "false");
   } catch (error) {
     if (token !== state.memoryToken || state.view !== "memory") return;
     $("#memory-error").textContent = error.message;
@@ -684,6 +720,7 @@ async function loadMemory(more = false) {
     if (!state.memories.length)
       $("#memory-list").innerHTML = '<div class="empty-panel">Не удалось загрузить память. Нажмите «Обновить» (Alt+R).</div>';
   } finally {
+    await groupLoad;
     if (token === state.memoryToken && state.view === "memory") {
       state.memoryBusy = false;
       setBusy(state.busy);
