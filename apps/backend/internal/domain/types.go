@@ -27,6 +27,7 @@ type Attachment struct {
 	ArtifactID       string `json:"artifact_id,omitempty"`
 }
 type Incoming struct {
+	AddressedToBot bool          `json:"addressed_to_bot,omitempty"` // Verified Telegram mention or reply to this bot.
 	Source         string        `json:"source,omitempty"`
 	TaskContextID  string        `json:"task_context_id,omitempty"`
 	Command        string        `json:"command,omitempty"` // Validated transport command, without slash or bot username.
@@ -264,6 +265,8 @@ type Skill struct {
 	Content     string `json:"content,omitempty"`
 }
 type Knowledge interface {
+	GroupSettings(context.Context, GroupSettingsTarget) (GroupSettingsView, error)
+	UpdateGroupSettings(context.Context, GroupSettingsTarget, GroupSettingsPatch) (GroupSettingsView, error)
 	ObserveParticipant(context.Context, Participant) error
 	Participants(context.Context, string, string) ([]Participant, error)
 	Participant(context.Context, string, int64) (ParticipantProfile, error)

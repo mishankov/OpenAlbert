@@ -128,11 +128,22 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 		return out, err
 	}
 	out = Turn{Input: in, Conversation: conv}
-	a.startProgress(ctx, in, conv)
+	var groupSettings domain.GroupSettings
+	if !conv.Private && conv.ChatID < 0 {
+		settings, e := a.Knowledge.GroupSettings(ctx, domain.GroupSettingsTarget{GroupID: conv.ChatID, ConversationID: conv.ID})
+		if e != nil {
+			return out, e
+		}
+		groupSettings = settings.Effective
+	}
+	if groupSettings.ReplyMode != "direct_only" {
+		a.startProgress(ctx, in, conv)
+	}
 	if err = a.Repo.StartSession(ctx, domain.Session{ID: in.SessionID, ConversationID: conv.ID, Status: "active", CreatedAt: time.Now().UTC()}); err != nil {
 		return
 	}
 	accepted := 0
+	addressed := false
 	for _, id := range in.IncomingIDs {
 		if _, done, e := a.Repo.LoadCheckpoint(ctx, "incoming-done/"+id); e != nil {
 			return out, e
@@ -155,6 +166,7 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 			}
 		}
 		accepted++
+		addressed = addressed || msg.AddressedToBot
 		if !msg.CreatedAt.IsZero() && (out.ReceivedAt.IsZero() || msg.CreatedAt.Before(out.ReceivedAt)) {
 			out.ReceivedAt = msg.CreatedAt
 		}
@@ -216,6 +228,18 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 		out.Done = true
 		return out, nil
 	}
+	var groupBehavior string
+	if !conv.Private && conv.ChatID < 0 {
+		if groupSettings.ReplyMode == "direct_only" && in.TaskID == "" && !in.Initiative && len(in.IncomingIDs) > 0 && !addressed {
+			out.Done = true
+			out.Stats.FinishReason = "group_direct_only"
+			return out, nil
+		}
+		groupBehavior = groupSettingsContext(groupSettings)
+	}
+	if groupSettings.ReplyMode == "direct_only" {
+		a.startProgress(ctx, in, conv)
+	}
 	history, err := a.Repo.Messages(ctx, in.SessionID)
 	if err != nil {
 		return out, err
@@ -256,7 +280,9 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 		catalog = append(catalog, s.Name+": "+s.Description)
 	}
 	system := rules + "\nCurrent time: " + time.Now().UTC().Format(time.RFC3339) + "\nSOUL:\n" + clip(soul, 12000) + "\nUSER profile:\n" + clip(profile, 8000) + "\nActive skills (read full skill when needed):\n" + strings.Join(catalog, "\n")
+	system += groupBehavior
 	if a.isOwnerPrivate(conv) {
+		system += "\nFor requests to change behavior in groups, use group_settings_read/update rather than memory_update. Saving a private preference does not configure a group. Select the exact group/topic via conversation_list when needed and ask if ambiguous. Use all_groups only when the owner requests behavior across groups. Confirm the target and effective settings only after a successful update; settings apply on the next prepared turn. Do not infer settings from old private memories."
 		system += "\nYou are speaking privately with your owner. You may recall all saved group conversations via conversation_list and conversation_history, including sessions that are still active. memory_search can search your private and group memories. Use these tools when asked about group discussions or when group context would help; cite the originating conversation. Never invent messages or assume Telegram delivered every message. Ordinary replies go to this private chat. When your owner explicitly asks you to post in a group, use conversation_list to select the exact conversation_id and send_group_message to queue only the requested public text. If the group or topic is ambiguous, ask which one. Do not forward private history, memories or the owner's instruction itself. send_group_message does not finish your turn: then acknowledge the queued group message privately with send_message. A queued result is not proof of Telegram delivery; never repost to get a delivery confirmation."
 	} else {
 		system += "\nThis conversation can read only its own history and memories. Do not reveal or search other conversations."
@@ -394,6 +420,8 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 	// into a successful task mutation after its execution context changes.
 	var accessErr error
 	switch in.Call.Name {
+	case "group_settings_read", "group_settings_update":
+		accessErr = a.groupSettingsAccess(in)
 	case "computer_exec", "computer_execution_status", "computer_execution_cancel", "computer_upload", "computer_download":
 		accessErr = a.computerAccess(in)
 	case "backup_status":
