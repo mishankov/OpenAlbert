@@ -16,14 +16,15 @@ type Conversation struct {
 	Private         bool   `json:"private"`
 }
 type Attachment struct {
-	SizeBytes       int64  `json:"size_bytes,omitempty"`
-	DurationSeconds int    `json:"duration_seconds,omitempty"`
-	FileID          string `json:"file_id,omitempty"`
-	Name            string `json:"name"`
-	MIME            string `json:"mime"`
-	Kind            string `json:"kind"`
-	Data            []byte `json:"-"`
-	ArtifactID      string `json:"artifact_id,omitempty"`
+	ReplyToMessageID int64  `json:"reply_to_message_id,omitempty"` // Image from the referenced Telegram message, not the current sender.
+	SizeBytes        int64  `json:"size_bytes,omitempty"`
+	DurationSeconds  int    `json:"duration_seconds,omitempty"`
+	FileID           string `json:"file_id,omitempty"`
+	Name             string `json:"name"`
+	MIME             string `json:"mime"`
+	Kind             string `json:"kind"`
+	Data             []byte `json:"-"`
+	ArtifactID       string `json:"artifact_id,omitempty"`
 }
 type Incoming struct {
 	Source         string        `json:"source,omitempty"`

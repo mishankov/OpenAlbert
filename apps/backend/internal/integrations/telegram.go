@@ -337,6 +337,20 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 			}
 			incoming.Command = command
 		}
+		// Only the immediate reply target is included. Reuse normal attachment
+		// download/size limits, while preserving its origin for model attribution.
+		if reply := m.ReplyTo; reply != nil && incoming.Command == "" {
+			start := len(incoming.Attachments)
+			if len(reply.Photo) > 0 {
+				photo := reply.Photo[len(reply.Photo)-1]
+				add(&photo, "image", "photo.jpg", "image/jpeg")
+			} else if reply.Document != nil && strings.HasPrefix(reply.Document.MIME, "image/") {
+				add(reply.Document, "image", "image.bin", reply.Document.MIME)
+			}
+			for i := start; i < len(incoming.Attachments); i++ {
+				incoming.Attachments[i].ReplyToMessageID = reply.ID
+			}
+		}
 		if incoming.Text != "" || len(incoming.Attachments) > 0 {
 			update.Incoming = &incoming
 		}
