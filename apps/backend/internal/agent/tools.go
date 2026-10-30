@@ -46,6 +46,8 @@ Use original Rich Markdown without MarkdownV2 escaping. Limits: 32000 UTF-8 byte
 
 func Definitions() []domain.Tool {
 	return []domain.Tool{
+		{Name: "group_read", Description: "Read the current GROUP.md for a known allowed Telegram group selected by conversation_id from conversation_list. One file is shared by ALL topics of that group. Missing or empty file means no extra group rules. Only in the installation owner's interactive private chat. Read before editing to preserve existing rules. Its contents should be suitable for group participants to see; does not read USER.md or private memories.", Parameters: schema(`"conversation_id":{"type":"string"}`, "conversation_id")},
+		{Name: "group_update", Description: "Edit GROUP.md when the owner asks to change a group's behavior from their interactive private chat. Select conversation_id with conversation_list; ask if the group is ambiguous. The file applies to the WHOLE group including all topics. Read with group_read first. Replace one exact old_text fragment with new_text, preserving unrelated rules; old_text must match once. For an empty or missing file use old_text=\"\" to create it. To clear rules replace the entire current text with new_text=\"\". Maximum 4000 characters. Store only the requested group-facing instructions, never copy the owner's private profile, history or reasons. Use this instead of merely saving a private preference. Confirm only after success, identifying the group; changes apply to the next prepared turn, including existing sessions. Behavior depends on model compliance; no mechanical mention filter. Never use for group participants, other private users or background runs.", Parameters: schema(`"conversation_id":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}`, "conversation_id", "old_text", "new_text")},
 		{Name: "report_progress", Description: "Update the single temporary status message for the current interactive request, without finishing the turn. Use during lengthy work at meaningful stage changes: briefly state what you have actually done, what you are doing next, or a concrete obstacle. Plain text, at most 600 characters, in the user's language. Do not invent findings, percentages, completion estimates or activity; do not include internal reasoning. The application delays the first status by 30 seconds, coalesces updates and edits at most once a minute; it may suppress quick requests. This is not a reply or delivery confirmation. Continue working and use send_message for the final answer. Never send intermediate updates via send_message.", Parameters: schema(`"text":{"type":"string"}`, "text")},
 		{Name: "web_search", Description: "Search the public web with Yandex; returns sources. Read sources before asserting facts.", Parameters: schema(`"query":{"type":"string"}`, "query")},
 		{Name: "web_read", Description: "Fetch plain text from a known public HTTP(S) URL. Use for static articles, documentation or plain-text files when only their text is needed. Does not run JavaScript or share browser cookies. HTML extraction discards link destinations and flattens headings, lists and tables; long results may be truncated. For search results, catalogs, following links, structured tables or JavaScript content, use the listed browser tools. An HTTP success may contain a CAPTCHA or an empty page; check that the requested content is actually present. Private network addresses are forbidden.", Parameters: schema(`"url":{"type":"string"}`, "url")},
@@ -146,6 +148,19 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 	key := ID(in.RunKey, fmt.Sprint(in.Step), in.Call.ID)
 	now := time.Now().UTC()
 	switch in.Call.Name {
+	case "group_read", "group_update":
+		target, err := a.groupRulesTarget(ctx, in, p.ConversationID)
+		if err != nil {
+			return nil, err
+		}
+		if in.Call.Name == "group_read" {
+			content, err := a.Knowledge.GroupRules(ctx, target.ChatID)
+			return map[string]any{"group_id": target.ChatID, "conversation_id": target.ID, "scope": "whole_group", "content": content}, err
+		}
+		if err := a.Knowledge.UpdateGroupRules(ctx, target.ChatID, p.OldText, p.NewText); err != nil {
+			return nil, err
+		}
+		return map[string]any{"state": "updated", "group_id": target.ChatID, "conversation_id": target.ID, "scope": "whole_group", "applies": "next_turn"}, nil
 	case "web_search":
 		if !a.searchEnabled() {
 			return nil, errors.New("web_search API tool is disabled; use listed browser tools to find sources or web_read for a known public URL")
@@ -547,6 +562,9 @@ func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 	interactive := turn.Input.TaskID == "" && !turn.Input.Initiative
 	filtered := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
+		if (tool.Name == "group_read" || tool.Name == "group_update") && (!a.isOwnerPrivate(turn.Conversation) || !interactive) {
+			continue
+		}
 		if strings.HasPrefix(tool.Name, "computer_") && (!a.isOwnerPrivate(turn.Conversation) || turn.Input.Initiative) {
 			continue
 		}

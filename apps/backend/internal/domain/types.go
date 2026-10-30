@@ -264,6 +264,8 @@ type Skill struct {
 	Content     string `json:"content,omitempty"`
 }
 type Knowledge interface {
+	GroupRules(context.Context, int64) (string, error)
+	UpdateGroupRules(context.Context, int64, string, string) error
 	ObserveParticipant(context.Context, Participant) error
 	Participants(context.Context, string, string) ([]Participant, error)
 	Participant(context.Context, string, int64) (ParticipantProfile, error)
