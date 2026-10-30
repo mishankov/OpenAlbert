@@ -172,7 +172,7 @@ func TestTelegramPollAuthorizationScopesAndAttachments(t *testing.T) {
 		if body["offset"] != float64(10) {
 			t.Error("offset not preserved")
 		}
-		_, _ = io.WriteString(w, `{"ok":true,"result":[{"update_id":10,"message":{"message_id":1,"date":100,"from":{"id":7},"chat":{"id":7,"type":"private"},"text":"hello","photo":[{"file_id":"small"},{"file_id":"big"}]}},{"update_id":11,"message":{"date":100,"from":{"id":99},"chat":{"id":99,"type":"private"},"text":"intruder"}},{"update_id":12,"message":{"date":100,"from":{"id":7},"chat":{"id":-20,"type":"supergroup"},"message_thread_id":3,"caption":"caption","document":{"file_id":"doc","file_name":"report.txt","mime_type":"text/plain"}}},{"update_id":13,"message":{"date":100,"from":{"id":7},"chat":{"id":-21,"type":"group"},"text":"unapproved group"}},{"update_id":14,"callback_query":{}}]}`)
+		_, _ = io.WriteString(w, `{"ok":true,"result":[{"update_id":10,"message":{"message_id":1,"date":100,"from":{"id":7},"chat":{"id":7,"type":"private"},"text":"hello","photo":[{"file_id":"small"},{"file_id":"big"}]}},{"update_id":11,"message":{"date":100,"from":{"id":99},"chat":{"id":99,"type":"private"},"text":"intruder"}},{"update_id":12,"message":{"date":100,"from":{"id":7},"chat":{"id":-20,"type":"supergroup"},"message_thread_id":3,"is_topic_message":true,"caption":"caption","document":{"file_id":"doc","file_name":"report.txt","mime_type":"text/plain"}}},{"update_id":13,"message":{"date":100,"from":{"id":7},"chat":{"id":-21,"type":"group"},"text":"unapproved group"}},{"update_id":14,"callback_query":{}}]}`)
 	}))
 	defer s.Close()
 	tg, err := NewTelegram(TelegramConfig{Token: "secret", BaseURL: s.URL, AllowedUserIDs: []int64{7}, AllowedGroupIDs: []int64{-20}})

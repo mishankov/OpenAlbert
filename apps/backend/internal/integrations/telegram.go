@@ -213,15 +213,16 @@ type telegramFile struct {
 	Size     int64  `json:"file_size"`
 }
 type telegramMessage struct {
-	ID          int64                `json:"message_id"`
-	ThreadID    int                  `json:"message_thread_id"`
-	Date        int64                `json:"date"`
-	Text        string               `json:"text"`
-	Caption     string               `json:"caption"`
-	ReplyTo     *telegramMessage     `json:"reply_to_message"`
-	Quote       *domain.MessageQuote `json:"quote"`
-	RichMessage json.RawMessage      `json:"rich_message"`
-	From        *struct {
+	ID             int64                `json:"message_id"`
+	ThreadID       int                  `json:"message_thread_id"`
+	IsTopicMessage bool                 `json:"is_topic_message"`
+	Date           int64                `json:"date"`
+	Text           string               `json:"text"`
+	Caption        string               `json:"caption"`
+	ReplyTo        *telegramMessage     `json:"reply_to_message"`
+	Quote          *domain.MessageQuote `json:"quote"`
+	RichMessage    json.RawMessage      `json:"rich_message"`
+	From           *struct {
 		ID        int64  `json:"id"`
 		FirstName string `json:"first_name"`
 		LastName  string `json:"last_name"`
@@ -297,11 +298,17 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 			out = append(out, update)
 			continue
 		}
-		conv := domain.Conversation{Title: m.Chat.Title, ChatID: m.Chat.ID, ThreadID: m.ThreadID, OwnerID: m.From.ID, Private: private}
+		// Ordinary replies can also carry message_thread_id. Only forum topics
+		// have a separate conversation and an outgoing delivery thread.
+		threadID := 0
+		if m.IsTopicMessage {
+			threadID = m.ThreadID
+		}
+		conv := domain.Conversation{Title: m.Chat.Title, ChatID: m.Chat.ID, ThreadID: threadID, OwnerID: m.From.ID, Private: private}
 		if private {
 			conv.ID = fmt.Sprintf("personal:%d", m.From.ID)
 		} else {
-			conv.ID = fmt.Sprintf("telegram:group:%d:topic:%d", m.Chat.ID, m.ThreadID)
+			conv.ID = fmt.Sprintf("telegram:group:%d:topic:%d", m.Chat.ID, threadID)
 		}
 		incoming := domain.Incoming{AuthorName: strings.TrimSpace(m.From.FirstName + " " + m.From.LastName), AuthorUsername: m.From.Username, ID: fmt.Sprintf("telegram:%d", u.ID), Conversation: conv, Text: m.Text, CreatedAt: time.Unix(m.Date, 0).UTC()}
 		if incoming.Text == "" {
