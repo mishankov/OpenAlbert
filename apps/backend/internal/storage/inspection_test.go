@@ -7,9 +7,94 @@ import (
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/inspector"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 )
+
+func TestInspectionLegacyOrderAndArtifactScopePostgres(t *testing.T) {
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
+	}
+	ctx := context.Background()
+	repo, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+	id := fmt.Sprintf("inspection-scope-%d", time.Now().UnixNano())
+	for _, session := range []string{id, id + "-other"} {
+		if err = repo.StartSession(ctx, domain.Session{ID: session, ConversationID: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Duplicate turn references must not duplicate historical traces. Similar
+	// run-key prefixes in another session must not expose its model checkpoints.
+	for _, turn := range []struct{ key, session, run string }{
+		{id, id, id}, {id + "-duplicate", id, id}, {id + "-other", id + "-other", id + "-other"},
+	} {
+		raw, _ := json.Marshal(map[string]any{"Input": map[string]string{"SessionID": turn.session, "Key": turn.run}})
+		if err = repo.SaveCheckpoint(ctx, "turn-done/"+turn.key, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, run := range []string{id, id + "-other"} {
+		for _, step := range []int{2, 10, 11, 12} {
+			if err = repo.SaveCheckpoint(ctx, fmt.Sprintf("model/%s/%d", run, step), json.RawMessage(`{"Message":{"role":"assistant","content":"historical"}}`)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, step := range []int{10, 2} {
+		if err = repo.AppendMessage(ctx, id, fmt.Sprintf("%s/assistant/%d", id, step), domain.Message{Role: "assistant", Content: id + "-referenced"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, step := range []int{2, 10} {
+		status := "running"
+		if step == 2 {
+			status = "completed"
+		}
+		if err = repo.SaveTrace(ctx, domain.Trace{ID: fmt.Sprintf("%s-trace-%d", id, step), SessionID: id, TurnID: id, Step: step, Kind: "model", Status: status, StartedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, artifact := range []struct{ name, conversation, session string }{
+		{"direct", id, id}, {"referenced", id, id + "-other"},
+		{"unrelated", id, id + "-other"}, {"foreign", id + "-other", id},
+	} {
+		if err = repo.SaveArtifact(ctx, domain.Artifact{ID: id + "-" + artifact.name, SessionID: artifact.session, ConversationID: artifact.conversation, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, ok, err := repo.InspectSession(ctx, id, 0)
+	if err != nil || !ok || len(d.Messages) != 2 {
+		t.Fatalf("detail: found=%v err=%v", ok, err)
+	}
+	var historical []string
+	for _, trace := range d.Traces {
+		if trace.Historical {
+			historical = append(historical, trace.ID)
+		}
+	}
+	want := []string{"model/" + id + "/10", "model/" + id + "/11", "model/" + id + "/12"}
+	if !reflect.DeepEqual(historical, want) || len(d.Traces) != len(want)+2 {
+		t.Fatalf("historical order, scope or completed-trace deduplication: got %v, want %v; total=%d", historical, want, len(d.Traces))
+	}
+	// A later page must still include artifacts referenced by earlier messages.
+	d, ok, err = repo.InspectSession(ctx, id, d.Messages[1].Seq)
+	if err != nil || !ok || len(d.Messages) != 0 {
+		t.Fatalf("later page: found=%v err=%v", ok, err)
+	}
+	var artifacts []string
+	for _, artifact := range d.Artifacts {
+		artifacts = append(artifacts, artifact.ID)
+	}
+	if want := []string{id + "-direct", id + "-referenced"}; !reflect.DeepEqual(artifacts, want) {
+		t.Fatalf("artifact scope across pages: got %v, want %v", artifacts, want)
+	}
+}
 
 func TestInspectionPostgres(t *testing.T) {
 	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")

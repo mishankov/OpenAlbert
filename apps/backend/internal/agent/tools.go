@@ -356,7 +356,7 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 			audit.Set("mutation_id", key)
 			audit.Set("next_run_at", t.NextRunAt)
 			audit.Set("status", t.Status)
-			updated, updateErr = a.Repo.MaintainTask(ctx, in.TaskID, in.RunKey, key, t)
+			updated, updateErr = a.Repo.MaintainTask(audit.Context(), in.TaskID, in.RunKey, key, t)
 			audit.End(updateErr)
 		} else {
 			updated, updateErr = a.Repo.UpdateTask(ctx, t)

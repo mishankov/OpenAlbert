@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -28,7 +29,12 @@ type Store struct{ pool *pgxpool.Pool }
 var _ domain.Repository = (*Store)(nil)
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("postgres configuration: %w", err)
+	}
+	config.ConnConfig.Tracer = queryTracer{logger: slog.Default()}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("postgres configuration: %w", err)
 	}

@@ -102,6 +102,7 @@ func (a *Activities) event(ctx context.Context, name string) *telemetry.Event {
 func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err error) {
 	ctx = runContext(ctx, in)
 	ev := a.event(ctx, "turn.prepare")
+	ctx = ev.Context()
 	ev.Set("conversation_id", in.ConversationID)
 	ev.Set("session_id", in.SessionID)
 	ev.Set("task_id", in.TaskID)
@@ -302,6 +303,7 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOutput, err error) {
 	ctx = runContext(ctx, in.Turn.Input)
 	ev := a.event(ctx, "llm.complete")
+	ctx = ev.Context()
 	ev.Set("session_id", in.Turn.Input.SessionID)
 	ev.Set("task_id", in.Turn.Input.TaskID)
 	ev.Set("step", in.Step)
@@ -369,6 +371,7 @@ func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOut
 func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, err error) {
 	ctx = telemetry.WithFields(ctx, map[string]any{"turn_id": in.RunKey, "conversation_id": in.Conversation.ID, "trigger": in.TriggerName()})
 	ev := a.event(ctx, "tool.execute")
+	ctx = ev.Context()
 	ev.Set("tool", in.Call.Name)
 	ev.Set("session_id", in.SessionID)
 	ev.Set("task_id", in.TaskID)
@@ -464,6 +467,7 @@ func (a *Activities) Finish(ctx context.Context, in FinishInput) (err error) {
 		a.Browser.CloseSession(turn.Input.SessionID)
 	}
 	ev := a.event(ctx, "turn.finish")
+	ctx = ev.Context()
 	ev.Set("session_id", turn.Input.SessionID)
 	ev.Set("failed", in.Failed)
 	defer func() { a.turnSummary(ctx, in, err) }()
@@ -548,6 +552,7 @@ type analysisResult struct {
 func (a *Activities) Analyze(ctx context.Context, session domain.Session) (err error) {
 	ctx = telemetry.WithFields(ctx, map[string]any{"conversation_id": session.ConversationID, "session_id": session.ID, "turn_id": "analysis/" + session.ID, "trigger": "analysis"})
 	ev := a.event(ctx, "session.analyze")
+	ctx = ev.Context()
 	ev.Set("session_id", session.ID)
 	defer func() { ev.End(err) }()
 	conversation, knownConversation, lookupErr := a.Repo.Conversation(ctx, session.ConversationID)

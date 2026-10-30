@@ -9,6 +9,9 @@ import (
 func readableMessage(operation, result string, elapsed time.Duration, fields map[string]any, diagnostic Diagnostic) string {
 	labels := map[string]string{
 		"application.started": "OpenAlbert запущен",
+		"database.initialize": "Подготовлена база данных",
+		"db.query":            "Выполнен SQL-запрос",
+		"http.request":        "Обработан запрос API",
 		"telegram.receive":    "Получено сообщение из Telegram",
 		"turn.prepare":        "Подготовлен контекст обращения",
 		"llm.complete":        "Получен ответ модели",
@@ -110,6 +113,9 @@ func readableMessage(operation, result string, elapsed time.Duration, fields map
 	}
 	if fields["cached"] == true {
 		parts = append(parts, "сохранённый результат, без повторного выполнения")
+	}
+	if count, ok := fields["db_query_count"]; ok {
+		parts = append(parts, fmt.Sprintf("SQL: %v запросов, %.1f мс", count, fields["db_duration_ms"]))
 	}
 	if result == "error" {
 		parts = append(parts, diagnostic.Code)

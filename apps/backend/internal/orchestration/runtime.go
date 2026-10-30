@@ -151,11 +151,11 @@ func (r *Runtime) poll(ctx context.Context) {
 		for _, update := range updates {
 			event := telemetry.Start(ctx, r.Logger, "telegram.receive")
 			if update.Incoming == nil {
-				err = r.Repo.SetPollOffset(ctx, update.Offset)
+				err = r.Repo.SetPollOffset(event.Context(), update.Offset)
 			} else {
 				event.Set("conversation_id", update.Incoming.Conversation.ID)
 				event.Set("incoming_id", update.Incoming.ID)
-				_, err = r.Repo.AcceptIncoming(ctx, *update.Incoming, update.Offset)
+				_, err = r.Repo.AcceptIncoming(event.Context(), *update.Incoming, update.Offset)
 			}
 			event.End(err)
 			if err != nil {
@@ -289,6 +289,7 @@ func (r *Runtime) DeliverOnce(ctx context.Context) error {
 	}
 	for _, out := range outgoing {
 		event := telemetry.Start(ctx, r.Logger, "telegram.deliver")
+		ctx := event.Context()
 		event.Set("delivery_id", out.ID)
 		event.Set("conversation_id", out.Conversation.ID)
 		for k, v := range map[string]string{"turn_id": out.TurnID, "session_id": out.SessionID, "task_id": out.TaskID, "trigger": out.Trigger} {
