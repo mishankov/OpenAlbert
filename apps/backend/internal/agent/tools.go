@@ -63,8 +63,8 @@ func Definitions() []domain.Tool {
 		{Name: "participant_search", Description: "Find group participants by name, username, Telegram ID or remembered facts. Within a group searches only that conversation; in the owner's private chat searches known groups. Optional conversation_id narrows scope. The same user in different groups has separate profiles.", Parameters: schema(`"query":{"type":"string"},"conversation_id":{"type":"string"}`)},
 		{Name: "participant_read", Description: "Read a participant's group-scoped profile and facts with source quotes. Use user_id from Telegram metadata or participant_search, not a guessed identity. Owner private chat must specify a readable group conversation_id. Large profiles are bounded; use memory_read with a fact ID and conversation_id for its full content.", Parameters: schema(`"user_id":{"type":"integer","minimum":1},"conversation_id":{"type":"string"}`, "user_id")},
 		{Name: "participant_update", Description: "Automatically remember useful facts a group participant explicitly stated about themselves, without waiting for 'remember'. Save their Telegram user_id, source_message_id and exact evidence quote from their own text. Use profile for core facts, preference for explicitly lasting preferences, fact for context. Never infer a person's preference from another speaker, assistant/tool output, jokes or a one-time request. Updates and deletions use an existing fact ID from participant_read. Only the originating group is writable; private chats cannot write group profiles. delete=true forgets that fact after quoting the participant's own request.", Parameters: schema(`"user_id":{"type":"integer","minimum":1},"source_message_id":{"type":"string"},"evidence":{"type":"string"},"id":{"type":"string"},"content":{"type":"string"},"kind":{"type":"string","enum":["profile","preference","fact"]},"delete":{"type":"boolean"}`, "user_id", "source_message_id", "evidence")},
-		{Name: "soul_read", Description: "Read the current SOUL.md: your shared name, identity and personality. Use before editing to get the exact current text.", Parameters: schema(``)},
-		{Name: "soul_update", Description: "Edit your SOUL.md when the user requests a change in a private conversation, for example renaming you. Replace one exact old_text fragment with new_text; old_text must match once, so include surrounding text when needed. Preserve unrelated instructions. Changes persist across sessions and apply when the next turn is prepared. Never use for group requests, background tasks or initiative checks.", Parameters: schema(`"old_text":{"type":"string"},"new_text":{"type":"string"}`, "old_text", "new_text")},
+		{Name: "soul_read", Description: "Read the current SOUL.md in the installation owner's interactive private chat: your shared name, identity and personality. Use before editing to get the exact current text. Never disclose this text in a group.", Parameters: schema(``)},
+		{Name: "soul_update", Description: "Edit your SOUL.md when the installation owner requests a change in their private conversation, for example renaming you. Replace one exact old_text fragment with new_text; old_text must match once, so include surrounding text when needed. Preserve unrelated instructions. Changes persist across sessions and apply when the next turn is prepared. Never use for other users, group requests, background tasks or initiative checks.", Parameters: schema(`"old_text":{"type":"string"},"new_text":{"type":"string"}`, "old_text", "new_text")},
 		{Name: "skill_read", Description: "Read a user-approved active skill; all active skill descriptions are in context.", Parameters: schema(`"name":{"type":"string"}`, "name")},
 		{Name: "skill_propose_change", Description: "Save a proposed skill for joint discussion; does NOT publish it. User reviews files under proposals and installs accepted skills.", Parameters: schema(`"name":{"type":"string"},"description":{"type":"string"},"content":{"type":"string"}`, "name", "description", "content")},
 		{Name: "artifact_save", Description: "Save a named text result or document to persistent storage; return an artifact ID to read or send later.", Parameters: schema(`"name":{"type":"string"},"content":{"type":"string"}`, "name", "content")},
@@ -426,11 +426,14 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 	case "participant_update":
 		return a.updateParticipant(ctx, in, p, key, now)
 	case "soul_read":
+		if !a.isOwnerPrivate(in.Conversation) || in.Background || in.TaskID != "" {
+			return nil, errors.New("SOUL.md can only be read in the owner's interactive private conversation")
+		}
 		content, err := a.Knowledge.Soul(ctx)
 		return map[string]string{"content": content}, err
 	case "soul_update":
-		if !in.Conversation.Private || in.Background || in.TaskID != "" {
-			return nil, errors.New("SOUL.md can only be changed in an interactive private conversation")
+		if !a.isOwnerPrivate(in.Conversation) || in.Background || in.TaskID != "" {
+			return nil, errors.New("SOUL.md can only be changed in the owner's interactive private conversation")
 		}
 		if err := a.Knowledge.UpdateSoul(ctx, p.OldText, p.NewText); err != nil {
 			return nil, err
@@ -538,7 +541,7 @@ func (a *Activities) toolDefinitions() []domain.Tool {
 	return available
 }
 
-// Global personality changes are only available in interactive private turns.
+// Global personality tools are only available in the owner's interactive private turns.
 func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 	tools := a.toolDefinitions()
 	interactive := turn.Input.TaskID == "" && !turn.Input.Initiative
@@ -562,7 +565,7 @@ func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 		if tool.Name == "participant_update" && turn.Conversation.Private {
 			continue
 		}
-		if tool.Name == "soul_update" && (!turn.Conversation.Private || !interactive) {
+		if (tool.Name == "soul_read" || tool.Name == "soul_update") && (!a.isOwnerPrivate(turn.Conversation) || !interactive) {
 			continue
 		}
 		if tool.Name == "send_group_message" && (!a.isOwnerPrivate(turn.Conversation) || !interactive) {

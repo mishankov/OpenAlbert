@@ -42,10 +42,15 @@ func TestIdentityComesFromOwnerSoulAndReloadsWithoutBuiltInName(t *testing.T) {
 
 func TestSoulToolRenamesAndNextTurnLoadsNewIdentity(t *testing.T) {
 	a, _, store, conv := fixture(t)
+	a.OwnerUserID = conv.OwnerID
 	ctx := context.Background()
 	before, err := store.Soul(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	read := tool(t, a, conv, "read-soul", "read-call", "soul_read", `{}`)
+	if !strings.Contains(read, "Ты — OpenAlbert,") {
+		t.Fatalf("owner could not read personality: %s", read)
 	}
 	args := `{"old_text":"Ты — OpenAlbert,","new_text":"Ты — Атлас,"}`
 	for i := 0; i < 2; i++ {
@@ -67,31 +72,40 @@ func TestSoulToolRenamesAndNextTurnLoadsNewIdentity(t *testing.T) {
 	}
 }
 
-func TestSoulChangesRejectedOutsidePrivateInteractiveTurn(t *testing.T) {
+func TestSoulToolsRequireOwnerInteractivePrivateTurn(t *testing.T) {
 	for _, tc := range []struct {
 		name                string
 		private, background bool
 		task                string
+		owner, sender, chat int64
 	}{
-		{name: "group"},
-		{name: "initiative", private: true, background: true},
-		{name: "task", private: true, task: "task-id"},
+		{name: "group", owner: 7, sender: 8, chat: -10},
+		{name: "owner in group", owner: 7, sender: 7, chat: -10},
+		{name: "other private", private: true, owner: 7, sender: 8, chat: 8},
+		{name: "spoofed owner", private: true, owner: 7, sender: 7, chat: 8},
+		{name: "owner not configured", private: true, sender: 7, chat: 7},
+		{name: "initiative", private: true, background: true, owner: 7, sender: 7, chat: 7},
+		{name: "task", private: true, task: "task-id", owner: 7, sender: 7, chat: 7},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, _, store, conv := fixture(t)
+			a.OwnerUserID = tc.owner
 			conv.Private = tc.private
+			conv.OwnerID, conv.ChatID = tc.sender, tc.chat
 			ctx := context.Background()
 			before, _ := store.Soul(ctx)
 			turn := Turn{Conversation: conv, Input: RunInput{Initiative: tc.background, TaskID: tc.task}}
 			for _, def := range a.toolsForTurn(turn) {
-				if def.Name == "soul_update" {
-					t.Fatal("restricted turn advertised soul_update")
+				if def.Name == "soul_update" || def.Name == "soul_read" {
+					t.Fatalf("restricted turn advertised %s", def.Name)
 				}
 			}
-			_, err := a.execute(ctx, ToolInput{Conversation: conv, Background: tc.background, TaskID: tc.task,
-				Call: domain.ToolCall{Name: "soul_update", Arguments: []byte(`{"old_text":"Ты — OpenAlbert,","new_text":"Ты — Атлас,"}`)}})
-			if err == nil {
-				t.Fatal("forged call bypassed scope restriction")
+			for _, name := range []string{"soul_read", "soul_update"} {
+				out, err := a.execute(ctx, ToolInput{Conversation: conv, Background: tc.background, TaskID: tc.task,
+					Call: domain.ToolCall{Name: name, Arguments: []byte(`{"old_text":"Ты — OpenAlbert,","new_text":"Ты — Атлас,"}`)}})
+				if err == nil || out != nil {
+					t.Fatalf("forged %s bypassed scope restriction: %v, %v", name, out, err)
+				}
 			}
 			after, _ := store.Soul(ctx)
 			if before != after {
