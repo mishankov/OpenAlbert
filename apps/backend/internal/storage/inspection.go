@@ -125,7 +125,15 @@ func (s *Store) InspectSession(ctx context.Context, id string, after int64) (out
 	}
 	// Legacy completions still exist in checkpoints. They have no request snapshot,
 	// duration or reliable per-message timestamp; label that limitation explicitly.
-	legacy, e := s.pool.Query(ctx, `SELECT m.id,m.data FROM openalbert_checkpoints m WHERE m.id LIKE 'model/%' AND EXISTS(SELECT 1 FROM openalbert_checkpoints t WHERE t.id LIKE 'turn-done/%' AND t.data->'Input'->>'SessionID'=$1 AND starts_with(m.id,'model/'||(t.data->'Input'->>'Key')||'/')) ORDER BY (SELECT min(msg.seq) FROM openalbert_messages msg WHERE msg.session_id=$1 AND msg.mutation_key=split_part(m.id,'/',2)||'/assistant/'||split_part(m.id,'/',3)) NULLS LAST,m.id`, id)
+	// Extract prefixes once: reading Key from the full turn JSON inside the join
+	// repeatedly decompresses the same large checkpoint for every model record.
+	legacy, e := s.pool.Query(ctx, `WITH turn_prefixes AS MATERIALIZED (
+ SELECT 'model/'||(data->'Input'->>'Key')||'/' AS prefix FROM openalbert_checkpoints
+ WHERE id LIKE 'turn-done/%' AND data->'Input'->>'SessionID'=$1
+)
+ SELECT m.id FROM openalbert_checkpoints m WHERE m.id LIKE 'model/%'
+ AND EXISTS(SELECT 1 FROM turn_prefixes t WHERE starts_with(m.id,t.prefix))
+ ORDER BY (SELECT min(msg.seq) FROM openalbert_messages msg WHERE msg.session_id=$1 AND msg.mutation_key=split_part(m.id,'/',2)||'/assistant/'||split_part(m.id,'/',3)) NULLS LAST,m.id`, id)
 	if e != nil {
 		err = e
 		return
@@ -133,8 +141,7 @@ func (s *Store) InspectSession(ctx context.Context, id string, after int64) (out
 	historical := []domain.Trace{}
 	for legacy.Next() {
 		var key string
-		var raw json.RawMessage
-		if err = legacy.Scan(&key, &raw); err != nil {
+		if err = legacy.Scan(&key); err != nil {
 			break
 		}
 		parts := strings.Split(key, "/")
@@ -178,7 +185,12 @@ func (s *Store) InspectSession(ctx context.Context, id string, after int64) (out
 	}
 	// Session artifacts are referenced in incoming/model/tool messages. Scope the
 	// lookup to that conversation and exact IDs mentioned in this session.
-	out.Artifacts, err = selectJSON[domain.Artifact](ctx, s.pool, `SELECT a.data FROM openalbert_artifacts a WHERE a.conversation_id=$2 AND (a.data->>'session_id'=$1 OR EXISTS(SELECT 1 FROM openalbert_messages m WHERE m.session_id=$1 AND strpos(m.data::text,a.id)>0) OR EXISTS(SELECT 1 FROM openalbert_checkpoints c WHERE c.id LIKE 'audio/%' AND c.data->>'session_id'=$1 AND c.data->>'artifact_id'=a.id)) ORDER BY a.data->>'created_at'`, id, out.Session.ConversationID)
+	// Materialize the text once per message instead of serializing it again for
+	// every artifact in the conversation. Include the whole session on every page.
+	out.Artifacts, err = selectJSON[domain.Artifact](ctx, s.pool, `WITH message_texts AS MATERIALIZED (
+ SELECT data::text AS content FROM openalbert_messages WHERE session_id=$1
+)
+ SELECT a.data FROM openalbert_artifacts a WHERE a.conversation_id=$2 AND (a.data->>'session_id'=$1 OR EXISTS(SELECT 1 FROM message_texts m WHERE strpos(m.content,a.id)>0) OR EXISTS(SELECT 1 FROM openalbert_checkpoints c WHERE c.id LIKE 'audio/%' AND c.data->>'session_id'=$1 AND c.data->>'artifact_id'=a.id)) ORDER BY a.data->>'created_at'`, id, out.Session.ConversationID)
 	if out.Artifacts == nil {
 		out.Artifacts = []domain.Artifact{}
 	}

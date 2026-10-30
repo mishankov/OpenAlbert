@@ -81,6 +81,7 @@ func traceMessages(messages []domain.Message) []domain.Message {
 func (a *Activities) analysisModelCall(ctx context.Context, session domain.Session, messages []domain.Message) (out domain.Completion, err error) {
 	ctx = telemetry.WithFields(ctx, map[string]any{"session_id": session.ID, "turn_id": "analysis/" + session.ID, "conversation_id": session.ConversationID, "trigger": "analysis"})
 	event := a.event(ctx, "llm.complete")
+	ctx = event.Context()
 	event.Set("model", a.ModelName)
 	finish := a.startTrace(ctx, domain.Trace{SessionID: session.ID, TurnID: "analysis/" + session.ID, Trigger: "analysis", Kind: "analysis", Name: a.ModelName}, map[string]any{"messages": traceMessages(messages)}, event)
 	defer func() {

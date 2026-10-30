@@ -27,13 +27,20 @@ type Event struct {
 	fields    map[string]any
 	once      sync.Once
 	failure   error
+	parent    *Event
+	sql       sqlStats
+	ended     bool
 }
+
+type eventKey struct{}
 
 func Start(ctx context.Context, logger *slog.Logger, operation string) *Event {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	e := &Event{ctx: ctx, logger: logger, operation: operation, start: time.Now(), fields: map[string]any{}}
+	e.parent, _ = ctx.Value(eventKey{}).(*Event)
+	e.ctx = context.WithValue(ctx, eventKey{}, e)
 	if fields, ok := ctx.Value(fieldsKey{}).(map[string]any); ok {
 		for k, v := range fields {
 			e.fields[k] = v
@@ -48,6 +55,10 @@ func Start(ctx context.Context, logger *slog.Logger, operation string) *Event {
 	}
 	return e
 }
+
+// Context carries this operation's SQL collector through repository calls and
+// child operations. It retains the caller's cancellation and deadline.
+func (e *Event) Context() context.Context { return e.ctx }
 
 type fieldsKey struct{}
 
@@ -77,6 +88,8 @@ func (e *Event) End(err error) {
 	e.once.Do(func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		e.ended = true
+		e.sql.fields(e.fields)
 		if e.failure != nil {
 			err = e.failure
 		}

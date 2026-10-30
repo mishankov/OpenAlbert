@@ -56,7 +56,7 @@ func run() error {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	server := &http.Server{Addr: c.HTTPAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Addr: c.HTTPAddr, Handler: telemetry.HTTP(logger, mux), ReadHeaderTimeout: 5 * time.Second}
 	serverErrors := make(chan error, 1)
 	go func() { serverErrors <- server.ListenAndServe() }()
 	defer func() {
@@ -64,7 +64,9 @@ func run() error {
 		defer stop()
 		_ = server.Shutdown(closeCtx)
 	}()
-	repo, err := storage.Open(ctx, c.DatabaseURL)
+	databaseEvent := telemetry.Start(ctx, logger, "database.initialize")
+	repo, err := storage.Open(databaseEvent.Context(), c.DatabaseURL)
+	databaseEvent.End(err)
 	if err != nil {
 		return errors.New("database initialization failed")
 	}
