@@ -13,6 +13,7 @@ import (
 
 type ConversationStore interface {
 	ListConversations(context.Context) ([]domain.Conversation, error)
+	Conversation(context.Context, string) (domain.Conversation, bool, error)
 }
 
 type MemoryStore interface {
@@ -20,11 +21,34 @@ type MemoryStore interface {
 	Read(context.Context, string, string) (domain.MemoryEntry, error)
 	Profile(context.Context, string) (string, error)
 	Soul(context.Context) (string, error)
+	GroupRules(context.Context, int64) (string, error)
 }
 
 // RegisterMemory exposes the knowledge store through the same read-only
 // boundary as sessions. It deliberately does not use the agent's capped search.
 func RegisterMemory(mux *http.ServeMux, conversations ConversationStore, memory MemoryStore) {
+	mux.Handle("GET /api/inspect/memory/group", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scope := r.URL.Query().Get("conversation_id")
+		if !memoryID(scope) {
+			fail(w, 400)
+			return
+		}
+		conv, found, err := conversations.Conversation(r.Context(), scope)
+		if err != nil {
+			fail(w, 500)
+			return
+		}
+		if !found || conv.Private || conv.ChatID >= 0 {
+			fail(w, 404)
+			return
+		}
+		text, err := memory.GroupRules(r.Context(), conv.ChatID)
+		if err != nil {
+			fail(w, 500)
+			return
+		}
+		write(w, map[string]any{"group_id": conv.ChatID, "group": text})
+	})))
 	mux.Handle("GET /api/inspect/memory/soul", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		text, err := memory.Soul(r.Context())
 		if err != nil {

@@ -19,7 +19,17 @@ import (
 type memoryConversations struct{}
 
 func (memoryConversations) ListConversations(context.Context) ([]domain.Conversation, error) {
-	return []domain.Conversation{{ID: "personal:7", Private: true}, {ID: "group:8", Title: "Группа"}}, nil
+	return []domain.Conversation{{ID: "personal:7", ChatID: 7, Private: true}, {ID: "group:8", ChatID: -8, Title: "Группа"}, {ID: "group:8:topic:9", ChatID: -8, ThreadID: 9}, {ID: "group:empty", ChatID: -9}}, nil
+}
+
+func (c memoryConversations) Conversation(ctx context.Context, id string) (domain.Conversation, bool, error) {
+	rows, err := c.ListConversations(ctx)
+	for _, row := range rows {
+		if row.ID == id {
+			return row, true, err
+		}
+	}
+	return domain.Conversation{}, false, err
 }
 
 func TestMemoryInspectorReadsAllPagesAndKeepsScopes(t *testing.T) {
@@ -180,5 +190,81 @@ func TestSoulInspectorReadsConfiguredFileAndRemainsReadOnly(t *testing.T) {
 				t.Fatalf("missing soul: %d", w.Code)
 			}
 		})
+	}
+}
+
+func TestGroupInspectorReadsCurrentSharedFileAndRemainsReadOnly(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := knowledge.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "# Правила группы\nОтвечай по обращению. <script>текст</script>"
+	if err := store.UpdateGroupRules(ctx, -8, "", content); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	RegisterMemory(mux, memoryConversations{}, store)
+	read := func(scope, expected string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/api/inspect/memory/group?conversation_id="+url.QueryEscape(scope), nil))
+		var out struct {
+			GroupID int64  `json:"group_id"`
+			Group   string `json:"group"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || w.Code != 200 || out.Group != expected || out.GroupID >= 0 || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("group %s: %d %q %v", scope, w.Code, w.Body.String(), err)
+		}
+	}
+	read("group:8", content)
+	read("group:8:topic:9", content)
+	read("group:empty", "")
+	updated := "# Новые правила"
+	if err := store.UpdateGroupRules(ctx, -8, content, updated); err != nil {
+		t.Fatal(err)
+	}
+	read("group:8", updated)
+	for _, tc := range []struct {
+		method, scope string
+		code          int
+	}{
+		{"GET", "", 400},
+		{"GET", "personal:7", 404},
+		{"GET", "group:unknown", 404},
+		{"GET", "../../SOUL.md", 404},
+		{"POST", "group:8", 405},
+		{"PUT", "group:8", 405},
+		{"DELETE", "group:8", 405},
+	} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(tc.method, "http://localhost/api/inspect/memory/group?conversation_id="+url.QueryEscape(tc.scope), nil))
+		if w.Code != tc.code {
+			t.Fatalf("%s %s: %d", tc.method, tc.scope, w.Code)
+		}
+	}
+	read("group:8", updated)
+	if err := store.UpdateGroupRules(ctx, -8, updated, ""); err != nil {
+		t.Fatal(err)
+	}
+	read("group:8:topic:9", "")
+	path := filepath.Join(root, "groups", "-8", "GROUP.md")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	read("group:8", "")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path string
+		code int
+	}{{"/api/inspect/memory/group?conversation_id=group:8", 500}, {"/api/inspect/memory?conversation_id=group:8", 200}} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost"+tc.path, nil))
+		if w.Code != tc.code {
+			t.Fatalf("GROUP.md read error affected %s: %d", tc.path, w.Code)
+		}
 	}
 }
