@@ -17,9 +17,13 @@ func (r *Runtime) ProgressOnce(ctx context.Context, now time.Time) error {
 		return err
 	}
 	for _, row := range rows {
-		if row.Conversation.DeliveryChannel == "desktop" && row.Delivery.MessageID == "" {
+		silent := row.Conversation.DeliveryChannel == "desktop" || row.Conversation.ChatID < 0
+		if silent && row.Delivery.MessageID == "" {
 			next := row.Delivery
 			next.State = "suspended"
+			if row.Conversation.ChatID < 0 {
+				next.State = "disabled"
+			}
 			if _, _, err = r.Repo.SetProgressDelivery(ctx, row.TurnID, row.Delivery.Version, next); err != nil {
 				return err
 			}
@@ -27,7 +31,7 @@ func (r *Runtime) ProgressOnce(ctx context.Context, now time.Time) error {
 		}
 		next := row.Delivery
 		next.State = "sending"
-		if row.Conversation.DeliveryChannel == "desktop" {
+		if silent {
 			next.Removing = true
 		}
 		p, claimed, err := r.Repo.SetProgressDelivery(ctx, row.TurnID, row.Delivery.Version, next)
@@ -61,12 +65,15 @@ func (r *Runtime) deliverProgress(ctx context.Context, p domain.Progress, now ti
 	var err error
 	c, cancel := context.WithTimeout(ctx, 2*time.Second)
 	switch {
-	case next.Removing || p.Conversation.DeliveryChannel == "desktop":
-		// This ID was created on Telegram before the turn was steered to desktop.
-		// Delete idempotently before suspending; a later Telegram input may resume.
+	case next.Removing || p.Conversation.DeliveryChannel == "desktop" || p.Conversation.ChatID < 0:
+		// Clean up a status created before a route change or before group statuses
+		// were disabled. Only a private Telegram route can resume status delivery.
 		err = r.Telegram.DeleteProgress(c, p.Conversation, next.MessageID)
 		if err == nil {
 			next.State = "suspended"
+			if p.Conversation.ChatID < 0 {
+				next.State = "disabled"
+			}
 			next.Removing = false
 			next.MessageID = ""
 			next.LastText = ""

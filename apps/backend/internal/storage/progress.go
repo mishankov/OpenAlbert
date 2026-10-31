@@ -14,6 +14,9 @@ func newProgress(p domain.Progress) domain.Progress {
 	p.StartedAt = nowIfZero(p.StartedAt)
 	p.Status, p.Text, p.Step = "active", "Работаю над запросом…", -1
 	p.Delivery = domain.ProgressDelivery{State: "ready"}
+	if p.Conversation.ChatID < 0 {
+		p.Delivery.State = "disabled" // Keep internal progress without posting group statuses.
+	}
 	p.Outcome = ""
 	return p
 }

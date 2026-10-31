@@ -123,6 +123,24 @@ func progressContract(t *testing.T, repo domain.Repository) {
 		t.Fatal("unknown delivery treated as success")
 	}
 
+	for _, topic := range []int{0, 3} {
+		groupID := fmt.Sprintf("%s/group/%d", id, topic)
+		group := domain.Conversation{ID: groupID, ChatID: -20, OwnerID: 7, ThreadID: topic}
+		check(repo.StartProgress(ctx, domain.Progress{TurnID: groupID, Conversation: group, StartedAt: now.Add(-time.Hour)}))
+		check(repo.ReportProgress(ctx, groupID, 1, "Internal group progress"))
+		if find(groupID) != nil {
+			t.Fatal("group progress queued for Telegram delivery")
+		}
+		saved, ok, err := repo.SetProgressDelivery(ctx, groupID, 0, domain.ProgressDelivery{State: "disabled"})
+		check(err)
+		if !ok || saved.Text != "Internal group progress" {
+			t.Fatal("suppressing group delivery lost internal progress")
+		}
+		check(repo.EndProgress(ctx, groupID, "failed"))
+		if find(groupID) != nil {
+			t.Fatal("failed group progress queued a status")
+		}
+	}
 }
 
 func TestPostgresProgressRestartRecovery(t *testing.T) {
