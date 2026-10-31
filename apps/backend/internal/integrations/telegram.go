@@ -23,13 +23,14 @@ import (
 )
 
 type TelegramConfig struct {
-	Token           string
-	BaseURL         string // Optional Bot API server root; default https://api.telegram.org.
-	AllowedUserIDs  []int64
-	AllowedGroupIDs []int64 // Groups disabled by default; all non-bot participants inside these groups are accepted.
-	HTTPClient      *http.Client
-	PollTimeout     time.Duration
-	MaxFileBytes    int64
+	Token            string
+	BaseURL          string // Optional Bot API server root; default https://api.telegram.org.
+	AllowedUserIDs   []int64
+	AllowedGroupIDs  []int64 // Groups disabled by default; participants inside these groups are accepted.
+	AllowBotMessages bool    // Accept bot participants in allowed groups; private-chat bot messages remain ignored.
+	HTTPClient       *http.Client
+	PollTimeout      time.Duration
+	MaxFileBytes     int64
 }
 type Telegram struct {
 	config   TelegramConfig
@@ -241,18 +242,25 @@ type telegramMessage struct {
 	Video    *telegramFile  `json:"video"`
 }
 
+func telegramMessageText(m *telegramMessage) string {
+	if m.Text != "" {
+		return m.Text
+	}
+	if m.Caption != "" {
+		return m.Caption
+	}
+	// sendRichMessage messages may have blocks instead of a text field.
+	if len(m.RichMessage) > 0 && string(m.RichMessage) != "null" {
+		return "[Rich message blocks]\n" + string(m.RichMessage)
+	}
+	return ""
+}
+
 func telegramReplyContext(m *telegramMessage) *domain.ReplyContext {
 	if m == nil {
 		return nil
 	}
-	reply := &domain.ReplyContext{MessageID: m.ID, Text: m.Text}
-	if reply.Text == "" {
-		reply.Text = m.Caption
-	}
-	// Our own sendRichMessage replies may have blocks instead of a text field.
-	if reply.Text == "" && len(m.RichMessage) > 0 && string(m.RichMessage) != "null" {
-		reply.Text = "[Rich message blocks]\n" + string(m.RichMessage)
-	}
+	reply := &domain.ReplyContext{MessageID: m.ID, Text: telegramMessageText(m)}
 	if m.From != nil {
 		reply.AuthorID = m.From.ID
 		reply.AuthorName = strings.TrimSpace(m.From.FirstName + " " + m.From.LastName)
@@ -289,11 +297,15 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 	for _, u := range raw {
 		update := Update{Offset: u.ID + 1}
 		m := u.Message
-		if m == nil || m.From == nil || m.From.IsBot || m.From.ID <= 0 {
+		if m == nil || m.From == nil || m.From.ID <= 0 {
 			out = append(out, update)
 			continue
 		}
 		private := m.Chat.Type == "private"
+		if m.From.IsBot && (private || !t.config.AllowBotMessages) {
+			out = append(out, update)
+			continue
+		}
 		if (!private && (!t.groups[m.Chat.ID] || (m.Chat.Type != "group" && m.Chat.Type != "supergroup"))) || (private && (m.Chat.ID != m.From.ID || !t.users[m.From.ID])) {
 			out = append(out, update)
 			continue
@@ -310,10 +322,7 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 		} else {
 			conv.ID = fmt.Sprintf("telegram:group:%d:topic:%d", m.Chat.ID, threadID)
 		}
-		incoming := domain.Incoming{AuthorName: strings.TrimSpace(m.From.FirstName + " " + m.From.LastName), AuthorUsername: m.From.Username, ID: fmt.Sprintf("telegram:%d", u.ID), Conversation: conv, Text: m.Text, CreatedAt: time.Unix(m.Date, 0).UTC()}
-		if incoming.Text == "" {
-			incoming.Text = m.Caption
-		}
+		incoming := domain.Incoming{AuthorName: strings.TrimSpace(m.From.FirstName + " " + m.From.LastName), AuthorUsername: m.From.Username, ID: fmt.Sprintf("telegram:%d", u.ID), Conversation: conv, Text: telegramMessageText(m), CreatedAt: time.Unix(m.Date, 0).UTC()}
 		incoming.ReplyTo = telegramReplyContext(m.ReplyTo)
 		incoming.Quote = m.Quote
 		add := func(f *telegramFile, kind, name, mime string) {

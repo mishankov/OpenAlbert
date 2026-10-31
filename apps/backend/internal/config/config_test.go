@@ -22,6 +22,24 @@ func TestLaunchSettings(t *testing.T) {
 	}
 }
 
+func TestTelegramBotMessagesSetting(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"", false}, {"false", false}, {"true", true}, {" true ", true},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			env := validEnv()
+			env["TELEGRAM_ALLOW_BOT_MESSAGES"] = tc.value
+			cfg, err := load(func(k string) string { return env[k] })
+			if err != nil || cfg.TelegramAllowBotMessages != tc.want {
+				t.Fatalf("bot messages setting: got %v, error %v", cfg.TelegramAllowBotMessages, err)
+			}
+		})
+	}
+}
+
 func TestComputerConnectionSettings(t *testing.T) {
 	for _, address := range []string{"", "computer:22", "[::1]:2222", "secret-invalid", "user@host:22", "host:0", "host:65536"} {
 		env := validEnv()
@@ -103,7 +121,7 @@ func TestRequiredOwnerAndSecrets(t *testing.T) {
 	}
 }
 func TestInvalidSettingsNeverEchoInput(t *testing.T) {
-	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_BASE_URL", "INSPECTOR_PUBLIC_URL", "VICTORIALOGS_URL", "DATABASE_URL", "S3_SECURE", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX"} {
+	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_BASE_URL", "INSPECTOR_PUBLIC_URL", "VICTORIALOGS_URL", "DATABASE_URL", "S3_SECURE", "TELEGRAM_ALLOW_BOT_MESSAGES", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX"} {
 		t.Run(key, func(t *testing.T) {
 			env := validEnv()
 			env[key] = "secret-bad-value"

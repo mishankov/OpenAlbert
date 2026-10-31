@@ -94,7 +94,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	telegram, err := integrations.NewTelegram(integrations.TelegramConfig{Token: c.TelegramBotToken, BaseURL: c.TelegramBaseURL, AllowedUserIDs: c.TelegramAllowedUserIDs, AllowedGroupIDs: c.TelegramAllowedGroupIDs})
+	telegram, err := integrations.NewTelegram(integrations.TelegramConfig{Token: c.TelegramBotToken, BaseURL: c.TelegramBaseURL, AllowedUserIDs: c.TelegramAllowedUserIDs, AllowedGroupIDs: c.TelegramAllowedGroupIDs, AllowBotMessages: c.TelegramAllowBotMessages})
 	if err != nil {
 		return err
 	}
@@ -174,6 +174,7 @@ func run() error {
 	event.Set("log_search_enabled", logs != nil)
 	event.Set("browser_enabled", c.BrowserEnabled)
 	event.Set("computer_enabled", activities.Computer != nil)
+	event.Set("telegram_allow_bot_messages", c.TelegramAllowBotMessages)
 	event.Set("browser_limit", 5)
 	event.Set("namespace", c.TemporalNamespace)
 	event.Set("task_queue", c.TemporalTaskQueue)

@@ -19,6 +19,7 @@ type Config struct {
 	TemporalAddress, TemporalNamespace, TemporalTaskQueue   string
 	TelegramBotToken, TelegramBaseURL                       string
 	TelegramAllowedUserIDs, TelegramAllowedGroupIDs         []int64
+	TelegramAllowBotMessages                                bool
 	LLMBaseURL, LLMAPIKey, LLMModel                         string
 	STTBaseURL, STTAPIKey, STTModel, STTRevision            string
 	YandexAPIKey, YandexFolderID, YandexEndpoint            string
@@ -140,6 +141,10 @@ func load(get func(string) string) (Config, error) {
 	c.S3Secure, err = strconv.ParseBool(value("S3_SECURE", "false"))
 	if err != nil {
 		problems = append(problems, errors.New("S3_SECURE must be a boolean"))
+	}
+	c.TelegramAllowBotMessages, err = strconv.ParseBool(value("TELEGRAM_ALLOW_BOT_MESSAGES", "false"))
+	if err != nil {
+		problems = append(problems, errors.New("TELEGRAM_ALLOW_BOT_MESSAGES must be a boolean"))
 	}
 	c.BrowserEnabled, err = strconv.ParseBool(value("BROWSER_ENABLED", "true"))
 	if err != nil {
