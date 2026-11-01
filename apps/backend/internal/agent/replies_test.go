@@ -85,7 +85,7 @@ func TestTelegramRepliesReachModelAndHistory(t *testing.T) {
 		{
 			name:      "rich bot response",
 			fields:    `,"reply_to_message":{"message_id":46,"from":{"id":99,"is_bot":true},"rich_message":{"blocks":[{"type":"paragraph","text":{"type":"plain","text":"Полный ответ бота"}}]}}`,
-			wantReply: &domain.ReplyContext{MessageID: 46, AuthorID: 99, AuthorIsBot: true, Text: "[Rich message blocks]\n" + `{"blocks":[{"type":"paragraph","text":{"type":"plain","text":"Полный ответ бота"}}]}`},
+			wantReply: &domain.ReplyContext{MessageID: 46, AuthorID: 99, AuthorIsBot: true, Text: "Полный ответ бота"},
 		},
 		{
 			name:      "quote without accessible original",

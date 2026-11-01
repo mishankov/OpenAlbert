@@ -52,8 +52,8 @@ func TestBotMessagesFollowGroupAccessAndContentRules(t *testing.T) {
 					if got.Incoming.Command != tc.command || got.Incoming.Conversation.OwnerID != 99 || got.Incoming.AuthorUsername != "alex" {
 						t.Fatalf("lost sender or command: %+v", got.Incoming)
 					}
-					if tc.name == "rich message" && got.Incoming.Text == "" {
-						t.Fatal("rich message text was discarded")
+					if tc.name == "rich message" && got.Incoming.Text != "Hello" {
+						t.Fatalf("rich message was not decoded: %q", got.Incoming.Text)
 					}
 					if tc.name == "attachment" && (len(got.Incoming.Attachments) != 1 || got.Incoming.Attachments[0].FileID != "photo-id") {
 						t.Fatal("attachment was discarded")

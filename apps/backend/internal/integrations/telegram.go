@@ -249,11 +249,7 @@ func telegramMessageText(m *telegramMessage) string {
 	if m.Caption != "" {
 		return m.Caption
 	}
-	// sendRichMessage messages may have blocks instead of a text field.
-	if len(m.RichMessage) > 0 && string(m.RichMessage) != "null" {
-		return "[Rich message blocks]\n" + string(m.RichMessage)
-	}
-	return ""
+	return messagefmt.RichMessageText(m.RichMessage)
 }
 
 func telegramReplyContext(m *telegramMessage) *domain.ReplyContext {
