@@ -26,6 +26,10 @@ type Message struct {
 	Text     string
 	Entities []domain.TextEntity
 }
+
+// TextLimit is a conservative sendMessage limit in Telegram entity units.
+const TextLimit = 4096
+
 type renderer struct {
 	source   []byte
 	b        strings.Builder

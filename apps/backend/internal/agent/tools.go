@@ -42,7 +42,11 @@ Send once after completing the work. Success means queued delivery and ends the 
 
 To send an image or file with a description in one message, supply both text and artifact_id in the same call. Text that fits a 1024 UTF-16-unit caption after Markdown rendering is attached to the artifact. Longer descriptions are sent separately without truncation. Supported images are sent as photos; other artifacts are sent as documents.
 
-Use original Rich Markdown without MarkdownV2 escaping. Limits: 32000 UTF-8 bytes, 500 blocks, 20 table columns, 16 nesting levels. Save larger content as an artifact.`
+Use send_message by default for ordinary conversation, explanations, reminders and code. It renders Markdown headings, emphasis, links, lists and code into ordinary Telegram messages, so users can quote selected passages. Long replies are split with formatting preserved. Do not use MarkdownV2 escaping. Limit: 32000 UTF-8 bytes. Use send_rich_message only when native tables, formulas, collapsible sections or other rich-only blocks materially help, or the user requests rich formatting. Selected fragment quotes of rich messages may not reach the bot through the current Telegram Bot API. Save larger content as an artifact.`
+
+const sendRichMessageDescription = `Send a Rich Markdown reply to the current conversation using Telegram sendRichMessage. Prefer send_message for ordinary replies. Use this tool when native tables, formulas, collapsible details or other rich-only blocks materially help, or the user explicitly requests rich formatting. Selected fragment quotes of rich messages may not reach the bot through the current Telegram Bot API.
+
+The same delivery and notification rules as send_message apply: send only a useful final reply, never intermediate progress or placeholders. Success means queued, not confirmed delivered, and ends the turn after the current tool batch; do not send a follow-up confirmation. Supports artifact_id with the same caption rules as send_message. Use original Rich Markdown without MarkdownV2 escaping. Limits: 32000 UTF-8 bytes, 500 blocks, 20 table columns, 16 nesting levels.`
 
 func Definitions() []domain.Tool {
 	return []domain.Tool{
@@ -51,14 +55,15 @@ func Definitions() []domain.Tool {
 		{Name: "report_progress", Description: "Record progress for the current interactive request, without finishing the turn. Only private Telegram chats show a temporary status message; groups and group topics keep progress internal. Use during lengthy work at meaningful stage changes: briefly state what you have actually done, what you are doing next, or a concrete obstacle. Plain text, at most 600 characters, in the user's language. Do not invent findings, percentages, completion estimates or activity; do not include internal reasoning. The application delays the first status by 30 seconds, coalesces updates and edits at most once a minute; it may suppress quick requests. This is not a reply or delivery confirmation. Continue working and use send_message for the final answer. Never send intermediate updates via send_message.", Parameters: schema(`"text":{"type":"string"}`, "text")},
 		{Name: "web_search", Description: "Search the public web with Yandex; returns sources. Read sources before asserting facts.", Parameters: schema(`"query":{"type":"string"}`, "query")},
 		{Name: "web_read", Description: "Fetch plain text from a known public HTTP(S) URL. Use for static articles, documentation or plain-text files when only their text is needed. Does not run JavaScript or share browser cookies. HTML extraction discards link destinations and flattens headings, lists and tables; long results may be truncated. For search results, catalogs, following links, structured tables or JavaScript content, use the listed browser tools. An HTTP success may contain a CAPTCHA or an empty page; check that the requested content is actually present. Private network addresses are forbidden.", Parameters: schema(`"url":{"type":"string"}`, "url")},
-		{Name: "send_message", Description: sendMessageDescription, Parameters: schema(`"text":{"type":"string","description":"User-facing Rich Markdown: headings, GFM tables, lists, code, spoilers, formulas and details are supported. Use an empty string for an artifact without a caption."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
+		{Name: "send_message", Description: sendMessageDescription, Parameters: schema(`"text":{"type":"string","description":"Default user-facing reply in Markdown: headings, emphasis, links, lists and code. Use an empty string for an artifact without a caption. For native tables, formulas or collapsible sections use send_rich_message."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
+		{Name: "send_rich_message", Description: sendRichMessageDescription, Parameters: schema(`"text":{"type":"string","description":"User-facing Rich Markdown: native tables, formulas, collapsible details and other rich blocks. Use an empty string for an artifact without a caption."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
 		{Name: "send_group_message", Description: "Post the text your owner explicitly requests to a known allowed Telegram group or topic, only from the owner's interactive private chat. Get the exact conversation_id from conversation_list; ask if the intended group/topic is ambiguous. Use original Rich Markdown, up to 32000 UTF-8 bytes. Send only the intended public text, never private instructions/history. Returns queued, not confirmed delivered. Does not finish this turn: acknowledge the queued post privately via send_message. Do not repost it to check delivery. Text only; attachments are not supported by this tool.", Parameters: schema(`"conversation_id":{"type":"string"},"text":{"type":"string"}`, "conversation_id", "text")},
 		{Name: "task_create", Description: "Create an independent durable task. Specify next_run_at RFC3339 for a reminder; schedule_seconds>0 for repeating checks. Explain reason for self-initiated tasks. Task continues after session closes.", Parameters: schema(`"title":{"type":"string"},"goal":{"type":"string"},"reason":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0},"schedule_cron":{"type":"string"},"schedule_timezone":{"type":"string"},"maintenance":{"type":"boolean"}`, "title", "goal")},
 		{Name: "task_find", Description: "Find assignments, reminders and monitoring tasks in the current conversation, including those created in earlier sessions. Use for schedules, progress, results and status questions, and before creating a possible duplicate; these belong to tasks, not memory_search. query is a literal case-insensitive substring of title or goal, or an exact task ID; omitted or empty query returns all saved tasks in this conversation, including completed ones. Inspect status and use task_read for details.", Parameters: schema(`"query":{"type":"string","description":"A literal substring of task title or goal, or an exact ID. Omit or use an empty string to list all saved tasks in this conversation."}`)},
 		{Name: "task_read", Description: "Read saved task status, result, last update, next check. Reading does not execute it.", Parameters: schema(`"id":{"type":"string"}`, "id")},
 		{Name: "task_update", Description: "Update a task goal, result, status or schedule. Status: queued, running, waiting, paused, completed, cancelled, failed. Completed and cancelled tasks stop. To resume use queued. Use for progress and stop requests.", Parameters: schema(`"id":{"type":"string"},"goal":{"type":"string"},"result":{"type":"string"},"status":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0},"schedule_cron":{"type":"string"},"schedule_timezone":{"type":"string"},"maintenance":{"type":"boolean"}`, "id")},
 		{Name: "conversation_list", Description: "List readable saved conversations. In the owner's private chat includes all known groups; elsewhere only the current conversation. Use before recalling group discussions. Does not send messages to those chats.", Parameters: schema(``)},
-		{Name: "conversation_history", Description: "Search or read saved user/assistant messages across sessions, including active sessions. conversation_id defaults to this chat; only the owner's private chat can read groups. Results newest first with original scope, session and sequence. Use for earlier messages and who said what; memory_search is not a complete message log. Optional query is one literal case-insensitive substring of the message, not keywords combined with AND or OR; use a short distinctive fragment. Omit query or use an empty string to read recent messages. Use next_before_seq as before_seq to page backwards. session_started_at is the session start, not the message timestamp. Only messages actually received and processed by this bot are available. tool_calls lists the IDs and names of actual send_message calls; their text is included in content. An ordinary assistant text without send_message is internal run history. A send_message call is a request to send, not confirmation of delivery.", Parameters: schema(`"conversation_id":{"type":"string"},"query":{"type":"string","description":"One literal substring of a saved message, not a list of keywords. Omit or use an empty string to read recent messages."},"before_seq":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}`)},
+		{Name: "conversation_history", Description: "Search or read saved user/assistant messages across sessions, including active sessions. conversation_id defaults to this chat; only the owner's private chat can read groups. Results newest first with original scope, session and sequence. Use for earlier messages and who said what; memory_search is not a complete message log. Optional query is one literal case-insensitive substring of the message, not keywords combined with AND or OR; use a short distinctive fragment. Omit query or use an empty string to read recent messages. Use next_before_seq as before_seq to page backwards. session_started_at is the session start, not the message timestamp. Only messages actually received and processed by this bot are available. tool_calls lists the IDs and names of actual send_message/send_rich_message calls; their text is included in content. An ordinary assistant text without either delivery tool is internal run history. A delivery tool call is a request to send, not confirmation of delivery.", Parameters: schema(`"conversation_id":{"type":"string"},"query":{"type":"string","description":"One literal substring of a saved message, not a list of keywords. Omit or use an empty string to read recent messages."},"before_seq":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}`)},
 		{Name: "memory_search", Description: "Search saved memory entries by literal, case-insensitive substrings, NOT semantic search. Every whitespace-separated query term must occur in the SAME entry (content, source or kind). Punctuation is literal; commas do not mean OR. No stemming, translation, synonyms, regex or wildcard syntax. Start with one distinctive name or keyword, for example Polka; search unrelated topics in separate calls. After an empty result, shorten the query or try an alternative spelling; adding words narrows the search. An empty query returns up to 50 most recently updated readable entries, not a complete export. An empty result means no matching entries, not that no memories exist. In the owner's private chat searches this chat and saved groups by default; optional conversation_id selects an authorized scope. Results include scope and source; do not attribute group participants' facts to the owner. Use task_find/task_read for assignments and schedules, conversation_history for earlier messages.", Parameters: schema(`"query":{"type":"string","description":"Literal terms that must all match one entry. Prefer a single distinctive term, e.g. Polka. Empty string lists recent entries; do not use comma-separated topics."},"conversation_id":{"type":"string","description":"Optional authorized conversation scope. Omit to search all scopes readable from this chat."}`, "query")},
 		{Name: "memory_read", Description: "Read a memory and its source. For a group result found from the owner's private chat, supply its conversation_id from the result scope.", Parameters: schema(`"id":{"type":"string"},"conversation_id":{"type":"string"}`, "id")},
 		{Name: "memory_update", Description: "Save useful user memory with provenance. Use profile for core user facts (name, home city, timezone), preference only for explicitly stated lasting preferences, fact for contextual facts, episode for past events, hypothesis for uncertain inferences. Profile and preference rebuild USER.md automatically. A one-time request/reminder is task state, not a lasting preference; do not save it as one. Update the same ID for corrections; delete obsolete memory using delete=true.", Parameters: schema(`"id":{"type":"string"},"content":{"type":"string"},"kind":{"type":"string","enum":["profile","fact","preference","episode","hypothesis"]},"delete":{"type":"boolean"}`)},
@@ -171,7 +176,7 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 		return a.Search.Search(ctx, p.Query)
 	case "web_read":
 		return a.Search.Read(ctx, p.URL)
-	case "send_message":
+	case "send_message", "send_rich_message":
 		hasText := visibleMessageText(p.Text)
 		if !hasText && p.ArtifactID == "" {
 			return nil, errors.New("message has no visible text or artifact; if there is nothing to communicate, finish with a normal final assistant response and no tool calls")
@@ -203,26 +208,37 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 				}
 			}
 		}
-		partCount := 0
+		// Render ordinary Telegram replies before enqueuing. Every chunk has
+		// its own durable state, so a retry never repeats delivered chunks.
+		// Desktop keeps the original Markdown in a single transcript entry.
+		ordinary := in.Call.Name == "send_message" && in.Conversation.DeliveryChannel != "desktop"
+		var parts []messagefmt.Message
 		if hasText {
-			partCount++
+			if ordinary {
+				parts = messagefmt.Split(messagefmt.Markdown(p.Text), messagefmt.TextLimit)
+			} else {
+				parts = []messagefmt.Message{{Text: p.Text}}
+			}
 		}
+		partCount := len(parts)
 		if p.ArtifactID != "" {
 			partCount++
 		}
 		trace := domain.Outgoing{TurnID: in.RunKey, SessionID: in.SessionID, TaskID: in.TaskID, Trigger: in.TriggerName(), StartedAt: in.StartedAt, ReceivedAt: in.ReceivedAt, EnqueuedAt: now, PartCount: partCount}
-		partIndex := 0
-		if hasText {
+		for i, part := range parts {
 			out := trace
-			out.ID, out.Conversation, out.Text, out.State, out.PartIndex = key+"/000", in.Conversation, p.Text, "pending", partIndex
-			partIndex++
+			out.ID, out.Conversation, out.Text, out.State, out.PartIndex = fmt.Sprintf("%s/%03d", key, i), in.Conversation, part.Text, "pending", i
+			out.Entities, out.Formatted = part.Entities, ordinary
+			if ordinary && len(parts) == 1 {
+				out.Markdown = p.Text
+			}
 			if err := a.Repo.EnqueueOutgoing(ctx, out); err != nil {
 				return nil, err
 			}
 		}
 		if p.ArtifactID != "" {
 			out := trace
-			out.ID, out.Conversation, out.ArtifactID, out.State, out.PartIndex = key+"/999-file", in.Conversation, p.ArtifactID, "pending", partIndex
+			out.ID, out.Conversation, out.ArtifactID, out.State, out.PartIndex = key+"/999-file", in.Conversation, p.ArtifactID, "pending", len(parts)
 			if err := a.Repo.EnqueueOutgoing(ctx, out); err != nil {
 				return nil, err
 			}

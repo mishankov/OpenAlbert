@@ -63,6 +63,12 @@ type ToolCall struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 }
+
+// IsReplyTool identifies tools that queue a reply and finish the current turn.
+func IsReplyTool(name string) bool {
+	return name == "send_message" || name == "send_rich_message"
+}
+
 type Message struct {
 	Reasoning       string     `json:"reasoning,omitempty"`
 	SourceMessageID string     `json:"source_message_id,omitempty"`
@@ -181,7 +187,7 @@ type HistoryMessage struct {
 	Content          string            `json:"content"`
 }
 
-// HistoryToolCall identifies an actual send_message call. Its text is already
+// HistoryToolCall identifies an actual send_message or send_rich_message call. Its text is already
 // included in HistoryMessage.Content; full arguments remain in stored messages.
 type HistoryToolCall struct {
 	ID   string `json:"id"`

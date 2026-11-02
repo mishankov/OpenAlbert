@@ -117,7 +117,7 @@ func (e *Event) End(err error) {
 					source = "computer"
 				case name == "web_read", name == "web_search":
 					source = "web"
-				case name == "send_message", name == "send_group_message", name == "report_progress":
+				case name == "send_message", name == "send_rich_message", name == "send_group_message", name == "report_progress":
 					source = "telegram"
 				case name == "logs_search":
 					source = "logs"

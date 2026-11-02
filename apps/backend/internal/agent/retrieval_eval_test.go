@@ -83,7 +83,7 @@ func TestLiveRetrievalPrompts(t *testing.T) {
 					case "conversation_history":
 					case "task_find", "task_read":
 						taskCalls++
-					case "send_message":
+					case "send_message", "send_rich_message":
 						finished = true
 					default:
 						t.Fatalf("unexpected tool in retrieval evaluation: %s", call.Name)

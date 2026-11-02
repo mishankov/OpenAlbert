@@ -50,7 +50,7 @@ func TestToolErrorSurvivesCacheAndKeepsActivitySuccessful(t *testing.T) {
 func TestQueuedRichReplyPersistsTraceAndAttachmentMetadata(t *testing.T) {
 	a, repo, _, conv := fixture(t)
 	start := time.Now().Add(-3 * time.Second).UTC()
-	in := ToolInput{RunKey: "turn", SessionID: "session", Conversation: conv, StartedAt: start, ReceivedAt: start.Add(-time.Second), Call: domain.ToolCall{ID: "send", Name: "send_message", Arguments: json.RawMessage(`{"text":"` + strings.Repeat("x", 4500) + `","artifact_id":"document"}`)}}
+	in := ToolInput{RunKey: "turn", SessionID: "session", Conversation: conv, StartedAt: start, ReceivedAt: start.Add(-time.Second), Call: domain.ToolCall{ID: "send", Name: "send_rich_message", Arguments: json.RawMessage(`{"text":"` + strings.Repeat("x", 4500) + `","artifact_id":"document"}`)}}
 	if err := repo.SaveArtifact(context.Background(), domain.Artifact{ID: "document", ConversationID: conv.ID, Name: "test.txt", MIME: "text/plain", Data: []byte("test")}); err != nil {
 		t.Fatal(err)
 	}

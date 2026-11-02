@@ -202,7 +202,7 @@ func (s *Store) ListConversations(ctx context.Context) ([]domain.Conversation, e
 	return selectJSON[domain.Conversation](ctx, s.pool, "SELECT data FROM openalbert_conversations ORDER BY id")
 }
 
-// Tool-based replies are stored as assistant send_message calls, not plain content.
+// Tool-based replies are stored as assistant send_message/send_rich_message calls, not plain content.
 // Their presence records a reply request, not proof of Telegram delivery.
 func historyContent(m domain.Message) string {
 	parts := []string{}
@@ -211,7 +211,7 @@ func historyContent(m domain.Message) string {
 	}
 	if m.Role == "assistant" {
 		for _, call := range m.ToolCalls {
-			if call.Name != "send_message" {
+			if !domain.IsReplyTool(call.Name) {
 				continue
 			}
 			var args struct {
@@ -229,7 +229,7 @@ func historyToolCalls(m domain.Message) []domain.HistoryToolCall {
 	var calls []domain.HistoryToolCall
 	if m.Role == "assistant" {
 		for _, call := range m.ToolCalls {
-			if call.Name == "send_message" {
+			if domain.IsReplyTool(call.Name) {
 				calls = append(calls, domain.HistoryToolCall{ID: call.ID, Name: call.Name})
 			}
 		}
@@ -252,7 +252,7 @@ func (s *Store) ConversationHistory(ctx context.Context, scope, query string, be
   CASE WHEN m.data->>'role'='assistant' THEN (
    SELECT string_agg(call->'arguments'->>'text', E'\n')
    FROM jsonb_array_elements(COALESCE(m.data->'tool_calls','[]')) call
-   WHERE call->>'name'='send_message'
+   WHERE call->>'name' IN ('send_message','send_rich_message')
   ) END) AS content
  FROM openalbert_messages m JOIN openalbert_sessions s ON s.id=m.session_id
  WHERE s.conversation_id=$1 AND ($3::bigint=0 OR m.seq<$3)
@@ -260,7 +260,7 @@ func (s *Store) ConversationHistory(ctx context.Context, scope, query string, be
 )
 SELECT seq,id,session_data,message_data FROM history WHERE (content<>'' OR EXISTS (
  SELECT 1 FROM jsonb_array_elements(COALESCE(message_data->'tool_calls','[]')) call
- WHERE message_data->>'role'='assistant' AND call->>'name'='send_message'
+ WHERE message_data->>'role'='assistant' AND call->>'name' IN ('send_message','send_rich_message')
 ))
 AND ($2='' OR strpos(lower(content),lower($2))>0)
 ORDER BY seq DESC LIMIT $4`, scope, query, before, historyLimit(n))

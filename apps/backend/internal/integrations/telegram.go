@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"openalbert/apps/backend/internal/domain"
@@ -382,7 +383,29 @@ func (t *Telegram) Send(ctx context.Context, c domain.Conversation, text string)
 
 // SendFormatted sends a durable outbox chunk without parsing its text again.
 func (t *Telegram) SendFormatted(ctx context.Context, c domain.Conversation, text string, entities []domain.TextEntity) (string, error) {
-	return t.sendRich(ctx, c, messagefmt.LegacyHTML(messagefmt.Message{Text: text, Entities: entities}), "html")
+	if !t.allowed(c) {
+		return "", errors.New("Telegram recipient is not allowed")
+	}
+	if text == "" || !utf8.ValidString(text) || len(utf16.Encode([]rune(text))) > messagefmt.TextLimit {
+		return "", errors.New("Telegram text must contain 1–4096 UTF-16 units and valid UTF-8")
+	}
+	payload := map[string]any{"chat_id": c.ChatID, "text": text}
+	if len(entities) > 0 {
+		payload["entities"] = entities
+	}
+	if c.ThreadID > 0 {
+		payload["message_thread_id"] = c.ThreadID
+	}
+	var result struct {
+		ID int64 `json:"message_id"`
+	}
+	if err := t.api(ctx, "sendMessage", payload, &result); err != nil {
+		return "", deliveryError(err)
+	}
+	if result.ID <= 0 {
+		return "", &TelegramDeliveryError{Cause: errors.New("missing message ID"), Unknown: true}
+	}
+	return strconv.FormatInt(result.ID, 10), nil
 }
 
 func (t *Telegram) sendRich(ctx context.Context, c domain.Conversation, text, format string) (string, error) {

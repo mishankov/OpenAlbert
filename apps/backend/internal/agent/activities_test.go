@@ -155,7 +155,7 @@ func TestToolScopeAndUnsupportedCapabilities(t *testing.T) {
 	if err = repo.SaveArtifact(ctx, domain.Artifact{ID: "other-art", ConversationID: "other", Name: "secret.txt", MIME: "text/plain", Data: []byte("secret")}); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct{ name, args string }{{"task_read", `{"id":"other-task"}`}, {"artifact_read", `{"id":"other-art"}`}, {"send_message", `{"text":"leak","artifact_id":"other-art"}`}, {"computer_exec", `{"command":"pwd"}`}, {"soul_update", `{"content":"changed"}`}} {
+	for _, tc := range []struct{ name, args string }{{"task_read", `{"id":"other-task"}`}, {"artifact_read", `{"id":"other-art"}`}, {"send_message", `{"text":"leak","artifact_id":"other-art"}`}, {"send_rich_message", `{"text":"leak","artifact_id":"other-art"}`}, {"computer_exec", `{"command":"pwd"}`}, {"soul_update", `{"content":"changed"}`}} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := tool(t, a, conv, "scope", tc.name, tc.name, tc.args)
 			if !strings.Contains(out, `"error"`) || strings.Contains(out, "Secret goal") {
@@ -265,7 +265,7 @@ func TestPostSessionAnalysisRetainsMissedMemoryIdempotently(t *testing.T) {
 func TestOutgoingEmojiRichMessagePreservesOriginal(t *testing.T) {
 	a, repo, _, conv := fixture(t)
 	args, _ := json.Marshal(map[string]string{"text": strings.Repeat("😀", 4000)})
-	out := tool(t, a, conv, "unicode", "send", "send_message", string(args))
+	out := tool(t, a, conv, "unicode", "send", "send_rich_message", string(args))
 	if strings.Contains(out, `"error"`) {
 		t.Fatal(out)
 	}

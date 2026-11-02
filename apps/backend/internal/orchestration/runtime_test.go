@@ -329,7 +329,7 @@ func TestDeliveryPreservesAlreadyRenderedCodeEntities(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
 			t.Error(err)
 		}
-		if payload.RichMessage["html"] != "<pre>**literal**</pre>" || payload.Text != "" || len(payload.Entities) != 0 {
+		if payload.Text != "**literal**" || len(payload.Entities) != 1 || payload.Entities[0].Type != "pre" || payload.Entities[0].Length != 11 || len(payload.RichMessage) != 0 || payload.ParseMode != "" {
 			t.Errorf("formatted code parsed twice: %+v", payload)
 		}
 		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":42}}`)

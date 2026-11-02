@@ -12,21 +12,25 @@ import (
 )
 
 func TestConversationHistoryContract(t *testing.T) {
-	t.Run("memory", func(t *testing.T) { historyContract(t, NewMemory()) })
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL")
-		}
-		repo, err := Open(context.Background(), url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer repo.Close()
-		historyContract(t, repo)
-	})
+	for _, name := range []string{"send_message", "send_rich_message"} {
+		t.Run(name, func(t *testing.T) {
+			t.Run("memory", func(t *testing.T) { historyContract(t, NewMemory(), name) })
+			t.Run("postgres", func(t *testing.T) {
+				url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
+				if url == "" {
+					t.Skip("set OPENALBERT_TEST_DATABASE_URL")
+				}
+				repo, err := Open(context.Background(), url)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer repo.Close()
+				historyContract(t, repo, name)
+			})
+		})
+	}
 }
-func historyContract(t *testing.T, repo domain.Repository) {
+func historyContract(t *testing.T, repo domain.Repository, replyTool string) {
 	ctx := context.Background()
 	nonce := fmt.Sprintf("history-%d", time.Now().UnixNano())
 	group := domain.Conversation{ID: nonce + "-group", ChatID: -12, Title: "Команда"}
@@ -52,7 +56,7 @@ func historyContract(t *testing.T, repo domain.Repository) {
 	}{
 		{"old", domain.Message{Role: "user", Content: "Старый вопрос"}},
 		{"active", domain.Message{AuthorID: 7, Role: "user", Content: "Новый вопрос"}},
-		{"active", domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "reply", Name: "send_message", Arguments: args}}}},
+		{"active", domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "reply", Name: replyTool, Arguments: args}}}},
 		{"active", domain.Message{Role: "tool", Content: "INTERNAL TOOL RESULT"}},
 		{"active", domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "search", Name: "memory_search", Arguments: json.RawMessage(`{"query":"secret"}`)}}}},
 		{"private", domain.Message{Role: "user", Content: "PRIVATE SECRET"}},
@@ -68,7 +72,7 @@ func historyContract(t *testing.T, repo domain.Repository) {
 		t.Fatal(err)
 	}
 	rows, err := repo.ConversationHistory(ctx, group.ID, "", 0, 2)
-	if err != nil || len(rows) != 2 || len(rows[0].ToolCalls) != 1 || rows[0].ToolCalls[0].Name != "send_message" || rows[0].ToolCalls[0].ID != "reply" || !strings.Contains(rows[0].Content, "Ответ команды") {
+	if err != nil || len(rows) != 2 || len(rows[0].ToolCalls) != 1 || rows[0].ToolCalls[0].Name != replyTool || rows[0].ToolCalls[0].ID != "reply" || !strings.Contains(rows[0].Content, "Ответ команды") {
 		t.Fatalf("first page: %v %v", rows, err)
 	}
 	if rows[1].AuthorID != 7 {

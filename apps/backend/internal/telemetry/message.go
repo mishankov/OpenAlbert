@@ -32,7 +32,7 @@ func readableMessage(operation, result string, elapsed time.Duration, fields map
 			"browser_fill": "Заполнено поле на странице", "browser_wait": "Завершено ожидание страницы",
 			"browser_tabs": "Получен список вкладок", "browser_screenshot": "Сохранён скриншот страницы",
 			"browser_download": "Скачан файл", "browser_close_page": "Закрыта вкладка", "browser_close": "Закрыт браузер",
-			"send_message": "Ответ поставлен в очередь Telegram", "send_group_message": "Сообщение поставлено в очередь Telegram для группы", "memory_update": "Обновлена память",
+			"send_rich_message": "Rich-ответ поставлен в очередь Telegram", "send_message": "Ответ поставлен в очередь Telegram", "send_group_message": "Сообщение поставлено в очередь Telegram для группы", "memory_update": "Обновлена память",
 			"memory_search": "Выполнен поиск по памяти", "memory_read": "Прочитана запись памяти",
 			"task_create": "Создана длительная задача", "task_find": "Найдены задачи", "task_read": "Прочитано состояние задачи", "task_update": "Обновлена задача",
 			"artifact_save": "Сохранён артефакт", "artifact_read": "Прочитан артефакт",
@@ -67,7 +67,7 @@ func readableMessage(operation, result string, elapsed time.Duration, fields map
 				action = "Ошибка открытия страницы в Chromium"
 			case "browser_click":
 				action = "Ошибка нажатия на странице"
-			case "send_message":
+			case "send_message", "send_rich_message":
 				action = "Ошибка постановки ответа в очередь"
 			case "memory_update":
 				action = "Ошибка обновления памяти"

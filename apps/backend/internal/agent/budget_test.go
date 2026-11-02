@@ -28,7 +28,7 @@ func TestFinalizationOnlyAdvertisesDeliveryAndHasIndependentCheckpoint(t *testin
 			t.Fatal(err)
 		}
 	}
-	if len(model.tools) != 2 || len(model.tools[0]) <= 1 || len(model.tools[1]) != 1 || model.tools[1][0].Name != "send_message" {
+	if len(model.tools) != 2 || len(model.tools[0]) <= 1 || len(model.tools[1]) != 2 || model.tools[1][0].Name != "send_message" || model.tools[1][1].Name != "send_rich_message" {
 		t.Fatalf("finalization reused research cache or tools: %+v", model.tools)
 	}
 }

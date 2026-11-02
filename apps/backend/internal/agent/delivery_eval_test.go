@@ -70,7 +70,7 @@ func TestLiveDeliveryPrompts(t *testing.T) {
 						t.Fatalf("evaluation tool failed: %s", call.Name)
 					}
 					turn.Messages = append(turn.Messages, domain.Message{Role: "tool", ToolCallID: call.ID, Content: output})
-					if call.Name == "send_message" {
+					if domain.IsReplyTool(call.Name) {
 						finished = true
 					}
 				}
