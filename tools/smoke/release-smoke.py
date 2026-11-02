@@ -140,6 +140,7 @@ def main():
                 assert sql("SELECT count(*) FROM openalbert_artifacts WHERE octet_length(content)=0") == "1"
                 assert state.analyses > 0 and len(state.sent) == 2
                 assert all(str(message["chat_id"]) == "42" for message in state.sent)
+                assert {"rich" if "rich_message" in message else "ordinary" for message in state.sent} == {"ordinary", "rich"}, "both reply formats must reach Telegram"
                 assert len(read_json(app_url + "/api/inspect/memory/conversations")["conversations"]) > 0
                 assert "OpenAlbert" in read_json(app_url + "/api/inspect/memory/soul")["soul"]
                 objects = run(compose + ["run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "minio-init", "-ec",

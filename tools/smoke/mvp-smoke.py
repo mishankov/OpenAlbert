@@ -132,7 +132,7 @@ class FakeState:
             task = json.loads(user_text.split("Task: ", 1)[1])
             calls = [self.call("task_update", {"id": task["id"], "status": "completed",
                       "result": self.marker + " task persisted"}, "task_done"),
-                     self.call("send_message", {"text": self.marker + ": completed"}, "notify_done")]
+                     self.call("send_rich_message", {"text": self.marker + ": completed"}, "notify_done")]
         else:
             assert self.marker in user_text, f"unexpected model request: {user_text[:500]!r}"
             later = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=5)).isoformat()
@@ -190,9 +190,15 @@ def handler_for(state):
             elif method == "sendChatAction":
                 assert body.get("action") == "typing"
                 self.json({"ok": True, "result": True})
-            elif method == "sendRichMessage":
-                assert "markdown" in body.get("rich_message", {}), "reply is not Rich Markdown"
-                assert "text" not in body and "entities" not in body, "legacy text formatting leaked"
+            elif method in ("sendMessage", "sendRichMessage"):
+                if method == "sendRichMessage":
+                    assert "markdown" in body.get("rich_message", {}), "reply is not Rich Markdown"
+                    assert "text" not in body and "entities" not in body, "ordinary text formatting leaked"
+                else:
+                    assert isinstance(body.get("text"), str) and body["text"], "ordinary reply has no text"
+                    assert len(body["text"].encode("utf-16-le")) // 2 <= 4096, "ordinary reply exceeds Telegram limit"
+                    assert "rich_message" not in body and "parse_mode" not in body, "ordinary reply used rich formatting or parse mode"
+                    assert isinstance(body.get("entities", []), list), "ordinary reply entities must be an array"
                 with state.lock:
                     state.sent.append(body)
                     count = len(state.sent)
@@ -276,6 +282,7 @@ def main():
             assert sql("SELECT count(*) FROM openalbert_tasks WHERE data->>'status'='completed'") == "1", "task not completed"
             assert sql("SELECT count(*) FROM openalbert_artifacts WHERE octet_length(content)=0") == str(2 if args.with_browser else 1), "artifact body should live in S3"
             assert len(state.sent) == 2 and all(str(message["chat_id"]) == "42" for message in state.sent), "unexpected deliveries"
+            assert {"rich" if "rich_message" in message else "ordinary" for message in state.sent} == {"ordinary", "rich"}, "both reply formats must reach Telegram"
             assert state.searches == (0 if args.without_search else 1), "Yandex adapter was not called exactly once"
             assert state.analyses > 0, "post-session analysis did not run"
             knowledge = run(cmd + ["exec", "-T", "openalbert", "sh", "-c", "find /data/knowledge -type f -exec cat {} \\;"], env)
@@ -331,7 +338,7 @@ def main():
             assert all(row.get("_msg", "").startswith("[openalbert]") and row.get("level") in ("info", "warn", "error") for row in traced_events), "normalized message or level missing"
             print(json.dumps({"result": "passed", "incoming": 1, "deliveries": 2, "task": "completed", "search_requests": state.searches,
                               "session_analyses": state.analyses, "s3_document": "verified", "memory": "survived restart",
-                              "duplicate_delivery": False, "browser": "page, screenshot and process cleanup verified" if args.with_browser else "not exercised", "wide_events": len(events), "traced_events": len(traced_events), "telegram_format": "rich_markdown"}, ensure_ascii=False), flush=True)
+                              "duplicate_delivery": False, "browser": "page, screenshot and process cleanup verified" if args.with_browser else "not exercised", "wide_events": len(events), "traced_events": len(traced_events), "telegram_formats": ["ordinary", "rich"]}, ensure_ascii=False), flush=True)
     except Exception:
         if app_created:
             print(run(compose + ["logs", "--tail=60", "openalbert"], env), flush=True)
