@@ -91,7 +91,7 @@ func TestReplyToolsChooseTelegramFormatAndDeliverOnce(t *testing.T) {
 	}
 }
 
-func TestRichReplyEndsNormalAndBudgetFinalizationTurns(t *testing.T) {
+func TestRichReplyFinishesNaturallyOrAtBudget(t *testing.T) {
 	for _, maxSteps := range []int{1, 4} {
 		t.Run(map[int]string{1: "budget finalization", 4: "normal turn"}[maxSteps], func(t *testing.T) {
 			a, repo, _, conv := newFixture(t)
@@ -110,7 +110,11 @@ func TestRichReplyEndsNormalAndBudgetFinalizationTurns(t *testing.T) {
 			env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: maxSteps})
 			requireWorkflowOK(t, env)
 			rows, err := repo.PendingOutgoing(context.Background(), 10)
-			if err != nil || len(rows) != 1 || rows[0].Formatted || rows[0].Trigger == "failure" || model.count() != 2 {
+			wantCalls := 3 // The model finishes after observing the queued reply.
+			if maxSteps == 1 {
+				wantCalls = 2 // Budget finalization has no further model step.
+			}
+			if err != nil || len(rows) != 1 || rows[0].Formatted || rows[0].Trigger == "failure" || model.count() != wantCalls {
 				t.Fatalf("rich reply did not finish turn: %+v %v", rows, err)
 			}
 		})

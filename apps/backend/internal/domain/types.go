@@ -64,7 +64,7 @@ type ToolCall struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-// IsReplyTool identifies tools that queue a reply and finish the current turn.
+// IsReplyTool identifies tools that queue user-facing replies.
 func IsReplyTool(name string) bool {
 	return name == "send_message" || name == "send_rich_message"
 }

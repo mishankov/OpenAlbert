@@ -61,7 +61,8 @@ func TestTenDailyTaskRunsKeepSlotAndDeliverOnce(t *testing.T) {
 				}
 			})
 			// Simulate 143 seconds of generation on each run with the virtual clock.
-			env.OnActivity("ModelCall", mock.Anything, mock.Anything).After(143*time.Second).Return(agent.ModelOutput{Message: reply("Synthetic daily result")}, nil)
+			env.OnActivity("ModelCall", mock.Anything, mock.MatchedBy(func(in agent.ModelInput) bool { return in.Step == 0 })).After(143*time.Second).Return(agent.ModelOutput{Message: reply("Synthetic daily result")}, nil)
+			env.OnActivity("ModelCall", mock.Anything, mock.MatchedBy(func(in agent.ModelInput) bool { return in.Step == 1 })).Return(agent.ModelOutput{Message: finish("")}, nil)
 			// Pause after the tenth completion, keeping its persisted next slot available for assertions.
 			env.RegisterDelayedCallback(func() {
 				saved, _, err := repo.Task(ctx, conv.ID, task.ID)

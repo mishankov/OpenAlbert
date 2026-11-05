@@ -145,7 +145,7 @@ func TestSessionContinuationPreservesContextQueuedMessagesAndTurnKeys(t *testing
 		t.Fatalf("context split into multiple sessions: %+v", analysis)
 	}
 	pending, _ := repo.PendingIncoming(ctx, 10)
-	if len(pending) != 0 || a.Model.(*scriptedModel).count() != 2 {
+	if len(pending) != 0 || a.Model.(*scriptedModel).count() != 4 {
 		t.Fatalf("messages lost or processed twice: %+v", pending)
 	}
 }
@@ -225,7 +225,7 @@ func TestSessionContinuationPreservesPendingCommands(t *testing.T) {
 			resumed.ExecuteWorkflow(SessionWorkflow, in)
 			requireWorkflowOK(t, resumed)
 			pending, _ := repo.PendingIncoming(ctx, 10)
-			if len(pending) > 0 || a.Model.(*scriptedModel).count() != 2 {
+			if len(pending) > 0 || a.Model.(*scriptedModel).count() != 4 {
 				t.Fatalf("command boundary lost messages: %+v", pending)
 			}
 			sessions, _ := repo.PendingAnalysis(ctx, 10)

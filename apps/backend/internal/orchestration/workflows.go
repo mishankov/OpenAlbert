@@ -342,6 +342,18 @@ func runTurn(ctx workflow.Context, in agent.RunInput, maxSteps int, steer ...fun
 	if turn.Done {
 		return turn, nil
 	}
+	// Keep recorded turns replayable; new turns let the model finish naturally
+	// after any number of ordinary or rich reply-tool calls.
+	multiMessageTurn := workflow.GetVersion(ctx, "multi-message-turn/"+in.Key, workflow.DefaultVersion, 1) != workflow.DefaultVersion
+	if multiMessageTurn && len(steer) > 0 {
+		steerTurn := steer[0]
+		steer = []func(*agent.Turn) error{func(turn *agent.Turn) error {
+			sent := turn.Sent
+			err := steerTurn(turn)
+			turn.Sent = turn.Sent || sent
+			return err
+		}}
+	}
 steps:
 	for step := 0; step < maxSteps; step++ {
 		if len(steer) > 0 {
@@ -469,7 +481,7 @@ steps:
 				return turn, err
 			}
 		}
-		if turn.Sent && workflow.GetVersion(ctx, "finish-turn-after-reply", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
+		if !multiMessageTurn && turn.Sent && workflow.GetVersion(ctx, "finish-turn-after-reply", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
 			return turn, nil
 		}
 	}
@@ -482,12 +494,13 @@ steps:
 // One reserved synthesis call can use existing evidence but cannot continue
 // research or mutate task state. The caller retains NotifyFailure as a fallback.
 func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, steer ...func(*agent.Turn) error) (agent.Turn, error) {
+	multiMessageTurn := workflow.GetVersion(ctx, "multi-message-turn/"+turn.Input.Key, workflow.DefaultVersion, 1) != workflow.DefaultVersion
 	if len(steer) > 0 {
 		if err := steer[0](&turn); err != nil {
 			return turn, err
 		}
 	}
-	turn.Messages = append(turn.Messages, domain.Message{Role: "user", Content: "The research step budget is exhausted. This is the single reserved finalization step. Stop researching and queue one final reply now to answer the latest user request from the evidence already collected. Give a useful partial result when possible, clearly mark gaps and uncertainty, and never invent missing facts or claim unfinished work succeeded. If the evidence is insufficient, say what prevented completion. Only send_message and send_rich_message are available. Prefer send_message; choose send_rich_message only if rich formatting is needed. Do not request other tools."})
+	turn.Messages = append(turn.Messages, domain.Message{Role: "user", Content: "The research step budget is exhausted. This is the single reserved finalization step. Stop researching and queue the remaining answer now from the evidence already collected. You may send multiple requested messages or artifacts in this final tool batch; do not resend parts already queued. Give a useful partial result when possible, clearly mark gaps and uncertainty, and never invent missing facts or claim unfinished work succeeded. If the evidence is insufficient, say what prevented completion. Only send_message and send_rich_message are available. Prefer send_message; choose send_rich_message only if rich formatting is needed. Do not request other tools."})
 	turn.Messages = agent.CompactContext(turn.Messages)
 	var result agent.ModelOutput
 	turn.Stats.ModelCalls++
@@ -513,8 +526,11 @@ func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, steer ...fu
 	for _, call := range message.ToolCalls {
 		// Validate even a forged model response; advertised tools are not a guard.
 		var output string
-		if !domain.IsReplyTool(call.Name) || turn.Sent {
+		if !domain.IsReplyTool(call.Name) || (turn.Sent && !multiMessageTurn) {
 			output = `{"error":"Finalization only permits one successful reply via send_message or send_rich_message; no further actions are executed."}`
+			if multiMessageTurn {
+				output = `{"error":"Finalization only permits reply tools; no further actions are executed."}`
+			}
 		} else {
 			recordTool(&turn, call.Name)
 			if err := workflow.ExecuteActivity(ctx, "ToolCall", toolInput(turn, step, call)).Get(ctx, &output); err != nil {

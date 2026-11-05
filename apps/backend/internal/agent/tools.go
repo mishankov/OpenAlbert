@@ -38,7 +38,7 @@ Background checks do not require notifications. If nothing warrants a message, f
 
 Examples: unchanged monitoring results need no message; a user asking "Any news?" needs an answer even if there is no news. Send routine status reports only when requested. Never send placeholders or announce a decision to stay silent.
 
-Send once after completing the work. Success means queued delivery and ends the turn after the current tool batch. Do not send a follow-up confirmation.
+Success means queued delivery, not confirmed delivery, and does not end the turn. Send as many useful messages or artifacts as the request needs, across tool batches if necessary. For a requested series, send all remaining parts without waiting for the user to ask for each one. Do not resend already queued parts or add a follow-up confirmation. When the work is complete, finish with an ordinary final assistant response and no tool calls; that response stays internal.
 
 To send an image or file with a description in one message, supply both text and artifact_id in the same call. Text that fits a 1024 UTF-16-unit caption after Markdown rendering is attached to the artifact. Longer descriptions are sent separately without truncation. Supported images are sent as photos; other artifacts are sent as documents.
 
@@ -46,7 +46,7 @@ Use send_message by default for ordinary conversation, explanations, reminders a
 
 const sendRichMessageDescription = `Send a Rich Markdown reply to the current conversation using Telegram sendRichMessage. Prefer send_message for ordinary replies. Use this tool when native tables, formulas, collapsible details or other rich-only blocks materially help, or the user explicitly requests rich formatting. Selected fragment quotes of rich messages may not reach the bot through the current Telegram Bot API.
 
-The same delivery and notification rules as send_message apply: send only a useful final reply, never intermediate progress or placeholders. Success means queued, not confirmed delivered, and ends the turn after the current tool batch; do not send a follow-up confirmation. Supports artifact_id with the same caption rules as send_message. Use original Rich Markdown without MarkdownV2 escaping. Limits: 32000 UTF-8 bytes, 500 blocks, 20 table columns, 16 nesting levels.`
+The same delivery and notification rules as send_message apply: send useful requested results, never intermediate progress or placeholders. Success means queued, not confirmed delivered, and does not end the turn. Send all requested parts, using either reply tool as appropriate, without waiting for the user to ask for each one. Do not resend queued parts or add a follow-up confirmation. When the work is complete, finish with an ordinary final assistant response and no tool calls; that response stays internal. Supports artifact_id with the same caption rules as send_message. Use original Rich Markdown without MarkdownV2 escaping. Limits: 32000 UTF-8 bytes, 500 blocks, 20 table columns, 16 nesting levels.`
 
 func Definitions() []domain.Tool {
 	return []domain.Tool{

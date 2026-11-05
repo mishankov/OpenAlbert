@@ -76,7 +76,7 @@ func TestNewSessionInterruptsTurnAndKeepsFollowingMessages(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
 	requireWorkflowOK(t, env)
-	if !reset || !during || model.count() != 2 {
+	if !reset || !during || model.count() != 3 {
 		t.Fatalf("unexpected reset flow: reset=%v during=%v model calls=%d", reset, during, model.count())
 	}
 	sessions, _ := repo.PendingAnalysis(ctx, 10)

@@ -33,14 +33,35 @@ func (quietLogger) Error(string, ...any) {}
 type scriptedModel struct {
 	mu    sync.Mutex
 	calls int
-	run   func(int, []domain.Message) (domain.Message, error)
+	steps int
+	// Most fixtures describe one delivered answer. Finish it naturally unless
+	// the test explicitly scripts work after a reply-tool result.
+	continueAfterReply bool
+	run                func(int, []domain.Message) (domain.Message, error)
 }
 
 func (m *scriptedModel) Complete(ctx context.Context, msg []domain.Message, _ []domain.Tool) (domain.Completion, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	i := m.calls
 	m.calls++
+	if !m.continueAfterReply && len(msg) > 0 {
+		last := msg[len(msg)-1]
+		if last.Role == "tool" && !agent.ToolFailed(last.Content) {
+			for i := len(msg) - 2; i >= 0; i-- {
+				if msg[i].Role != "assistant" {
+					continue
+				}
+				for _, call := range msg[i].ToolCalls {
+					if call.ID == last.ToolCallID && domain.IsReplyTool(call.Name) {
+						return domain.Completion{Message: finish(""), InputTokens: 10, OutputTokens: 5}, nil
+					}
+				}
+				break
+			}
+		}
+	}
+	i := m.steps
+	m.steps++
 	out, err := m.run(i, msg)
 	return domain.Completion{Message: out, InputTokens: 10, OutputTokens: 5}, err
 }
@@ -117,7 +138,7 @@ func TestProgressToolDoesNotEndTheTurn(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
 	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 4})
 	requireWorkflowOK(t, env)
-	if model.count() != 2 {
+	if model.count() != 3 {
 		t.Fatal("progress ended the research")
 	}
 	rows, err := repo.PendingOutgoing(context.Background(), 10)
@@ -216,7 +237,7 @@ func TestSessionsPreservePersonalMemoryAndIndependentTask(t *testing.T) {
 	if len(out) != 2 || out[1].Text != "The existing task is queued." {
 		t.Fatalf("explicit status reply not delivered %+v", out)
 	}
-	if model.count() != 5 {
+	if model.count() != 7 {
 		t.Fatalf("unexpected model calls%d", model.count())
 	}
 }
@@ -256,7 +277,7 @@ func TestTaskWaitsPastSessionCloseThenCompletes(t *testing.T) {
 	if err != nil || saved.Status != "completed" {
 		t.Fatalf("one-time task did not complete %+v %v", saved, err)
 	}
-	if model.count() != 2 {
+	if model.count() != 3 {
 		t.Fatalf("task repeated%d calls", model.count())
 	}
 	out, _ := repo.PendingOutgoing(ctx, 10)
@@ -297,7 +318,7 @@ func TestRepeatingTaskReschedulesAndCanCancelItself(t *testing.T) {
 	if saved.Status != "cancelled" || saved.Result != "No longer needed" {
 		t.Fatalf("cancellation lost %+v", saved)
 	}
-	if model.count() != 2 {
+	if model.count() != 3 {
 		t.Fatalf("cancelled task called model%d times", model.count())
 	}
 }
@@ -400,7 +421,7 @@ func TestNewMessageSteersActiveRunBeforeNextModelCall(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
 	requireWorkflowOK(t, env)
-	if !signalled || model.count() != 2 {
+	if !signalled || model.count() != 3 {
 		t.Fatalf("steering did not join active run, calls%d", model.count())
 	}
 	pending, _ := repo.PendingIncoming(ctx, 10)
@@ -460,7 +481,7 @@ func TestStopCancelsActiveTurnAndNextMessageHasValidHistory(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "continue"}) }, 100*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
 	requireWorkflowOK(t, env)
-	if !sentStop || model.count() != 2 {
+	if !sentStop || model.count() != 3 {
 		t.Fatalf("unexpected stop model calls%d", model.count())
 	}
 	inbox, _ := repo.PendingIncoming(ctx, 10)
@@ -552,7 +573,7 @@ func TestInputDuringModelCallDiscardsStaleSideEffect(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
 	requireWorkflowOK(t, env)
-	if model.count() != 2 {
+	if model.count() != 3 {
 		t.Fatalf("stale completion not discarded, calls%d", model.count())
 	}
 	tasks, err := repo.FindTasks(ctx, conv.ID, "")
@@ -610,17 +631,24 @@ func TestInitiativeUsesInterestsAndCreatesIndependentTaskWithoutNotificationSpam
 	}
 }
 
-func TestReplyEndsTurnEvenWhenModelWouldKeepSending(t *testing.T) {
+func TestRecordedTurnsStillStopAfterReply(t *testing.T) {
 	for _, maxSteps := range []int{1, 5} {
 		t.Run(fmt.Sprint(maxSteps), func(t *testing.T) {
 			a, repo, _, conv := newFixture(t)
-			model := &scriptedModel{run: func(n int, _ []domain.Message) (domain.Message, error) {
+			model := &scriptedModel{continueAfterReply: true, run: func(n int, _ []domain.Message) (domain.Message, error) {
 				return calls(call(fmt.Sprintf("reply-%d", n), "send_message", map[string]string{"text": "Hello; ready to help."})), nil
 			}}
 			a.Model = model
 			env := newEnv(a)
-			env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
-			env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: maxSteps})
+			env.OnGetVersion("multi-message-turn/legacy-reply", workflow.DefaultVersion, 1).Return(workflow.DefaultVersion).Once()
+			env.ExecuteWorkflow(func(ctx workflow.Context) error {
+				ctx = options(ctx)
+				turn, err := runTurn(ctx, agent.RunInput{Key: "legacy-reply", SessionID: "legacy-session", ConversationID: conv.ID, IncomingIDs: []string{"first"}}, maxSteps)
+				if err != nil {
+					return err
+				}
+				return workflow.ExecuteActivity(ctx, "Finish", finishInput(turn, nil)).Get(ctx, nil)
+			})
 			requireWorkflowOK(t, env)
 			outgoing, err := repo.PendingOutgoing(context.Background(), 100)
 			if err != nil || len(outgoing) != 1 || outgoing[0].Text != "Hello; ready to help." {

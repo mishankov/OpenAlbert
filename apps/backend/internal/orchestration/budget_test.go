@@ -15,7 +15,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-func TestBudgetFinalizationUsesEvidenceAndQueuesOneReply(t *testing.T) {
+func TestBudgetFinalizationUsesEvidenceAndQueuesAllReplies(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
 	model := &scriptedModel{run: func(n int, messages []domain.Message) (domain.Message, error) {
 		if n < 2 {
@@ -31,8 +31,8 @@ func TestBudgetFinalizationUsesEvidenceAndQueuesOneReply(t *testing.T) {
 		if !found {
 			t.Fatal("collected evidence lost before finalization")
 		}
-		// Even fabricated extra actions and duplicate replies must not execute.
-		return calls(call("forged", "task_create", map[string]string{"title": "Unwanted", "goal": "Keep researching"}), call("answer", "send_message", map[string]string{"text": "Нашёл официальный источник. Остальные данные проверить не успел."}), call("duplicate", "send_message", map[string]string{"text": "Duplicate"})), nil
+		// Finalization can send all requested parts, but cannot create tasks.
+		return calls(call("forged", "task_create", map[string]string{"title": "Unwanted", "goal": "Keep researching"}), call("answer", "send_message", map[string]string{"text": "Нашёл официальный источник. Остальные данные проверить не успел."}), call("table", "send_rich_message", map[string]string{"text": "| Источник | Статус |\n|---|---|\n| Официальный | Проверен |"})), nil
 	}}
 	a.Model = model
 	env := newEnv(a)
@@ -40,7 +40,7 @@ func TestBudgetFinalizationUsesEvidenceAndQueuesOneReply(t *testing.T) {
 	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 2})
 	requireWorkflowOK(t, env)
 	rows, err := repo.PendingOutgoing(context.Background(), 10)
-	if err != nil || len(rows) != 1 || !strings.Contains(rows[0].Text, "Остальные данные") || model.count() != 3 {
+	if err != nil || len(rows) != 2 || !strings.Contains(rows[0].Text, "Остальные данные") || !strings.Contains(rows[1].Text, "Официальный") || model.count() != 3 {
 		t.Fatalf("partial result or bound lost: %+v %v", rows, err)
 	}
 	tasks, err := repo.FindTasks(context.Background(), conv.ID, "")
@@ -49,7 +49,7 @@ func TestBudgetFinalizationUsesEvidenceAndQueuesOneReply(t *testing.T) {
 	}
 	raw, ok, err := repo.LoadCheckpoint(context.Background(), "turn-done/"+rows[0].TurnID)
 	var turn agent.Turn
-	if err != nil || !ok || json.Unmarshal(raw, &turn) != nil || !turn.Sent || turn.Stats.FinishReason != "reply_queued" || turn.Stats.ModelCalls != 3 || turn.Stats.ToolCalls != 3 {
+	if err != nil || !ok || json.Unmarshal(raw, &turn) != nil || !turn.Sent || turn.Stats.FinishReason != "reply_queued" || turn.Stats.ModelCalls != 3 || turn.Stats.ToolCalls != 4 {
 		t.Fatalf("finalization not recorded: %+v %v", turn, err)
 	}
 }

@@ -50,7 +50,7 @@ func TestWorkflowSummaryCountsWorkAndPropagatesTurnToDelivery(t *testing.T) {
 			summary = row
 		}
 	}
-	if summary == nil || summary["model_calls"] != float64(2) || summary["tool_calls"] != float64(3) || summary["tool_errors"] != float64(1) || summary["input_tokens"] != float64(20) || summary["output_tokens"] != float64(10) {
+	if summary == nil || summary["model_calls"] != float64(3) || summary["tool_calls"] != float64(3) || summary["tool_errors"] != float64(1) || summary["input_tokens"] != float64(30) || summary["output_tokens"] != float64(15) {
 		t.Fatalf("wrong aggregate: %v", summary)
 	}
 	if summary["attempt"] != float64(1) || summary["workflow_id"] == nil || summary["trigger"] != "message" {
