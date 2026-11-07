@@ -20,6 +20,7 @@ type Config struct {
 	StateDir        string `json:"state_dir"`
 	WorkDir         string `json:"work_dir"`
 	Enabled         bool   `json:"enabled"`
+	ExcludeComputer bool   `json:"exclude_computer,omitempty"`
 	Time            string `json:"time"`
 	Timezone        string `json:"timezone"`
 	KeepDays        int    `json:"keep_days"`

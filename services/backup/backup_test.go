@@ -156,6 +156,104 @@ func TestRestoreRejectsTraversalAndLinks(t *testing.T) {
 	}
 }
 
+func TestExcludeComputerCreateAndRestore(t *testing.T) {
+	c, key := fixture(t)
+	c.ExcludeComputer = true
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := AtomicJSON(configPath, c); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	if c, err = LoadConfig(configPath); err != nil || !c.ExcludeComputer {
+		t.Fatalf("cannot load computer exclusion: %v", err)
+	}
+	// Real virtual environments contain links; none of the computer tree should
+	// be inspected, archived or required at restore time when it is excluded.
+	home := filepath.Join(c.Root, "container_data/computer/home")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "private.txt"), []byte("computer-only data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/bin/python3", filepath.Join(home, "python3")); err != nil {
+		t.Fatal(err)
+	}
+	var steps []string
+	base := fakeCommands(t, c, &steps, false, nil)
+	stoppedComputer := false
+	command := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if args[0] == "inspect" && args[1] == "id-computer" && args[len(args)-1] != "{{json .State}}" {
+			t.Fatal("excluded computer image or mounts were inspected")
+		}
+		if slices.Contains(args, "stop") {
+			stoppedComputer = slices.Contains(args, "computer")
+		}
+		out, err := base(ctx, name, args...)
+		if err != nil {
+			return out, err
+		}
+		if strings.Contains(strings.Join(args, " "), " config --format json") {
+			var config map[string]map[string]any
+			if err := json.Unmarshal(out, &config); err != nil {
+				t.Fatal(err)
+			}
+			// A local computer without a registry digest or standard data mounts
+			// must not prevent an application-only backup.
+			config["services"]["computer"] = map[string]any{"image": "local/computer:latest"}
+			return json.Marshal(config)
+		}
+		if strings.Contains(string(out), "openalbert\n") && slices.Contains(args, "--services") {
+			out = append(out, []byte("\ncomputer")...)
+		}
+		return out, nil
+	}
+	remote := &memoryRemote{archives: map[string][]byte{}}
+	r := &Runner{Config: c, Remote: remote, Command: command}
+	if err := r.Create(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !stoppedComputer || strings.Join(steps, ",") != "stop,start" {
+		t.Fatal("computer exclusion changed the service stop/resume lifecycle")
+	}
+	s, err := (Reader{Dir: c.StateDir}).Read()
+	if err != nil || s.Phase != "completed" || s.LastSuccess == nil {
+		t.Fatalf("backup did not complete: %+v, %v", s, err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "archive.age")
+	if err := os.WriteFile(archivePath, remote.archives[s.LastSuccess.ID], 0600); err != nil {
+		t.Fatal(err)
+	}
+	identity := filepath.Join(t.TempDir(), "identity")
+	if err := os.WriteFile(identity, []byte(key.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "restore")
+	if err := Restore(context.Background(), archivePath, identity, destination); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(destination, "container_data/computer")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("excluded computer data restored: %v", err)
+	}
+	var manifest Manifest
+	if err := readJSON(filepath.Join(destination, "backup-manifest.json"), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := manifest.Images["computer"]; exists {
+		t.Fatal("excluded local computer image present in restore manifest")
+	}
+	for _, name := range []string{".env", c.ComposeFile, "container_data/postgres/PG_VERSION", "container_data/minio/bucket/object", "container_data/knowledge/SOUL.md"} {
+		want, err := os.ReadFile(filepath.Join(c.Root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(filepath.Join(destination, name))
+		if err != nil || !bytes.Equal(want, got) {
+			t.Fatalf("application data not restored: %s: %v", name, err)
+		}
+	}
+}
+
 func TestRetentionCountsSuccessfulDatesAndPreservesSameDayCopies(t *testing.T) {
 	var copies []Copy
 	for i, date := range []string{"2026-10-26", "2026-10-26", "2026-10-23", "2026-10-20", "2026-10-20"} {
@@ -489,17 +587,22 @@ func TestScheduleAndConfigValidation(t *testing.T) {
 }
 
 func TestInputsRejectSymlinksBeforeStopping(t *testing.T) {
-	c, _ := fixture(t)
-	if err := os.Symlink("/tmp", filepath.Join(c.Root, "container_data/knowledge/outside")); err != nil {
-		t.Fatal(err)
-	}
-	var steps []string
-	r := &Runner{Config: c, Command: fakeCommands(t, c, &steps, false, nil), Remote: &memoryRemote{}}
-	if err := r.Create(context.Background()); err == nil {
-		t.Fatal("accepted external symlink")
-	}
-	if len(steps) != 0 {
-		t.Fatal("caused downtime before discovering unsupported input")
+	for _, exclude := range []bool{false, true} {
+		t.Run(fmt.Sprintf("exclude_computer=%t", exclude), func(t *testing.T) {
+			c, _ := fixture(t)
+			c.ExcludeComputer = exclude
+			if err := os.Symlink("/tmp", filepath.Join(c.Root, "container_data/knowledge/outside")); err != nil {
+				t.Fatal(err)
+			}
+			var steps []string
+			r := &Runner{Config: c, Command: fakeCommands(t, c, &steps, false, nil), Remote: &memoryRemote{}}
+			if err := r.Create(context.Background()); err == nil {
+				t.Fatal("accepted external symlink")
+			}
+			if len(steps) != 0 {
+				t.Fatal("caused downtime before discovering unsupported input")
+			}
+		})
 	}
 }
 
