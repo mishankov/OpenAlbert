@@ -3,6 +3,7 @@
   "compose_file": "compose.yaml",
   "work_dir": "/var/lib/openalbert-backup",
   "enabled": true,
+  "exclude_computer": false,
   "time": "03:00",
   "timezone": "Europe/Moscow",
   "keep_days": 14,

@@ -25,6 +25,14 @@ func TestDockerBackupRestore(t *testing.T) {
 	if os.Getenv("OPENALBERT_TEST_BACKUP_DOCKER") != "1" {
 		t.Skip("run task test:backup for isolated Docker restore verification")
 	}
+	for _, exclude := range []bool{false, true} {
+		t.Run(fmt.Sprintf("exclude_computer=%t", exclude), func(t *testing.T) {
+			dockerBackupRestore(t, exclude)
+		})
+	}
+}
+
+func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	key, err := age.GenerateX25519Identity()
@@ -72,7 +80,7 @@ func TestDockerBackupRestore(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(root, ".env"), []byte("# isolated backup smoke\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	c := Config{Root: root, WorkDir: t.TempDir(), ComposeFile: "compose.yaml", Enabled: true, Time: "03:00", Timezone: "Europe/Moscow", KeepDays: 2, Endpoint: "placeholder:9000", Bucket: "backups", Prefix: "instance/", Recipient: key.Recipient().String()}
+	c := Config{Root: root, WorkDir: t.TempDir(), ComposeFile: "compose.yaml", Enabled: true, ExcludeComputer: excludeComputer, Time: "03:00", Timezone: "Europe/Moscow", KeepDays: 2, Endpoint: "placeholder:9000", Bucket: "backups", Prefix: "instance/", Recipient: key.Recipient().String()}
 	if err = c.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +115,11 @@ func TestDockerBackupRestore(t *testing.T) {
 	}
 	for name, value := range computerFiles {
 		if err = os.WriteFile(filepath.Join(root, "container_data/computer", name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if excludeComputer {
+		if err = os.Symlink("/usr/bin/python3", filepath.Join(root, "container_data/computer/home/python3")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -289,6 +302,20 @@ func TestDockerBackupRestore(t *testing.T) {
 	if err = Restore(ctx, archive, identity, destination); err != nil {
 		t.Fatal(err)
 	}
+	if excludeComputer {
+		if _, err = os.Lstat(filepath.Join(destination, "container_data/computer")); !os.IsNotExist(err) {
+			t.Fatalf("computer tree survived exclusion: %v", err)
+		}
+		var overrides struct {
+			Services map[string]any `json:"services"`
+		}
+		if err = readJSON(filepath.Join(destination, "compose.backup-images.json"), &overrides); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := overrides.Services["computer"]; exists {
+			t.Fatal("excluded computer image present in restore overrides")
+		}
+	}
 	// Start the restored data under a different Compose project. No original
 	// container or volume is reused, and no real provider is contacted.
 	restoredModel := map[string]any{}
@@ -325,10 +352,12 @@ func TestDockerBackupRestore(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(destination, "container_data/knowledge/SOUL.md")); string(got) != "Albert remembers" {
 		t.Fatal("lost knowledge")
 	}
-	for name, want := range computerFiles {
-		got, err := os.ReadFile(filepath.Join(destination, "container_data/computer", name))
-		if err != nil || string(got) != want {
-			t.Fatalf("lost computer file %s: %q, %v", name, got, err)
+	if !excludeComputer {
+		for name, want := range computerFiles {
+			got, err := os.ReadFile(filepath.Join(destination, "container_data/computer", name))
+			if err != nil || string(got) != want {
+				t.Fatalf("lost computer file %s: %q, %v", name, got, err)
+			}
 		}
 	}
 	// Verify artifact bytes on the restored MinIO without changing DNS aliases.

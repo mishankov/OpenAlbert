@@ -166,7 +166,7 @@ func (r *Runner) preflight(ctx context.Context) ([]string, Manifest, error) {
 	}
 	type dataMount struct{ path, target string }
 	expected := map[string][]dataMount{"postgres": {{"postgres", "/var/lib/postgresql/data"}}, "minio": {{"minio", "/data"}}, "openalbert": {{"knowledge", "/data/knowledge"}}}
-	if _, ok := config.Services["computer"]; ok {
+	if _, ok := config.Services["computer"]; ok && !c.ExcludeComputer {
 		expected["computer"] = []dataMount{{"computer/server", "/etc/openalbert-ssh"}, {"computer/home", "/home/albert"}, {"computer/workspace", "/workspace"}}
 		expected["openalbert"] = append(expected["openalbert"], dataMount{"computer/client", "/data/computer"})
 	}
@@ -232,7 +232,7 @@ func (r *Runner) preflight(ctx context.Context) ([]string, Manifest, error) {
 		command = RunCommand
 	}
 	for name, service := range config.Services {
-		if name == ControllerService {
+		if name == ControllerService || (name == "computer" && c.ExcludeComputer) {
 			continue
 		}
 		if service.Image == "" {

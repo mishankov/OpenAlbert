@@ -20,6 +20,9 @@ tasks:
   test:backup:
     desc: Verify encrypted S3 backup, retention and PostgreSQL/MinIO restore in disposable containers
     cmds: [python3 tools/local.py test:backup]
+  test:backup:unit:
+    desc: Run backup unit tests, including exclusion and encrypted restore, with the race detector
+    cmds: [go test -race ./services/backup/...]
   test:web:
     desc: Build docs and test docs/inspector keyboard flows with Playwright reports
     cmds: [python3 tools/local.py test:web]
