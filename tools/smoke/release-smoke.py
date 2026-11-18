@@ -65,6 +65,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="openalbert-release-smoke-") as directory:
             folder = Path(directory)
             (folder / "compose.yaml").write_text((ROOT / "deploy/compose.yaml").read_text())
+            (folder / "models.toml").write_text(mvp.model_config(api_url + "/v1"))
             settings = {
                 "OPENALBERT_IMAGE_PREFIX": "local/openalbert-release-smoke",
                 "OPENALBERT_IMAGE_TAG": "test",
@@ -73,7 +74,7 @@ def main():
                 "S3_BUCKET": "smoke-artifacts", "COMPOSE_PROFILES": "", "STT_BASE_URL": "",
                 "TELEGRAM_BOT_TOKEN": "smoke-token", "TELEGRAM_ALLOWED_USER_IDS": "42",
                 "TELEGRAM_OWNER_USER_ID": "42", "TELEGRAM_BASE_URL": api_url,
-                "LLM_API_KEY": "smoke-key", "LLM_MODEL": "smoke-model", "LLM_BASE_URL": api_url + "/v1",
+                "LLM_API_KEY": "smoke-key",
                 "SESSION_IDLE_TIMEOUT": "2s", "TASK_MIN_INTERVAL": "1s", "INITIATIVE_INTERVAL": "0",
                 "MAX_AGENT_STEPS": "12", "TEMPORAL_TASK_QUEUE": project,
             }

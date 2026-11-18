@@ -1,0 +1,351 @@
+package agent
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/mishankov/OpenAlbert/shared/backup"
+	"openalbert/apps/backend/internal/domain"
+	"openalbert/apps/backend/internal/integrations"
+	"openalbert/apps/backend/internal/telemetry"
+)
+
+type roleModel struct {
+	roles []domain.ModelRole
+	turns []string
+	err   error
+}
+
+func (m *roleModel) Complete(ctx context.Context, _ []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	role := domain.ModelRoleFromContext(ctx)
+	m.roles = append(m.roles, role)
+	m.turns = append(m.turns, domain.ModelTurn(ctx))
+	content := "internal result"
+	if role == domain.RoleAnalysis {
+		if len(tools) != 0 {
+			return domain.Completion{}, errors.New("analysis unexpectedly received tools")
+		}
+		content = `{"summary":"Closed conversation summary","memories":[]}`
+	}
+	cost := 0.001
+	return domain.Completion{
+		Message: domain.Message{Role: "assistant", Content: content}, InputTokens: 20, OutputTokens: 5,
+		Usage: domain.ModelUsage{Role: role, Profile: "configured-" + string(role), Model: "actual-model", TokenUsageKnown: true, CachedInputTokens: 8, EstimatedCostUSD: &cost},
+	}, m.err
+}
+
+func TestApplicationSelectsRoleByOperationAndReusesCompletionMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   RunInput
+		role domain.ModelRole
+	}{
+		{name: "interactive", role: domain.RoleChat},
+		{name: "scheduled analysis is background", in: RunInput{TaskID: "analyze-logs"}, role: domain.RoleBackground},
+		{name: "initiative", in: RunInput{Initiative: true}, role: domain.RoleBackground},
+		{name: "backup event", in: RunInput{BackupEvent: &backup.Event{}}, role: domain.RoleBackground},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, repo, _, conv := fixture(t)
+			model := &roleModel{}
+			a.Model = model
+			capture := &tracedRepo{Repository: repo}
+			a.Repo = capture
+			var logs bytes.Buffer
+			a.Logger = telemetry.New(&logs)
+			in := tc.in
+			in.Key, in.SessionID, in.ConversationID = "run", "session", conv.ID
+			input := ModelInput{Turn: Turn{Input: in, Conversation: conv, Messages: []domain.Message{{Role: "user", TurnID: in.Key, Content: "Analyze this question"}}}}
+			first, err := a.ModelCall(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := a.ModelCall(context.Background(), input)
+			if err != nil || first.Usage.Profile != second.Usage.Profile || second.InputTokens != 20 {
+				t.Fatalf("checkpoint lost result metadata: %+v %v", second, err)
+			}
+			if len(model.roles) != 1 || model.roles[0] != tc.role || model.turns[0] != "run" {
+				t.Fatalf("wrong selection or repeated inference: %+v %+v", model.roles, model.turns)
+			}
+			if len(capture.traces) != 2 || capture.traces[1].Name != "actual-model" || capture.traces[1].Profile != first.Usage.Profile || capture.traces[1].ModelRole != tc.role {
+				t.Fatalf("inspection lost actual model: %+v", capture.traces)
+			}
+			lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+			if len(lines) != 2 {
+				t.Fatalf("unexpected inference logs: %s", logs.String())
+			}
+			for i, line := range lines {
+				var event map[string]any
+				if err := json.Unmarshal([]byte(line), &event); err != nil {
+					t.Fatal(err)
+				}
+				if event["model_role"] != string(tc.role) || event["model"] != "actual-model" || event["model_profile"] != first.Usage.Profile {
+					t.Fatalf("usage labels lost: %v", event)
+				}
+				if i == 0 && (event["input_tokens"] != float64(20) || event["cached_input_tokens"] != float64(8) || event["estimated_cost_usd"] == nil) {
+					t.Fatalf("missing provider usage: %v", event)
+				}
+				if i == 1 && (event["cached"] != true || event["input_tokens"] != float64(0) || event["output_tokens"] != float64(0) || event["cached_input_tokens"] != float64(0) || event["estimated_cost_usd"] != nil) {
+					t.Fatalf("checkpoint reuse counted as new provider usage: %v", event)
+				}
+			}
+		})
+	}
+}
+
+func TestClosedSessionAnalysisExplicitlySelectsAnalysisRole(t *testing.T) {
+	a, repo, _, conv := fixture(t)
+	ctx := context.Background()
+	session := domain.Session{ID: "closed", ConversationID: conv.ID}
+	if err := repo.StartSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendMessage(ctx, session.ID, "question", domain.Message{Role: "user", Content: "A conversation to summarize"}); err != nil {
+		t.Fatal(err)
+	}
+	model := &roleModel{}
+	a.Model = model
+	for range 2 {
+		if err := a.Analyze(ctx, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(model.roles) != 1 || model.roles[0] != domain.RoleAnalysis {
+		t.Fatalf("wrong role or duplicate analysis: %v", model.roles)
+	}
+}
+
+func TestFailedInferenceRetainsSelectedProfileInInspection(t *testing.T) {
+	a, repo, _, conv := fixture(t)
+	a.Model = &roleModel{err: errors.New("provider unavailable")}
+	capture := &tracedRepo{Repository: repo}
+	a.Repo = capture
+	_, err := a.ModelCall(context.Background(), ModelInput{Turn: Turn{Input: RunInput{Key: "failed", ConversationID: conv.ID}}})
+	if err == nil || len(capture.traces) != 2 || capture.traces[1].Status != "failed" || capture.traces[1].Profile != "configured-chat" || capture.traces[1].Name != "actual-model" {
+		t.Fatalf("failed inference lost selection: %+v %v", capture.traces, err)
+	}
+}
+
+func TestPrepareMarksOriginalRequestAndSyntheticBackgroundInstructions(t *testing.T) {
+	for _, background := range []bool{false, true} {
+		a, repo, _, conv := fixture(t)
+		ctx := context.Background()
+		in := RunInput{Key: "marked", SessionID: "marked-session", ConversationID: conv.ID, IncomingIDs: []string{"seed"}, Initiative: background}
+		turn, err := a.Prepare(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, message := range turn.Messages {
+			if message.Role == "user" {
+				found = true
+				if message.TurnID != in.Key {
+					t.Fatalf("current request lacks context protection: %+v", message)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing current request")
+		}
+		history, err := repo.Messages(ctx, in.SessionID)
+		if err != nil || len(history) != 1 || history[0].TurnID != in.Key {
+			t.Fatalf("incoming marker not durable: %+v %v", history, err)
+		}
+	}
+}
+
+func TestPreparePreservesCurrentTurnDuringHistoryBounding(t *testing.T) {
+	a, repo, _, conv := fixture(t)
+	ctx := context.Background()
+	in := RunInput{Key: "current", SessionID: "long-turn", ConversationID: conv.ID}
+	if err := repo.StartSession(ctx, domain.Session{ID: in.SessionID, ConversationID: conv.ID}); err != nil {
+		t.Fatal(err)
+	}
+	request := domain.Message{Role: "user", TurnID: in.Key, Content: "Compare all four images", Images: []string{"image1", "image2", "image3", "image4"}}
+	if err := repo.AppendMessage(ctx, in.SessionID, "original", request); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 55 {
+		id := fmt.Sprint(i)
+		if err := repo.AppendMessage(ctx, in.SessionID, "call/"+id, domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: id, Name: "lookup", Arguments: json.RawMessage(`{}`)}}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.AppendMessage(ctx, in.SessionID, "result/"+id, domain.Message{Role: "tool", ToolCallID: id, Content: "Evidence"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repo.AppendMessage(ctx, in.SessionID, "view", domain.Message{Role: "user", Content: "Artifact view"}); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := a.Prepare(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range turn.Messages {
+		if msg.TurnID == in.Key && msg.Content == request.Content {
+			if len(msg.Images) != len(request.Images) {
+				t.Fatalf("current images silently removed: %v", msg.Images)
+			}
+			return
+		}
+	}
+	t.Fatal("current request silently removed before profile context fitting")
+}
+
+func httpRoutingModel(t *testing.T, endpoint string, window int, vision bool) *integrations.ModelRouter {
+	t.Helper()
+	capabilities := []string{"tools", "structured_output"}
+	if vision {
+		capabilities = append(capabilities, "vision")
+	}
+	model, err := integrations.NewModelRouter(domain.ModelProfiles{
+		Routes:   map[domain.ModelRole]string{domain.RoleChat: "test", domain.RoleBackground: "test", domain.RoleAnalysis: "test"},
+		Profiles: map[string]domain.ModelProfile{"test": {Adapter: "openai_chat_completions", BaseURL: endpoint, Model: "test", APIKey: "synthetic", Capabilities: capabilities, ContextWindowTokens: window, MaxOutputTokens: 1000, Timeout: time.Second}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return model
+}
+
+func TestTemporalAndProfileCompactionRemoveWholeHistoricalTurns(t *testing.T) {
+	var sent []domain.Message
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []domain.Message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		sent = body.Messages
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	messages := []domain.Message{{Role: "system", Content: "Rules"}, {Role: "user", TurnID: "old", Content: "Old batched request"}, {Role: "user", TurnID: "old", Content: "Second part"}}
+	for i := range 26 {
+		id := fmt.Sprint(i)
+		messages = append(messages, domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: id, Name: "lookup", Arguments: json.RawMessage(`{}`)}}}, domain.Message{Role: "tool", ToolCallID: id, Content: strings.Repeat("x", 32000)})
+	}
+	messages = append(messages, domain.Message{Role: "user", Content: "Old artifact view"}, domain.Message{Role: "user", TurnID: "later-old", Content: "Another old turn"}, domain.Message{Role: "assistant", Content: strings.Repeat("y", 20000)})
+	current := []domain.Message{{Role: "user", TurnID: "current", Content: "Current request"}, {Role: "user", TurnID: "current", Content: "Current batch part"}, {Role: "user", Content: "Current artifact view"}}
+	messages = append(messages, current...)
+	compact := CompactContext(messages)
+	if len(compact) != 6 || compact[1].TurnID != "later-old" {
+		t.Fatalf("Temporal pass split a historical turn: %d messages", len(compact))
+	}
+	model := httpRoutingModel(t, server.URL, 6000, true)
+	ctx := domain.WithModelTurn(domain.WithModelRole(context.Background(), domain.RoleChat), "current")
+	out, err := model.Complete(ctx, compact, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 4 || sent[1].Content != current[0].Content || sent[3].Content != current[2].Content || out.Usage.DroppedMessages != 2 {
+		t.Fatalf("profile pass lost the current turn or retained old evidence: %+v", sent)
+	}
+}
+
+func TestTextOnlySessionRecoversAfterUnsupportedImage(t *testing.T) {
+	a, repo, _, conv := fixture(t)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body struct {
+			Messages []domain.Message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		priorPresent := false
+		for _, msg := range body.Messages {
+			priorPresent = priorPresent || msg.Content == "Earlier text context"
+			if len(msg.Images) > 0 || strings.Contains(msg.Content, "Image question") {
+				t.Error("unsupported historical image turn reached provider")
+			}
+		}
+		if !priorPresent {
+			t.Error("text before the unsupported image was unnecessarily evicted")
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	a.Model = httpRoutingModel(t, server.URL, 128000, false)
+	ctx := context.Background()
+	if err := repo.StartSession(ctx, domain.Session{ID: "images", ConversationID: conv.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendMessage(ctx, "images", "prior", domain.Message{Role: "user", TurnID: "prior", Content: "Earlier text context"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendMessage(ctx, "images", "image", domain.Message{Role: "user", TurnID: "image", Content: "Image question", Images: []string{"data:image/jpeg;base64,YQ=="}}); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := a.Prepare(ctx, RunInput{Key: "image", SessionID: "images", ConversationID: conv.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.ModelCall(ctx, ModelInput{Turn: turn}); err == nil || requests != 0 {
+		t.Fatal("unsupported current image was not rejected")
+	}
+	if _, err = repo.AcceptIncoming(ctx, domain.Incoming{ID: "text", Conversation: conv, Text: "Text question"}, 2); err != nil {
+		t.Fatal(err)
+	}
+	turn, err = a.Prepare(ctx, RunInput{Key: "text", SessionID: "images", ConversationID: conv.ID, IncomingIDs: []string{"text"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.ModelCall(ctx, ModelInput{Turn: turn})
+	if err != nil || requests != 1 || out.Usage.DroppedMessages != 1 {
+		t.Fatalf("image poisoned following text request: %+v %v", out, err)
+	}
+}
+
+func TestAnalysisFitsCompleteNewestRecordsAndKeepsFullDeletionCheck(t *testing.T) {
+	a, repo, k, conv := fixture(t)
+	var payload analysisContext
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body struct {
+			Messages []domain.Message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if len(body.Messages) != 2 {
+			t.Errorf("analysis prompt missing: %d", len(body.Messages))
+			return
+		}
+		if err := json.Unmarshal([]byte(body.Messages[1].Content), &payload); err != nil {
+			t.Error("analysis truncated a JSON record:", err)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"Recent messages\",\"memories\":[{\"content\":\"Forgotten fact\",\"kind\":\"fact\"}]}"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	a.Model = &integrations.BillingModel{Mode: "api_key", API: httpRoutingModel(t, server.URL, 64000, false)}
+	transcript := []domain.Message{{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "forget", Name: "memory_update", Arguments: json.RawMessage(`{"delete":true}`)}}}}
+	for i := range 10 {
+		transcript = append(transcript, domain.Message{Role: "user", Content: fmt.Sprintf("entry-%d ", i) + strings.Repeat("quoted \"record\" ", 1000)})
+	}
+	session := closedAnalysisSession(t, a, repo, conv.ID, transcript...)
+	if err := a.Analyze(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 || len(payload.Transcript) < 1 || len(payload.Transcript) >= len(transcript) || payload.Transcript[len(payload.Transcript)-1].Content != transcript[len(transcript)-1].Content {
+		t.Fatalf("analysis did not retain complete newest records: %d", len(payload.Transcript))
+	}
+	if payload.Transcript[0].Role != "user" {
+		t.Fatal("old deletion record was not evicted by the context limit")
+	}
+	memories, err := k.Search(context.Background(), conv.ID, "")
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("deletion outside retained transcript was ignored: %+v %v", memories, err)
+	}
+}

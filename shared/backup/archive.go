@@ -18,10 +18,12 @@ import (
 )
 
 type Manifest struct {
-	Version     int               `json:"version"`
-	CreatedAt   time.Time         `json:"created_at"`
-	ComposeFile string            `json:"compose_file"`
-	Images      map[string]string `json:"images"`
+	Version              int               `json:"version"`
+	CreatedAt            time.Time         `json:"created_at"`
+	ComposeFile          string            `json:"compose_file"`
+	ModelConfigFile      string            `json:"model_config_file,omitempty"`
+	ModelCredentialsFile string            `json:"model_credentials_file,omitempty"`
+	Images               map[string]string `json:"images"`
 }
 
 func archive(ctx context.Context, c Config, output string, manifest Manifest) (err error) {
@@ -51,6 +53,18 @@ func archive(ctx context.Context, c Config, output string, manifest Manifest) (e
 		return err
 	}
 	paths := []string{".env", c.ComposeFile, "container_data/postgres", "container_data/minio", "container_data/knowledge"}
+	if manifest.ModelCredentialsFile != "" {
+		if manifest.ModelCredentialsFile != "models.env" {
+			return errors.New("invalid model credentials archive path")
+		}
+		paths = append(paths, manifest.ModelCredentialsFile)
+	}
+	if manifest.ModelConfigFile != "" {
+		if !validModelConfigPath(manifest.ModelConfigFile) {
+			return errors.New("invalid model configuration archive path")
+		}
+		paths = append(paths, manifest.ModelConfigFile)
+	}
 	if filepath.Base(c.ComposeFile) == "compose.local.yaml" {
 		paths = append(paths, "services/postgres/init.sql", "services/temporal/dynamicconfig.yaml")
 	}
@@ -211,6 +225,24 @@ func Restore(ctx context.Context, encryptedPath, identityPath, destination strin
 		return errors.New("missing or invalid restore manifest")
 	}
 	requiredPaths := []string{".env", m.ComposeFile, "container_data/postgres", "container_data/minio", "container_data/knowledge"}
+	if m.ModelCredentialsFile != "" {
+		if m.ModelCredentialsFile != "models.env" {
+			return errors.New("invalid model credentials restore path")
+		}
+		if info, e := os.Stat(filepath.Join(destination, m.ModelCredentialsFile)); e != nil || !info.Mode().IsRegular() {
+			return errors.New("restored model credentials are not a regular file")
+		}
+		requiredPaths = append(requiredPaths, m.ModelCredentialsFile)
+	}
+	if m.ModelConfigFile != "" {
+		if !validModelConfigPath(m.ModelConfigFile) {
+			return errors.New("invalid model configuration restore path")
+		}
+		requiredPaths = append(requiredPaths, m.ModelConfigFile)
+		if info, e := os.Stat(filepath.Join(destination, m.ModelConfigFile)); e != nil || !info.Mode().IsRegular() {
+			return errors.New("restored model configuration is not a regular file")
+		}
+	}
 	if _, ok := m.Images["computer"]; ok {
 		requiredPaths = append(requiredPaths, "container_data/computer")
 	}
@@ -222,9 +254,17 @@ func Restore(ctx context.Context, encryptedPath, identityPath, destination strin
 			return errors.New("incomplete backup archive")
 		}
 	}
-	services := map[string]map[string]string{}
+	services := map[string]map[string]any{}
 	for name, image := range m.Images {
-		services[name] = map[string]string{"image": image}
+		services[name] = map[string]any{"image": image}
+	}
+	if m.ModelConfigFile != "" {
+		if services["openalbert"] == nil {
+			return errors.New("restore manifest has no application image")
+		}
+		// A configured absolute host path belongs to the original installation.
+		// Override only this bind so recovery is portable to a new directory.
+		services["openalbert"]["volumes"] = []map[string]any{{"type": "bind", "source": "./" + filepath.ToSlash(m.ModelConfigFile), "target": "/etc/openalbert/models.toml", "read_only": true, "bind": map[string]bool{"create_host_path": false}}}
 	}
 	if len(services) == 0 {
 		return errors.New("restore manifest has no image digests")
@@ -233,6 +273,10 @@ func Restore(ctx context.Context, encryptedPath, identityPath, destination strin
 		return err
 	}
 	return nil
+}
+
+func validModelConfigPath(path string) bool {
+	return path != "" && !filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.Contains(path, "..") && filepath.Ext(path) == ".toml" && !strings.HasPrefix(filepath.ToSlash(path), "container_data/")
 }
 
 func restoreMetadata(path string, h *tar.Header) error {

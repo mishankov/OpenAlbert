@@ -31,6 +31,24 @@ def run(args, env, **kwargs):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs).stdout.strip()
 
 
+def model_config(base_url):
+    """Synthetic profile shared by deployment smokes; no application config is read."""
+    return f'''[routes]
+chat = "smoke"
+background = "smoke"
+analysis = "smoke"
+[profiles.smoke]
+adapter = "openai_chat_completions"
+base_url = {json.dumps(base_url)}
+model = "smoke-model"
+api_key_env = "LLM_API_KEY"
+capabilities = ["tools", "vision", "structured_output"]
+context_window_tokens = 256000
+max_output_tokens = 8192
+timeout = "120s"
+'''
+
+
 def wait_until(description, condition, timeout=60):
     deadline = time.monotonic() + timeout
     last = None
@@ -241,9 +259,21 @@ def main():
     parser.add_argument("--without-search", action="store_true", help="Prove startup without any Yandex credentials")
     parser.add_argument("--with-browser", action="store_true", help="Exercise real Chromium on public example.com and screenshot persistence")
     args = parser.parse_args()
-    env = dict(os.environ)
+    with tempfile.TemporaryDirectory(prefix="openalbert-smoke-settings-") as directory:
+        smoke(args, Path(directory))
+
+
+def smoke(args, settings_directory):
+    env = {key: value for key, value in os.environ.items() if key in {
+        "PATH", "HOME", "DOCKER_CONFIG", "DOCKER_HOST", "DOCKER_CONTEXT",
+        "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_DEFAULT_PLATFORM"}}
     env.setdefault("POSTGRES_PORT", "15432")
-    compose = ["docker", "compose", "--project-directory", str(ROOT), "-f", "deploy/compose.local.yaml"]
+    # A service env_file bypasses --env-file, so redirect it before rendering.
+    # All other paths keep ROOT as their Compose project directory.
+    source = (ROOT / "deploy/compose.local.yaml").read_text()
+    copied_compose = settings_directory / "compose.yaml"
+    copied_compose.write_text(source.replace("path: ./models.env", "path: /dev/null"))
+    compose = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", str(ROOT / ".env.example"), "-f", str(copied_compose)]
     settings = json.loads(run(compose + ["config", "--format", "json"], env))
     postgres = settings["services"]["postgres"]["environment"]
     postgres_user = postgres["POSTGRES_USER"]
@@ -256,11 +286,10 @@ def main():
     bucket = marker
     # Every external key/endpoint is replaced. No dotenv secret is read by fake APIs.
     env.update(TELEGRAM_BOT_TOKEN="smoke-token", TELEGRAM_ALLOWED_USER_IDS="42", TELEGRAM_OWNER_USER_ID="42",
-               TELEGRAM_ALLOWED_GROUP_IDS="", LLM_API_KEY="smoke-key", LLM_MODEL="smoke-model",
+               TELEGRAM_ALLOWED_GROUP_IDS="", LLM_API_KEY="smoke-key",
                YANDEX_API_KEY="smoke-key", YANDEX_FOLDER_ID="smoke-folder",
                SESSION_IDLE_TIMEOUT="2s", INITIATIVE_INTERVAL="0", TASK_MIN_INTERVAL="1s",
                MAX_AGENT_STEPS="12", TELEGRAM_BASE_URL=f"http://{args.host_address}:{args.port}",
-               LLM_BASE_URL=f"http://{args.host_address}:{args.port}/v1",
                YANDEX_SEARCH_URL=f"http://{args.host_address}:{args.port}/search",
                TEMPORAL_TASK_QUEUE=marker)
     if args.without_search:
@@ -275,6 +304,9 @@ def main():
         created = True
         run(compose + ["run", "--rm", "--no-deps", "-e", "S3_BUCKET=" + bucket, "minio-init"], env)
         with tempfile.TemporaryDirectory(prefix="openalbert-smoke-") as temp:
+            models = Path(temp) / "models.toml"
+            models.write_text(model_config(f"http://{args.host_address}:{args.port}/v1"))
+            env["LLM_CONFIG_HOST_FILE"] = str(models)
             # JSON is also valid YAML. Overrides only the application service, no infrastructure recreation.
             override = {"services": {"openalbert": {"labels": {"openalbert.smoke": marker},
                 "environment": {"DATABASE_URL": f"postgres://{urllib.parse.quote(postgres_user, safe='')}:{urllib.parse.quote(postgres_password, safe='')}@postgres:5432/{db}?sslmode=disable", "S3_BUCKET": bucket},

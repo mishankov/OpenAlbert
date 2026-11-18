@@ -47,6 +47,20 @@ func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any,
 		if name != "" {
 			tr.Name = name
 		}
+		var usage domain.ModelUsage
+		switch value := output.(type) {
+		case ModelOutput:
+			usage = value.Usage
+		case domain.Completion:
+			usage = value.Usage
+		}
+		if usage.Model != "" {
+			tr.Name = usage.Model
+		}
+		if usage.Role != "" {
+			tr.ModelRole = usage.Role
+		}
+		tr.Profile = usage.Profile
 		now := time.Now().UTC()
 		tr.EndedAt = &now
 		tr.Status = "completed"
@@ -83,14 +97,19 @@ func traceMessages(messages []domain.Message) []domain.Message {
 
 func (a *Activities) analysisModelCall(ctx context.Context, session domain.Session, messages []domain.Message) (out domain.Completion, err error) {
 	ctx = telemetry.WithFields(ctx, map[string]any{"session_id": session.ID, "turn_id": "analysis/" + session.ID, "conversation_id": session.ConversationID, "trigger": "analysis"})
+	ctx = domain.WithModelRole(ctx, domain.RoleAnalysis)
 	event := a.event(ctx, "llm.complete")
 	ctx = event.Context()
-	finish := a.startTrace(ctx, domain.Trace{SessionID: session.ID, TurnID: "analysis/" + session.ID, Trigger: "analysis", Kind: "analysis"}, map[string]any{"messages": traceMessages(messages)}, event)
+	finish := a.startTrace(ctx, domain.Trace{SessionID: session.ID, TurnID: "analysis/" + session.ID, Trigger: "analysis", Kind: "analysis", Name: string(domain.RoleAnalysis), ModelRole: domain.RoleAnalysis}, map[string]any{"messages": traceMessages(messages), "context_stage": "before_profile_fitting"}, event)
 	defer func() {
-		finish(map[string]any{"Message": out.Message, "InputTokens": out.InputTokens, "OutputTokens": out.OutputTokens}, err, out.Model)
-		if out.Model != "" {
-			event.Set("model", out.Model)
+		if out.Usage.Model == "" {
+			out.Usage.Model = out.Model
 		}
+		if out.Usage.Role == "" {
+			out.Usage.Role = domain.RoleAnalysis
+		}
+		finish(out, err, out.Model)
+		modelUsageMetadata(event, out.Usage)
 		event.Set("input_tokens", out.InputTokens)
 		event.Set("output_tokens", out.OutputTokens)
 		event.End(err)

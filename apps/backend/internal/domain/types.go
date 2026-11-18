@@ -70,6 +70,8 @@ func IsReplyTool(name string) bool {
 }
 
 type Message struct {
+	ContextOverflow bool   `json:"context_overflow,omitempty"`
+	TurnID          string `json:"turn_id,omitempty"`
 	// ResponsesItems preserves opaque reasoning and tool-call items for stateless
 	// Responses continuation. Chat Completions ignores this transport state.
 	ResponsesItems  []json.RawMessage `json:"responses_items,omitempty"`
@@ -98,6 +100,7 @@ type Completion struct {
 	Message      Message
 	InputTokens  int
 	OutputTokens int
+	Usage        ModelUsage
 }
 type Model interface {
 	Complete(context.Context, []Message, []Tool) (Completion, error)

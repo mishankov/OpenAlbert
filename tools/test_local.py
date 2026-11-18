@@ -18,10 +18,13 @@ class LocalRunTests(unittest.TestCase):
         return local.Run(command, Path(directory) / "report")
 
     def test_test_environment_excludes_live_and_signing_settings(self):
-        with mock.patch.dict(os.environ, {"LLM_API_KEY": "private", "OPENALBERT_LIVE_RETRIEVAL_EVAL": "1",
-                                        "SPARKLE_PRIVATE_KEY": "private", "ALBERT_DESKTOP_BACKEND": "host", "CI": "true"}):
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "private", "LLM_CONFIG_FILE": "/private/models.toml",
+                                        "LLM_CONFIG_HOST_FILE": "/private/models.toml", "OPENALBERT_LIVE_RETRIEVAL_EVAL": "1",
+                                        "SPARKLE_PRIVATE_KEY": "private", "ALBERT_DESKTOP_BACKEND": "host", "CI": "true",
+                                        "OPENALBERT_TEST_BACKUP_MINIO_IMAGE": "local/minio:test"}):
             env = local.test_environment()
-        for name in ("LLM_API_KEY", "OPENALBERT_LIVE_RETRIEVAL_EVAL", "SPARKLE_PRIVATE_KEY", "ALBERT_DESKTOP_BACKEND", "CI"):
+            self.assertEqual(env["OPENALBERT_TEST_BACKUP_MINIO_IMAGE"], "local/minio:test")
+        for name in ("LLM_API_KEY", "LLM_CONFIG_FILE", "LLM_CONFIG_HOST_FILE", "OPENALBERT_LIVE_RETRIEVAL_EVAL", "SPARKLE_PRIVATE_KEY", "ALBERT_DESKTOP_BACKEND", "CI"):
             self.assertNotIn(name, env)
 
     def test_failed_command_keeps_output_and_failure_in_report(self):

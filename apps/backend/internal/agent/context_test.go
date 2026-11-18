@@ -16,11 +16,13 @@ import (
 )
 
 func TestCompactContextBoundsPayloadAndPreservesWholeToolExchanges(t *testing.T) {
-	original := []domain.Message{{Role: "system", Content: "System rules"}, {Role: "user", Content: "Latest user request must remain"}}
+	original := []domain.Message{{Role: "system", Content: "System rules"}}
 	for i := 0; i < 24; i++ {
 		first, second := fmt.Sprintf("a%d", i), fmt.Sprintf("b%d", i)
+		original = append(original, domain.Message{Role: "user", TurnID: first, Content: "Historical request"})
 		original = append(original, domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: first, Name: "web_read", Arguments: json.RawMessage(`{"url":"https://example.com/a"}`)}, {ID: second, Name: "web_read", Arguments: json.RawMessage(`{"url":"https://example.com/b"}`)}}}, domain.Message{Role: "tool", ToolCallID: first, Content: strings.Repeat("A", 35000)}, domain.Message{Role: "tool", ToolCallID: second, Content: strings.Repeat("B", 35000)})
 	}
+	original = append(original, domain.Message{Role: "user", TurnID: "current", Content: "Latest user request must remain"})
 	compact := CompactContext(original)
 	raw, err := json.Marshal(compact)
 	if err != nil {
@@ -32,7 +34,7 @@ func TestCompactContextBoundsPayloadAndPreservesWholeToolExchanges(t *testing.T)
 	if len(compact) >= len(original) {
 		t.Fatal("oversized history not compacted")
 	}
-	if compact[0].Content != "System rules" || compact[1].Content != "Latest user request must remain" {
+	if compact[0].Content != "System rules" || compact[len(compact)-1].Content != "Latest user request must remain" {
 		t.Fatal("system/latest request lost")
 	}
 	pending := map[string]bool{}
@@ -72,6 +74,52 @@ func TestCompactContextRetainsNewestUserRequest(t *testing.T) {
 		t.Fatalf("context exceeds budget:%d", len(raw))
 	}
 }
+
+func TestCompactContextProtectsCurrentRequestAndEvidenceAfterImageView(t *testing.T) {
+	messages := []domain.Message{{Role: "system", Content: "Rules"}}
+	for range 30 {
+		messages = append(messages, domain.Message{Role: "user", TurnID: "old", Content: "Old request"}, domain.Message{Role: "assistant", Content: strings.Repeat("old", 10000)})
+	}
+	current := []domain.Message{
+		{Role: "user", TurnID: "current", Content: "Original request"},
+		{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "view", Name: "artifact_read"}}},
+		{Role: "tool", ToolCallID: "view", Content: strings.Repeat("evidence", 6000)},
+		{Role: "user", Content: "Image artifact, not a new request", Images: []string{"data:image/jpeg;base64," + strings.Repeat("a", 10000)}},
+	}
+	messages = append(messages, current...)
+	compact := CompactContext(messages)
+	if len(compact) >= len(messages) {
+		t.Fatal("old history was not trimmed")
+	}
+	got, _ := json.Marshal(compact[len(compact)-len(current):])
+	want, _ := json.Marshal(current)
+	if !bytes.Equal(got, want) {
+		t.Fatal("compaction removed or clipped current-turn evidence")
+	}
+}
+
+func TestOversizedMarkedTurnFailsBeforeProviderWithoutExceedingTemporalPayload(t *testing.T) {
+	a, _, _, conv := fixture(t)
+	model := &roleModel{}
+	a.Model = model
+	for _, messages := range [][]domain.Message{
+		{{Role: "system", Content: "Rules"}, {Role: "user", TurnID: "large", Content: "Inspect my images", Images: []string{strings.Repeat("a", 3_000_000)}}},
+		{{Role: "system", Content: "Rules"}, {Role: "user", TurnID: "large", Content: "Original request"}, {Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "read", Name: "web_read"}}}, {Role: "tool", ToolCallID: "read", Content: strings.Repeat("evidence", 400000)}},
+	} {
+		compact := CompactContext(messages)
+		raw, err := json.Marshal(ModelInput{Turn: Turn{Input: RunInput{Key: "large", ConversationID: conv.ID}, Conversation: conv, Messages: compact}})
+		if err != nil || len(raw) > 750000 || len(compact) != 1 || !compact[0].ContextOverflow {
+			t.Fatalf("oversized turn escaped the transport guard: %d bytes, %v", len(raw), err)
+		}
+		_, err = a.ModelCall(context.Background(), ModelInput{Turn: Turn{Input: RunInput{Key: "large", ConversationID: conv.ID}, Conversation: conv, Messages: compact}})
+		if err == nil || !strings.Contains(err.Error(), "Temporal payload budget") {
+			t.Fatalf("missing explicit context error: %v", err)
+		}
+	}
+	if len(model.roles) != 0 {
+		t.Fatal("overflow marker reached the provider")
+	}
+}
 func TestCompactContextBoundsSingleOversizedImageRequest(t *testing.T) {
 	messages := []domain.Message{{Role: "system", Content: "Rules"}, {Role: "user", Content: "Explain my image", Images: []string{"data:image/jpeg;base64," + strings.Repeat("a", 800000)}}}
 	compact := CompactContext(messages)
@@ -79,8 +127,8 @@ func TestCompactContextBoundsSingleOversizedImageRequest(t *testing.T) {
 	if len(raw) > 750000 {
 		t.Fatalf("single user image bypasses context budget:%d", len(raw))
 	}
-	if len(compact) < 2 || !strings.Contains(compact[1].Content, "Explain my image") {
-		t.Fatal("latest user text lost while compacting image")
+	if len(compact) != 1 || !compact[0].ContextOverflow {
+		t.Fatal("oversized current image was silently removed instead of failing explicitly")
 	}
 }
 func TestContextSanitizationDropsIncompleteChainBeforeNewUser(t *testing.T) {

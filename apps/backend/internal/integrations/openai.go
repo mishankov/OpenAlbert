@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -14,16 +13,18 @@ import (
 )
 
 type OpenAIConfig struct {
-	BaseURL    string
-	APIKey     string
-	Model      string
-	HTTPClient *http.Client
+	BaseURL         string
+	APIKey          string
+	Model           string
+	HTTPClient      *http.Client
+	Timeout         time.Duration
+	MaxOutputTokens int
+	Options         domain.ModelOptions
+	JSONOutput      bool
 }
 type OpenAI struct {
-	config     OpenAIConfig
-	client     *http.Client
-	opencodeGo bool
-	deepSeek   bool
+	config OpenAIConfig
+	client *http.Client
 }
 
 func NewOpenAI(c OpenAIConfig) (*OpenAI, error) {
@@ -38,11 +39,19 @@ func NewOpenAI(c OpenAIConfig) (*OpenAI, error) {
 	if strings.TrimSpace(c.Model) == "" {
 		return nil, errors.New("LLM model is required")
 	}
-	endpoint, _ := url.Parse(base)
-	isOpenCodeGo := strings.EqualFold(endpoint.Hostname(), "opencode.ai") && (strings.HasPrefix(endpoint.Path, "/inference/go/") || strings.HasPrefix(endpoint.Path, "/zen/go/"))
-	modelID := strings.ToLower(c.Model)
-	modelID = modelID[strings.LastIndex(modelID, "/")+1:]
-	return &OpenAI{config: c, client: httpClient(c.HTTPClient, 120*time.Second), opencodeGo: isOpenCodeGo, deepSeek: strings.HasPrefix(modelID, "deepseek-")}, nil
+	if c.Timeout <= 0 {
+		c.Timeout = 120 * time.Second
+	}
+	if c.Options.OutputTokenField == "" {
+		c.Options.OutputTokenField = "max_tokens"
+	}
+	if c.Options.OutputTokenField != "max_tokens" && c.Options.OutputTokenField != "max_completion_tokens" {
+		return nil, errors.New("invalid output token field")
+	}
+	if c.Options.SessionHeader != "" && c.Options.SessionHeader != "x-opencode-session" {
+		return nil, errors.New("unsupported model session header")
+	}
+	return &OpenAI{config: c, client: httpClient(c.HTTPClient, c.Timeout)}, nil
 }
 
 type apiToolCall struct {
@@ -61,11 +70,11 @@ type apiMessage struct {
 	ToolCallID       string        `json:"tool_call_id,omitempty"`
 }
 
-func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+func (o *OpenAI) requestData(messages []domain.Message, tools []domain.Tool) ([]byte, error) {
 	converted := make([]apiMessage, 0, len(messages))
 	for _, m := range messages {
 		a := apiMessage{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}
-		if o.deepSeek && m.Role == "assistant" {
+		if o.config.Options.IncludeReasoningContent && m.Role == "assistant" {
 			// DeepSeek thinking with tools requires this field on every assistant
 			// message, including text-only replies and empty reasoning. Keep it
 			// separate from user-facing content and omit it for other models.
@@ -87,17 +96,37 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 		converted = append(converted, a)
 	}
 	body := map[string]any{"model": o.config.Model, "messages": converted}
+	if o.config.MaxOutputTokens > 0 {
+		body[o.config.Options.OutputTokenField] = o.config.MaxOutputTokens
+	}
+	if o.config.Options.ReasoningEffort != "" {
+		body["reasoning_effort"] = o.config.Options.ReasoningEffort
+	}
+	if o.config.Options.Thinking != "" {
+		body["thinking"] = map[string]string{"type": o.config.Options.Thinking}
+	}
+	if o.config.JSONOutput {
+		body["response_format"] = map[string]string{"type": "json_object"}
+	}
 	if len(tools) > 0 {
 		defs := make([]any, 0, len(tools))
 		for _, t := range tools {
 			if !json.Valid(t.Parameters) {
-				return domain.Completion{}, errors.New("invalid tool schema")
+				return nil, errors.New("invalid tool schema")
 			}
 			defs = append(defs, map[string]any{"type": "function", "function": map[string]any{"name": t.Name, "description": t.Description, "parameters": t.Parameters}})
 		}
 		body["tools"] = defs
 	}
 	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	data, err := o.requestData(messages, tools)
 	if err != nil {
 		return domain.Completion{}, err
 	}
@@ -107,17 +136,18 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "OpenAlbert/0.1")
-	if o.opencodeGo {
+	if o.config.Options.SessionHeader != "" {
 		session := domain.ModelSession(ctx)
 		if session == "" {
-			return domain.Completion{}, errors.New("OpenCode Go requires a conversation session ID")
+			return domain.Completion{}, errors.New("model requires a conversation session ID")
 		}
-		req.Header.Set("x-opencode-session", session)
+		req.Header.Set(o.config.Options.SessionHeader, session)
 	}
 	if o.config.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+o.config.APIKey)
 	}
 	var response struct {
+		Model   string `json:"model"`
 		Choices []struct {
 			Message struct {
 				Role             string          `json:"role"`
@@ -130,19 +160,50 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage struct {
-			Prompt     int `json:"prompt_tokens"`
-			Completion int `json:"completion_tokens"`
+			Prompt         *int `json:"prompt_tokens"`
+			Completion     *int `json:"completion_tokens"`
+			PromptCacheHit int  `json:"prompt_cache_hit_tokens"`
+			PromptDetails  struct {
+				Cached int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := request(ctx, o.client, req, &response, 8<<20); err != nil {
 		return domain.Completion{}, err
 	}
+	model := response.Model
+	if model == "" {
+		model = o.config.Model
+	}
+	out := domain.Completion{Usage: domain.ModelUsage{Model: model}}
+	if response.Usage.Prompt != nil {
+		out.InputTokens = *response.Usage.Prompt
+	}
+	if response.Usage.Completion != nil {
+		out.OutputTokens = *response.Usage.Completion
+	}
+	if out.InputTokens < 0 || out.OutputTokens < 0 {
+		out.InputTokens, out.OutputTokens = 0, 0
+		return out, errors.New("model returned invalid token usage")
+	}
+	out.Usage.TokenUsageKnown = response.Usage.Prompt != nil && response.Usage.Completion != nil
+	cached := response.Usage.PromptDetails.Cached
+	if response.Usage.PromptCacheHit > cached {
+		cached = response.Usage.PromptCacheHit
+	}
+	if cached < 0 {
+		cached = 0
+	}
+	if cached > out.InputTokens {
+		cached = out.InputTokens
+	}
+	out.Usage.CachedInputTokens = cached
 	if len(response.Choices) == 0 {
-		return domain.Completion{}, errors.New("model returned no choices")
+		return out, errors.New("model returned no choices")
 	}
 	choice := response.Choices[0]
 	if choice.FinishReason == "length" {
-		return domain.Completion{}, errors.New("model response truncated by token limit")
+		return out, errors.New("model response truncated by token limit")
 	}
 	m := domain.Message{Role: "assistant", Reasoning: choice.Message.ReasoningContent}
 	if m.Reasoning == "" {
@@ -155,7 +216,7 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 				Text string `json:"text"`
 			}
 			if json.Unmarshal(choice.Message.Content, &parts) != nil {
-				return domain.Completion{}, errors.New("invalid model content")
+				return out, errors.New("invalid model content")
 			}
 			for _, p := range parts {
 				if p.Type == "text" {
@@ -169,14 +230,16 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 	}
 	for _, c := range choice.Message.ToolCalls {
 		if c.Type != "function" || c.ID == "" || c.Function.Name == "" || !json.Valid([]byte(c.Function.Arguments)) {
-			return domain.Completion{}, errors.New("model returned invalid tool call")
+			return out, errors.New("model returned invalid tool call")
 		}
 		m.ToolCalls = append(m.ToolCalls, domain.ToolCall{ID: c.ID, Name: c.Function.Name, Arguments: json.RawMessage(c.Function.Arguments)})
 	}
 	if m.Content == "" && len(m.ToolCalls) == 0 && choice.FinishReason != "stop" {
-		return domain.Completion{}, errors.New("model returned empty response")
+		return out, errors.New("model returned empty response")
 	}
-	return domain.Completion{Model: o.config.Model, Message: m, InputTokens: response.Usage.Prompt, OutputTokens: response.Usage.Completion}, nil
+	out.Model = o.config.Model
+	out.Message = m
+	return out, nil
 }
 
 var _ domain.Model = (*OpenAI)(nil)

@@ -81,7 +81,7 @@ func run() error {
 	if err != nil {
 		return errors.New("knowledge initialization failed")
 	}
-	model, err := integrations.NewOpenAI(integrations.OpenAIConfig{BaseURL: c.LLMBaseURL, APIKey: c.LLMAPIKey, Model: c.LLMModel})
+	model, err := integrations.NewModelRouter(c.Models)
 	if err != nil {
 		return err
 	}
@@ -184,7 +184,7 @@ func run() error {
 	defer cancel()
 	ready.Store(true)
 	event := telemetry.Start(ctx, logger, "application.started")
-	event.Set("model", c.LLMModel)
+	event.Set("model_routes", c.Models.Routes)
 	event.Set("web_search_enabled", c.YandexAPIKey != "")
 	event.Set("log_search_enabled", logs != nil)
 	event.Set("browser_enabled", c.BrowserEnabled)

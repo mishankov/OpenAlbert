@@ -10,7 +10,7 @@ GitHub используется для исходников, хранения о
 ## Подготовка
 
 Нужны Task v3, Python 3.10+, Go из `go.work`, Node.js 24 с npm, Docker Engine
-с Compose 2.23.1+ и Buildx. На macOS можно использовать уже установленный Docker
+с Compose 2.24.0+ и Buildx. На macOS можно использовать уже установленный Docker
 Desktop или OrbStack. Для native-проверок нужен Apple Silicon Mac с полным Xcode
 и управляемая Tart VM. Установка Task на Mac: `brew install go-task`.
 

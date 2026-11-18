@@ -70,6 +70,7 @@ def test_environment():
              "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH",
              "GOPATH", "GOMODCACHE", "GOCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB",
              "PLAYWRIGHT_BROWSERS_PATH", "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
+             "OPENALBERT_TEST_BACKUP_MINIO_IMAGE",
              "ALBERT_TART", "ALBERT_VM_NAME", "ALBERT_VM_STATE", "ALBERT_VM_IMAGE", "TART_HOME"}
     return {key: value for key, value in os.environ.items() if key in names}
 

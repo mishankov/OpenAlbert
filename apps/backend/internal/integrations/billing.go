@@ -142,3 +142,12 @@ func (b *BillingModel) Reconnected() {
 	b.ineligible = false
 	b.lastErr = nil
 }
+
+// Preserve API profile sizing when billing is the application's outer model.
+// The configured API budget also keeps an auto-lane fallback request bounded.
+func (b *BillingModel) FitsContext(ctx context.Context, messages []domain.Message, tools []domain.Tool) (bool, error) {
+	if sizer, ok := b.API.(domain.ModelContext); ok {
+		return sizer.FitsContext(ctx, messages, tools)
+	}
+	return true, ctx.Err()
+}

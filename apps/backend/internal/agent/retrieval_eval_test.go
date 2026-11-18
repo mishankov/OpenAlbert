@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"openalbert/apps/backend/internal/config"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/integrations"
 )
@@ -17,9 +18,13 @@ import (
 // nothing is delivered to Telegram or written to the installation's data.
 func TestLiveRetrievalPrompts(t *testing.T) {
 	if os.Getenv("OPENALBERT_LIVE_RETRIEVAL_EVAL") != "1" {
-		t.Skip("set OPENALBERT_LIVE_RETRIEVAL_EVAL=1 and LLM_* to evaluate retrieval prompts")
+		t.Skip("set OPENALBERT_LIVE_RETRIEVAL_EVAL=1 and LLM_CONFIG_FILE to evaluate retrieval prompts")
 	}
-	model, err := integrations.NewOpenAI(integrations.OpenAIConfig{BaseURL: os.Getenv("LLM_BASE_URL"), APIKey: os.Getenv("LLM_API_KEY"), Model: os.Getenv("LLM_MODEL")})
+	profiles, err := config.LoadModelProfiles(os.Getenv("LLM_CONFIG_FILE"))
+	if err != nil {
+		t.Fatal("invalid evaluation model configuration")
+	}
+	model, err := integrations.NewModelRouter(profiles)
 	if err != nil {
 		t.Fatal("invalid evaluation model configuration")
 	}

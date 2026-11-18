@@ -8,6 +8,7 @@ export const output = join(root, 'site/dist');
 export const navigation = [
   ['overview', 'README.md', 'Обзор', 'book'],
   ['architecture', 'architecture.md', 'Архитектура', 'layers'],
+  ['model-routing', 'model-routing.md', 'Модели и роли', 'layers'],
   ['sessions', 'sessions.md', 'Сессии и цикл', 'cycle'],
   ['tasks', 'tasks.md', 'Задачи', 'check'],
   ['memory', 'memory.md', 'Память', 'memory'],

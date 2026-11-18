@@ -15,6 +15,8 @@ type Trace struct {
 	TaskID     string          `json:"task_id,omitempty"`
 	Kind       string          `json:"kind"`
 	Name       string          `json:"name"`
+	ModelRole  ModelRole       `json:"model_role,omitempty"`
+	Profile    string          `json:"profile,omitempty"`
 	Step       int             `json:"step"`
 	CallID     string          `json:"call_id,omitempty"`
 	Attempt    int             `json:"attempt"`

@@ -238,6 +238,9 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+    env_file:
+      - path: ./models.env
+        required: false
     environment:
       DATABASE_URL: "postgres://openalbert:${POSTGRES_PASSWORD:-openalbert-local-dev}@postgres:5432/openalbert?sslmode=disable"
       TEMPORAL_ADDRESS: temporal:7233
@@ -252,15 +255,14 @@ services:
       TELEGRAM_ALLOW_BOT_MESSAGES: "${TELEGRAM_ALLOW_BOT_MESSAGES:-false}"
       OPENAI_AUTH_MODE: "${OPENAI_AUTH_MODE:-api_key}"
       OPENAI_TOKEN_STORE: /data/chatgpt/credentials.json
-      OPENAI_SIWC_MODEL: "${OPENAI_SIWC_MODEL:-${LLM_MODEL:-}}"
+      OPENAI_SIWC_MODEL: "${OPENAI_SIWC_MODEL:-}"
       OPENAI_LANE_COOLDOWN: "${OPENAI_LANE_COOLDOWN:-15m}"
-      LLM_BASE_URL: "${LLM_BASE_URL:-https://api.openai.com/v1}"
+      LLM_CONFIG_FILE: /etc/openalbert/models.toml
       LLM_API_KEY: "${LLM_API_KEY:-}"
       STT_BASE_URL: "${STT_BASE_URL-http://stt:8080/v1}"
       STT_MODEL: "${STT_MODEL:-nemotron-3.5}"
       STT_API_KEY: "${STT_API_KEY:-}"
       STT_REVISION: "${STT_REVISION:-ea30d66d-q8-nemo2bdfb03b-ru-pcm16-v1}"
-      LLM_MODEL: "${LLM_MODEL:-}"
       YANDEX_SEARCH_URL: "${YANDEX_SEARCH_URL:-}"
       YANDEX_API_KEY: "${YANDEX_API_KEY:-}"
       YANDEX_FOLDER_ID: "${YANDEX_FOLDER_ID:-}"
@@ -291,6 +293,12 @@ services:
     volumes:
       - ./container_data/knowledge:/data/knowledge
       - ./container_data/chatgpt:/data/chatgpt
+      - type: bind
+        source: ${LLM_CONFIG_HOST_FILE:-./models.toml}
+        target: /etc/openalbert/models.toml
+        read_only: true
+        bind:
+          create_host_path: false
       - ./container_data/computer/client:/data/computer:ro
       - ./container_data/backup-state:/data/backup-state:ro
     logging: *logging
