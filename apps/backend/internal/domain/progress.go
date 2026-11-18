@@ -14,6 +14,7 @@ type Progress struct {
 	Step         int              `json:"step"`
 	Text         string           `json:"text"`
 	Status       string           `json:"status"`
+	DirectReply  bool             `json:"direct_reply,omitempty"` // At least one reply confirmed outside the outbox (a widget).
 	Delivery     ProgressDelivery `json:"delivery"`
 	Outcome      string           `json:"outcome,omitempty"` // Derived from the durable outbox, never written by the agent.
 }

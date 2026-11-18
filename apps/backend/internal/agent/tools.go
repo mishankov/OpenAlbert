@@ -16,6 +16,7 @@ import (
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/messagefmt"
 	"openalbert/apps/backend/internal/scheduling"
+	"openalbert/apps/backend/internal/widgets"
 )
 
 func ID(parts ...string) string {
@@ -57,6 +58,8 @@ func Definitions() []domain.Tool {
 		{Name: "web_read", Description: "Fetch plain text from a known public HTTP(S) URL. Use for static articles, documentation or plain-text files when only their text is needed. Does not run JavaScript or share browser cookies. HTML extraction discards link destinations and flattens headings, lists and tables; long results may be truncated. For search results, catalogs, following links, structured tables or JavaScript content, use the listed browser tools. An HTTP success may contain a CAPTCHA or an empty page; check that the requested content is actually present. Private network addresses are forbidden.", Parameters: schema(`"url":{"type":"string"}`, "url")},
 		{Name: "send_message", Description: sendMessageDescription, Parameters: schema(`"text":{"type":"string","description":"Default user-facing reply in Markdown: headings, emphasis, links, lists and code. Use an empty string for an artifact without a caption. For native tables, formulas or collapsible sections use send_rich_message."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
 		{Name: "send_rich_message", Description: sendRichMessageDescription, Parameters: schema(`"text":{"type":"string","description":"User-facing Rich Markdown: native tables, formulas, collapsible details and other rich blocks. Use an empty string for an artifact without a caption."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
+		{Name: "send_widget", Description: "Send a Telegram widget in the current private chat. kind=schedules sends deterministic pause/resume controls for 1–4 task_ids from task_find, with inline buttons and keyboard commands for older clients. kind=html sends a read-only self-contained HTML widget: no external resources, 1–32768 UTF-8 bytes, zlib-9 at most 4096 bytes. Include a meaningful caption (at most 1024 UTF-16 units) as accessible text fallback. State fields are strings of at most 1024 UTF-8 bytes each. allow_queries is supported only by schedules. Returns the sent message_id and whether text fallback was used; does not end the turn. Never use for intermediate progress.", Parameters: schema(`"kind":{"type":"string","enum":["html","schedules"]},"task_ids":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":4},"html":{"type":"string"},"width":{"type":"integer","minimum":200},"height":{"type":"integer","minimum":50,"maximum":600},"public_data":{"type":"string"},"chat_data":{"type":"string"},"caption":{"type":"string"},"allow_queries":{"type":"boolean"}`, "kind")},
+		{Name: "edit_widget_data", Description: "Edit chat_data and/or public_data of a registered HTML widget in this private conversation, using message_id returned by send_widget. Each field is a UTF-8 string of at most 1024 bytes; omit to preserve it, pass an empty string to clear. HTML is immutable. Schedule state is managed by the server and cannot be overridden.", Parameters: schema(`"message_id":{"type":"integer","minimum":1},"chat_data":{"type":"string"},"public_data":{"type":"string"}`, "message_id")},
 		{Name: "send_group_message", Description: "Post the text your owner explicitly requests to a known allowed Telegram group or topic, only from the owner's interactive private chat. Get the exact conversation_id from conversation_list; ask if the intended group/topic is ambiguous. Use original Rich Markdown, up to 32000 UTF-8 bytes. Send only the intended public text, never private instructions/history. Returns queued, not confirmed delivered. Does not finish this turn: acknowledge the queued post privately via send_message. Do not repost it to check delivery. Text only; attachments are not supported by this tool.", Parameters: schema(`"conversation_id":{"type":"string"},"text":{"type":"string"}`, "conversation_id", "text")},
 		{Name: "task_create", Description: "Create an independent durable task. Specify next_run_at RFC3339 for a reminder; schedule_seconds>0 for repeating checks. Explain reason for self-initiated tasks. Task continues after session closes.", Parameters: schema(`"title":{"type":"string"},"goal":{"type":"string"},"reason":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0},"schedule_cron":{"type":"string"},"schedule_timezone":{"type":"string"},"maintenance":{"type":"boolean"}`, "title", "goal")},
 		{Name: "task_find", Description: "Find assignments, reminders and monitoring tasks in the current conversation, including those created in earlier sessions. Use for schedules, progress, results and status questions, and before creating a possible duplicate; these belong to tasks, not memory_search. query is a literal case-insensitive substring of title or goal, or an exact task ID; omitted or empty query returns all saved tasks in this conversation, including completed ones. Inspect status and use task_read for details.", Parameters: schema(`"query":{"type":"string","description":"A literal substring of task title or goal, or an exact ID. Omit or use an empty string to list all saved tasks in this conversation."}`)},
@@ -130,6 +133,29 @@ func taskUpdateAccess(in ToolInput) error {
 }
 
 func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
+	if in.Call.Name == "send_widget" || in.Call.Name == "edit_widget_data" {
+		if a.Widgets == nil {
+			return nil, errors.New("Telegram widgets are unavailable")
+		}
+		if len(in.Call.Arguments) > 100000 {
+			return nil, errors.New("tool arguments too large")
+		}
+		if in.Call.Name == "send_widget" {
+			var p widgets.Request
+			if err := json.Unmarshal(in.Call.Arguments, &p); err != nil {
+				return nil, errors.New("invalid widget JSON")
+			}
+			return a.Widgets.Send(ctx, in.Conversation, ID(in.RunKey, fmt.Sprint(in.Step), in.Call.ID), p)
+		}
+		var p struct {
+			MessageID int64 `json:"message_id"`
+			domain.WidgetData
+		}
+		if err := json.Unmarshal(in.Call.Arguments, &p); err != nil {
+			return nil, errors.New("invalid widget JSON")
+		}
+		return map[string]string{"state": "updated"}, a.Widgets.Edit(ctx, in.Conversation, p.MessageID, p.WidgetData)
+	}
 	if strings.HasPrefix(in.Call.Name, "computer_") {
 		return a.executeComputer(ctx, in)
 	}
@@ -565,6 +591,9 @@ func (a *Activities) toolDefinitions() []domain.Tool {
 	}
 	available := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
+		if (tool.Name == "send_widget" || tool.Name == "edit_widget_data") && a.Widgets == nil {
+			continue
+		}
 		if tool.Name != "web_search" || a.searchEnabled() {
 			available = append(available, tool)
 		}
@@ -578,6 +607,9 @@ func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 	interactive := turn.Input.TaskID == "" && !turn.Input.Initiative
 	filtered := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
+		if (tool.Name == "send_widget" || tool.Name == "edit_widget_data") && (!turn.Conversation.Private || turn.Conversation.ChatID <= 0 || turn.Conversation.DeliveryChannel == "desktop") {
+			continue
+		}
 		if (tool.Name == "group_read" || tool.Name == "group_update") && (!a.isOwnerPrivate(turn.Conversation) || !interactive) {
 			continue
 		}

@@ -458,6 +458,25 @@ func (m *Memory) SaveCheckpoint(ctx context.Context, key string, value json.RawM
 	return nil
 }
 
+func (m *Memory) ClaimCheckpoint(ctx context.Context, key string, value json.RawMessage) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := validID(key); err != nil {
+		return false, err
+	}
+	if !json.Valid(value) {
+		return false, errors.New("invalid checkpoint JSON")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.checkpoints[key]; ok {
+		return false, nil
+	}
+	m.checkpoints[key] = append(json.RawMessage(nil), value...)
+	return true, nil
+}
+
 func (m *Memory) ActiveSessions(ctx context.Context) ([]domain.Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

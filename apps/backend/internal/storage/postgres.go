@@ -613,6 +613,18 @@ func (s *Store) SaveCheckpoint(ctx context.Context, key string, value json.RawMe
 	return err
 }
 
+// ClaimCheckpoint creates a durable, single-writer claim without overwriting it.
+func (s *Store) ClaimCheckpoint(ctx context.Context, key string, value json.RawMessage) (bool, error) {
+	if err := validID(key); err != nil {
+		return false, err
+	}
+	if !json.Valid(value) {
+		return false, errors.New("invalid checkpoint JSON")
+	}
+	result, err := s.pool.Exec(ctx, "INSERT INTO openalbert_checkpoints(id,data) VALUES($1,$2) ON CONFLICT(id) DO NOTHING", key, []byte(value))
+	return result.RowsAffected() == 1, err
+}
+
 func (s *Store) ActiveSessions(ctx context.Context) ([]domain.Session, error) {
 	rows, err := s.pool.Query(ctx, "SELECT data FROM openalbert_sessions WHERE data->>'status'='active'")
 	if err != nil {

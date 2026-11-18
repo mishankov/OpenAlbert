@@ -11,13 +11,16 @@ import (
 	"strings"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/scheduling"
 	"openalbert/apps/backend/internal/telemetry"
+	"openalbert/apps/backend/internal/widgets"
 	"openalbert/services/backup"
 )
 
 type Activities struct {
+	Widgets            *widgets.Controller
 	OwnerUserID        int64
 	AllowedGroupIDs    []int64
 	Browser            domain.Browser
@@ -407,6 +410,10 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 	// into a successful task mutation after its execution context changes.
 	var accessErr error
 	switch in.Call.Name {
+	case "send_widget", "edit_widget_data":
+		if !in.Conversation.Private || in.Conversation.ChatID <= 0 || in.Conversation.DeliveryChannel == "desktop" || in.Conversation.ChatID != in.Conversation.OwnerID || in.Conversation.ID != fmt.Sprintf("personal:%d", in.Conversation.OwnerID) {
+			accessErr = errors.New("виджеты доступны только в личном чате Telegram")
+		}
 	case "group_read", "group_update":
 		accessErr = a.groupRulesAccess(in)
 	case "computer_exec", "computer_execution_status", "computer_execution_cancel", "computer_upload", "computer_download":
@@ -446,6 +453,18 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 	finishTrace := a.startTrace(ctx, domain.Trace{SessionID: in.SessionID, TurnID: in.RunKey, Trigger: in.TriggerName(), TaskID: in.TaskID, Kind: "tool", Name: in.Call.Name, Step: in.Step, CallID: in.Call.ID}, in.Call.Arguments, ev)
 	defer func() { finishTrace(out, err) }()
 	result, e := a.execute(ctx, in)
+	if e == nil && in.Call.Name == "send_widget" {
+		if err := a.Repo.ConfirmProgressReply(ctx, in.RunKey); err != nil {
+			return "", err
+		}
+	}
+	var rateLimit *widgets.RateLimitError
+	if errors.Is(e, widgets.ErrDeliveryPending) {
+		return "", temporal.NewApplicationErrorWithOptions(e.Error(), "widget_delivery_pending", temporal.ApplicationErrorOptions{NextRetryDelay: time.Second})
+	}
+	if errors.As(e, &rateLimit) {
+		return "", temporal.NewApplicationErrorWithOptions(rateLimit.Error(), "widget_rate_limit", temporal.ApplicationErrorOptions{NextRetryDelay: rateLimit.RetryAfter})
+	}
 	if errors.Is(e, domain.ErrBrowserCapacity) {
 		ev.Fail(diagnosticError("browser_capacity"))
 		return "", browserCapacityError()

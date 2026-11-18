@@ -13,6 +13,7 @@ import (
 	"openalbert/apps/backend/internal/integrations"
 	"openalbert/apps/backend/internal/messagefmt"
 	"openalbert/apps/backend/internal/telemetry"
+	"openalbert/apps/backend/internal/widgets"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
@@ -148,6 +149,19 @@ func (r *Runtime) poll(ctx context.Context) {
 			}
 			continue
 		}
+		// Queries are independent of inbox delivery and model workflows. Start
+		// the whole bounded API batch immediately so one slow request cannot
+		// exhaust the 15-second deadline of the following queries.
+		for _, update := range updates {
+			if update.WidgetQuery == nil || r.Activities.Widgets == nil {
+				continue
+			}
+			r.wg.Add(1)
+			go func(q domain.WidgetQuery) {
+				defer r.wg.Done()
+				r.record(ctx, "telegram.widget_query", r.Activities.Widgets.Handle(ctx, q))
+			}(*update.WidgetQuery)
+		}
 		for _, update := range updates {
 			event := telemetry.Start(ctx, r.Logger, "telegram.receive")
 			if update.Incoming == nil {
@@ -203,6 +217,30 @@ func (r *Runtime) DispatchOnce(ctx context.Context) error {
 		return err
 	}
 	for _, in := range incoming {
+		if in.Command == "schedules" || in.Command == "pause" || in.Command == "resume" {
+			if r.Activities.Widgets == nil {
+				return errors.New("Telegram widgets are unavailable")
+			}
+			commandCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := r.Activities.Widgets.Command(commandCtx, in)
+			var replyErr *widgets.CommandReplyError
+			var limited *widgets.RateLimitError
+			if err != nil && !errors.As(err, &replyErr) && !errors.As(err, &limited) && !errors.Is(err, widgets.ErrDeliveryPending) {
+				err = r.Activities.Widgets.Reply(commandCtx, in, err.Error())
+			}
+			if errors.As(err, &limited) || errors.Is(err, widgets.ErrDeliveryPending) {
+				cancel()
+				continue
+			} // Keep the inbox item for a later, cooldown-aware retry.
+			if err != nil {
+				r.record(ctx, "telegram.widget_command", err)
+			}
+			cancel()
+			if err := r.Repo.MarkIncomingHandled(ctx, in.ID); err != nil {
+				return err
+			}
+			continue
+		}
 		text := strings.ToLower(strings.TrimSpace(in.Text))
 		stop := text == "/stop" || text == "стоп" || text == "stop"
 		newSession := len(in.Attachments) == 0 && (in.Command == "new" || text == "/new")

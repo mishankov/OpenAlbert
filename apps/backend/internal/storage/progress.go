@@ -29,9 +29,9 @@ func validProgressStatus(status string) bool {
 // complete the owner's reply and cannot cause a private status to disappear.
 const progressOutcomeSQL = `CASE
  WHEN p.data->>'status' IN ('failed','cancelled') THEN p.data->>'status'
- WHEN p.data->>'status'='active' THEN CASE WHEN EXISTS(SELECT 1 FROM openalbert_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id') THEN 'waiting' ELSE 'active' END
+ WHEN p.data->>'status'='active' THEN CASE WHEN COALESCE((p.data->>'direct_reply')::boolean,false) OR EXISTS(SELECT 1 FROM openalbert_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id') THEN 'waiting' ELSE 'active' END
  WHEN EXISTS(SELECT 1 FROM openalbert_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id' AND o.state IN ('failed','unknown')) THEN 'delivery_failed'
- WHEN EXISTS(SELECT 1 FROM openalbert_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id')
+ WHEN (COALESCE((p.data->>'direct_reply')::boolean,false) OR EXISTS(SELECT 1 FROM openalbert_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id'))
  AND NOT EXISTS(SELECT 1 FROM openalbert_outgoing o WHERE o.data->>'turn_id'=p.id AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id' AND o.state<>'sent') THEN 'delivered'
  ELSE 'waiting' END`
 
@@ -61,6 +61,26 @@ func (s *Store) EndProgress(ctx context.Context, id, status string) error {
 	}
 	_, err := s.pool.Exec(ctx, `UPDATE openalbert_progress SET data=jsonb_set(data,'{status}',to_jsonb($2::text)) WHERE id=$1 AND data->>'status'='active'`, id, status)
 	return err
+}
+
+// ConfirmProgressReply records an acknowledged direct send. Ordinary queued
+// parts must still finish before progress is removed.
+func (s *Store) ConfirmProgressReply(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE openalbert_progress SET data=jsonb_set(data,'{direct_reply}','true'::jsonb) WHERE id=$1`, id)
+	return err
+}
+
+func (m *Memory) ConfirmProgressReply(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p, ok := m.progress[id]; ok {
+		p.DirectReply = true
+		m.progress[id] = p
+	}
+	return nil
 }
 
 func (s *Store) DueProgress(ctx context.Context, now time.Time, n int) ([]domain.Progress, error) {
@@ -156,7 +176,7 @@ func (m *Memory) progressOutcome(p domain.Progress) domain.Progress {
 		failed = failed || out.State == "failed" || out.State == "unknown"
 	}
 	if p.Status == "active" {
-		if count > 0 {
+		if count > 0 || p.DirectReply {
 			p.Outcome = "waiting"
 		}
 		return p
@@ -164,7 +184,7 @@ func (m *Memory) progressOutcome(p domain.Progress) domain.Progress {
 	p.Outcome = "waiting"
 	if failed {
 		p.Outcome = "delivery_failed"
-	} else if count > 0 && count == sent {
+	} else if (count > 0 || p.DirectReply) && count == sent {
 		p.Outcome = "delivered"
 	}
 	return p
