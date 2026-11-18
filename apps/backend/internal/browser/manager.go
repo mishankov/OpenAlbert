@@ -277,6 +277,12 @@ func (m *Manager) Close() error {
 }
 
 func (m *Manager) CloseTask(id string) {
+	m.PrepareCloseTask(id)()
+}
+
+// PrepareCloseTask captures the current task entries without waiting for driver
+// shutdown. A deferred cleanup must never select a later resumed run's browser.
+func (m *Manager) PrepareCloseTask(id string) func() {
 	m.mu.Lock()
 	var entries []*entry
 	for _, e := range m.entries {
@@ -285,7 +291,9 @@ func (m *Manager) CloseTask(id string) {
 		}
 	}
 	m.mu.Unlock()
-	for _, e := range entries {
-		m.closeEntry(e)
+	return func() {
+		for _, e := range entries {
+			m.closeEntry(e)
+		}
 	}
 }

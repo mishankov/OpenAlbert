@@ -36,6 +36,7 @@ Chromium и FFmpeg. На хосте эти два инструмента для 
 | --- | --- |
 | `task check` | gofmt без изменения файлов, go vet, тесты runner, проверка Compose и Bake |
 | `task test:go` | Go race-тесты в Linux с временными PostgreSQL/VictoriaLogs, Chromium и FFmpeg |
+| `task test:widgets` | HTTP-контракт виджетов, гонки расписаний, команды бота, прогресс и сборка backend без CGO; полная проверка PostgreSQL — через `test:go` |
 | `task test:computer` | Явная одноразовая сборка шаблона пользователя, SSH-контракт и независимость от обновлений приложения; не входит в test/verify/publish |
 | `task test:backup` | Зашифрованная копия, ротация S3 и восстановление PostgreSQL/MinIO в отдельных контейнерах |
 | `task test:web` | Тесты/сборка docs, Playwright docs и inspector, включая клавиатуру |

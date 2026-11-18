@@ -38,6 +38,25 @@ func progressContract(t *testing.T, repo domain.Repository) {
 			t.Fatal(err)
 		}
 	}
+	claims := make(chan bool, 8)
+	for range 8 {
+		go func() {
+			claimed, err := repo.ClaimCheckpoint(ctx, id+"/send-claim", []byte(`true`))
+			if err != nil {
+				t.Error(err)
+			}
+			claims <- claimed
+		}()
+	}
+	winners := 0
+	for range 8 {
+		if <-claims {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("send claim has %d winners", winners)
+	}
 	check(repo.StartProgress(ctx, p))
 	check(repo.ReportProgress(ctx, id, 3, "current"))
 	check(repo.StartProgress(ctx, p)) // Retried Prepare must not erase public text or delivery metadata.
@@ -121,6 +140,29 @@ func progressContract(t *testing.T, repo domain.Repository) {
 	row = find(id)
 	if row == nil || row.Outcome != "delivery_failed" {
 		t.Fatal("unknown delivery treated as success")
+	}
+
+	// A directly acknowledged widget removes progress, but pending ordinary
+	// reply parts must still be delivered first.
+	id += "/widget"
+	p.TurnID = id
+	check(repo.StartProgress(ctx, p))
+	check(repo.ConfirmProgressReply(ctx, id))
+	if find(id) != nil {
+		t.Fatal("active turn posted progress after delivering widget")
+	}
+	check(repo.EndProgress(ctx, id, "waiting_delivery"))
+	if row = find(id); row == nil || row.Outcome != "delivered" {
+		t.Fatal("widget-only reply left progress waiting")
+	}
+	check(repo.EnqueueOutgoing(ctx, domain.Outgoing{ID: id + "/text", TurnID: id, Conversation: conv, Text: "ordinary part"}))
+	if find(id) != nil {
+		t.Fatal("widget delivery hid a pending ordinary reply")
+	}
+	check(repo.SetOutgoingState(ctx, id+"/text", "sending"))
+	check(repo.SetOutgoingState(ctx, id+"/text", "sent"))
+	if row = find(id); row == nil || row.Outcome != "delivered" {
+		t.Fatal("mixed reply did not finish progress")
 	}
 
 	for _, topic := range []int{0, 3} {

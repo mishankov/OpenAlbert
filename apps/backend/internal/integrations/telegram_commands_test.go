@@ -23,7 +23,7 @@ func TestTelegramCommandMenuAndKeyboardInput(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Error(err)
 			}
-			if len(payload.Commands) != 2 || payload.Commands[0].Command != "new" || payload.Commands[1].Command != "stop" || payload.Commands[0].Description == "" {
+			if len(payload.Commands) != 5 || payload.Commands[0].Command != "new" || payload.Commands[1].Command != "stop" || payload.Commands[2].Command != "schedules" || payload.Commands[3].Command != "pause" || payload.Commands[4].Command != "resume" || payload.Commands[0].Description == "" {
 				t.Errorf("commands not discoverable: %+v", payload)
 			}
 			configured = true

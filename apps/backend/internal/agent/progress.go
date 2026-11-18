@@ -20,7 +20,7 @@ func (a *Activities) reportProgress(ctx context.Context, in ToolInput, text stri
 	if err := a.Repo.ReportProgress(ctx, in.RunKey, in.Step, text); err != nil {
 		return nil, err
 	}
-	return map[string]string{"state": "recorded", "note": "Progress recorded internally. Only private Telegram chats show a temporary status message when due; groups stay silent. Continue the task; send the final answer with send_message."}, nil
+	return map[string]string{"state": "recorded", "note": "Progress recorded internally. Only private Telegram chats show a temporary status message when due; groups stay silent. Continue the task; use the appropriate available delivery tool for the final answer, including send_widget for a requested widget. A successful widget delivery needs no duplicate text confirmation."}, nil
 }
 
 func (a *Activities) startProgress(ctx context.Context, in RunInput, conv domain.Conversation) {

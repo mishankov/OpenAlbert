@@ -471,7 +471,7 @@ steps:
 					views = append(views, view)
 				}
 			}
-			if domain.IsReplyTool(call.Name) && !strings.Contains(output, `"error"`) {
+			if (domain.IsReplyTool(call.Name) || call.Name == "send_widget") && !strings.Contains(output, `"error"`) {
 				turn.Sent = true
 			}
 		}

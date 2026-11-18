@@ -42,8 +42,9 @@ type Telegram struct {
 	username string // Set by ConfigureCommands before polling starts.
 }
 type Update struct {
-	Offset   int64
-	Incoming *domain.Incoming
+	Offset      int64
+	Incoming    *domain.Incoming
+	WidgetQuery *domain.WidgetQuery
 }
 type TelegramError struct {
 	Rejected       bool // Telegram explicitly returned ok:false; an HTTP error alone is ambiguous.
@@ -133,6 +134,9 @@ func (t *Telegram) ConfigureCommands(ctx context.Context) error {
 	commands := []map[string]string{
 		{"command": "new", "description": "Начать новый диалог"},
 		{"command": "stop", "description": "Остановить текущую работу"},
+		{"command": "schedules", "description": "Расписания: /schedules [страница]"},
+		{"command": "pause", "description": "Приостановить расписание: /pause ID"},
+		{"command": "resume", "description": "Включить расписание: /resume ID"},
 	}
 	if t.ChatGPT != nil {
 		commands = append(commands, map[string]string{"command": "chatgpt", "description": "ChatGPT: вход, модели и статус оплаты"})
@@ -142,8 +146,15 @@ func (t *Telegram) ConfigureCommands(ctx context.Context) error {
 
 func (t *Telegram) command(text string) (name string, otherBot bool) {
 	text = strings.TrimSpace(text)
-	command, username, directed := strings.Cut(text, "@")
-	if command != "/new" && command != "/stop" {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return "", false
+	}
+	command, username, directed := strings.Cut(fields[0], "@")
+	if command != "/new" && command != "/stop" && command != "/schedules" && command != "/pause" && command != "/resume" {
+		return "", false
+	}
+	if (command == "/new" || command == "/stop") && len(fields) != 1 {
 		return "", false
 	}
 	if directed && (t.username == "" || !strings.EqualFold(username, t.username)) {
@@ -288,16 +299,28 @@ func telegramReplyContext(m *telegramMessage) *domain.ReplyContext {
 
 func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 	var raw []struct {
-		ID      int64            `json:"update_id"`
-		Message *telegramMessage `json:"message"`
+		ID       int64                  `json:"update_id"`
+		Message  *telegramMessage       `json:"message"`
+		Widget   *telegramWidgetQuery   `json:"widget_query"`
+		Callback *telegramCallbackQuery `json:"callback_query"`
 	}
-	err := t.api(ctx, "getUpdates", map[string]any{"offset": offset, "limit": 100, "timeout": int(t.config.PollTimeout / time.Second), "allowed_updates": []string{"message"}}, &raw)
+	err := t.api(ctx, "getUpdates", map[string]any{"offset": offset, "limit": 100, "timeout": int(t.config.PollTimeout / time.Second), "allowed_updates": []string{"message", "widget_query", "callback_query"}}, &raw)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Update, 0, len(raw))
 	for _, u := range raw {
 		update := Update{Offset: u.ID + 1}
+		if u.Widget != nil || u.Callback != nil {
+			q := widgetQuery(u.Widget, u.Callback)
+			// Even rejected queries need an answer to release their spinner.
+			if !t.users[q.UserID] {
+				q.DataType = false
+			}
+			update.WidgetQuery = &q
+			out = append(out, update)
+			continue
+		}
 		m := u.Message
 		if m == nil || m.From == nil || m.From.ID <= 0 {
 			out = append(out, update)

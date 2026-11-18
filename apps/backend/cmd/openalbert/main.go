@@ -26,6 +26,7 @@ import (
 	"openalbert/apps/backend/internal/orchestration"
 	"openalbert/apps/backend/internal/storage"
 	"openalbert/apps/backend/internal/telemetry"
+	"openalbert/apps/backend/internal/widgets"
 	"openalbert/services/backup"
 
 	"go.temporal.io/api/serviceerror"
@@ -151,6 +152,10 @@ func run() error {
 			return nil
 		}
 		return err
+	}
+	activities.Widgets = &widgets.Controller{Repo: artifacts, Transport: telegram, TaskChanged: activities.TaskChanged}
+	if browsers != nil {
+		activities.Widgets.PrepareCloseTask = browsers.(*browser.Manager).PrepareCloseTask
 	}
 	runtime := &orchestration.Runtime{Repo: artifacts, Activities: activities, Telegram: telegram, Client: temporalClient, TaskQueue: c.TemporalTaskQueue, IdleTimeout: c.SessionIdleTimeout, MaxSteps: c.MaxAgentSteps, InitiativeInterval: c.InitiativeInterval, Logger: logger}
 	worker := runtime.Worker()

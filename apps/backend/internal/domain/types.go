@@ -206,6 +206,7 @@ type Repository interface {
 	Ping(context.Context) error
 	LoadCheckpoint(context.Context, string) (json.RawMessage, bool, error)
 	SaveCheckpoint(context.Context, string, json.RawMessage) error
+	ClaimCheckpoint(context.Context, string, json.RawMessage) (bool, error)
 	ClaimTranscription(context.Context, string, string) (SpeechText, bool, bool, error)
 	CompleteTranscription(context.Context, string, string, SpeechText) (bool, error)
 	ReleaseTranscription(context.Context, string, string) error
@@ -239,6 +240,7 @@ type Repository interface {
 	StartProgress(context.Context, Progress) error
 	ReportProgress(context.Context, string, int, string) error
 	EndProgress(context.Context, string, string) error
+	ConfirmProgressReply(context.Context, string) error
 	DueProgress(context.Context, time.Time, int) ([]Progress, error)
 	SetProgressDelivery(context.Context, string, int64, ProgressDelivery) (Progress, bool, error)
 	SaveArtifact(context.Context, Artifact) error

@@ -1,0 +1,41 @@
+<!doctype html><html><body>
+<h3>Расписания</h3><div id="tasks"></div><p id="status"></p>
+<p>Клавиатура: /schedules · /pause ID · /resume ID</p>
+<script>
+const W = window.TelegramWidget;
+let busy = false;
+function draw() {
+  const list = document.getElementById('tasks');
+  list.replaceChildren();
+  let tasks;
+  try { tasks = JSON.parse(W.chatData || '[]'); } catch (_) { tasks = []; }
+  if (!tasks.length) list.textContent = 'Нет расписаний';
+  tasks.forEach((t, k) => {
+    const row = document.createElement('p');
+    const button = document.createElement('button');
+    button.textContent = (t.s ? 'Включить: ' : 'Приостановить: ') + t.t;
+    button.disabled = busy || !t.v;
+    button.onclick = () => {
+      if (busy || !t.v) return;
+      busy = true;
+      const request = W.request(JSON.stringify({k, s: t.s ? 0 : 1, v: t.v}));
+      draw();
+      document.getElementById('status').textContent = 'Сохранение…';
+      request.then(answer => {
+        busy = false;
+        document.getElementById('status').textContent = answer.result || 'Обновлено';
+        draw();
+      }, () => {
+        busy = false;
+        document.getElementById('status').textContent = 'Не удалось обновить. Повторите или используйте /schedules.';
+        draw();
+      });
+    };
+    row.appendChild(button);
+    list.appendChild(row);
+  });
+}
+W.onEvent('chatDataChanged', draw);
+draw();
+W.ready();
+</script></body></html>
