@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -18,10 +19,22 @@ import (
 
 func TestWidgetToolsDispatchAndAuthorizeBeforeReplay(t *testing.T) {
 	a, repo, _, conv := fixture(t)
+	source, err := os.ReadFile("../widgets/testdata/custom-summary.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := `{"title":"Расходы за ноябрь","items":[{"label":"Кофе","amount":250},{"label":"Продукты","amount":1200}]}`
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		if strings.HasSuffix(r.URL.Path, "/sendWidget") {
+			var payload domain.Widget
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			if payload.HTML != string(source) || payload.ChatData != state || payload.AllowQueries {
+				t.Error("generated HTML/JavaScript or its state did not reach Telegram intact")
+			}
 			_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":42}}`)
 		} else {
 			_, _ = io.WriteString(w, `{"ok":true,"result":true}`)
@@ -36,7 +49,8 @@ func TestWidgetToolsDispatchAndAuthorizeBeforeReplay(t *testing.T) {
 	if err := repo.StartProgress(context.Background(), domain.Progress{TurnID: "widget", Conversation: conv}); err != nil {
 		t.Fatal(err)
 	}
-	in := ToolInput{RunKey: "widget", Conversation: conv, Call: domain.ToolCall{ID: "send", Name: "send_widget", Arguments: json.RawMessage(`{"kind":"html","html":"<b>Hi</b>","caption":"Hi"}`)}}
+	args, _ := json.Marshal(map[string]any{"kind": "html", "html": string(source), "chat_data": state, "caption": "Расходы за ноябрь: 1450 ₽. Кофе — 250 ₽, продукты — 1200 ₽."})
+	in := ToolInput{RunKey: "widget", Conversation: conv, Call: domain.ToolCall{ID: "send", Name: "send_widget", Arguments: args}}
 	for range 2 {
 		if out, err := a.ToolCall(context.Background(), in); err != nil || ToolFailed(out) || !strings.Contains(out, `"message_id":42`) {
 			t.Fatalf("%s %v", out, err)

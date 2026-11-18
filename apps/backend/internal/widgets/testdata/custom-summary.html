@@ -1,0 +1,47 @@
+<!doctype html><html><head><style>
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,sans-serif;color:var(--ink);--ink:var(--tg-theme-text-color,#18362f);--muted:var(--tg-theme-hint-color,#6c817b);--surface:var(--tg-theme-bg-color,#fff);--soft:var(--tg-theme-secondary-bg-color,#f0f5f2);color-scheme:light dark}
+main{padding:20px;background:var(--surface)}header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}.eyebrow{margin:0 0 5px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:1.4px}h3{margin:0;font-size:21px;line-height:1.2;letter-spacing:-.6px}.mark{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:12px;background:var(--soft);color:var(--ink);flex-shrink:0}
+.hero{padding:20px;border-radius:20px;background:linear-gradient(125deg,#123f35,#246456);color:#f3fff8}.hero p{margin:0}.hero-label{font-size:12px;color:#c3ddd1}.amount{font-size:40px;font-weight:650;letter-spacing:-1.6px;line-height:1.2;padding:8px 0 17px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.hero-foot{display:flex;justify-content:space-between;gap:10px;border-top:1px solid #ffffff24;padding-top:11px;font-size:10px;color:#d3e8dc}.dot{display:inline-block;width:5px;height:5px;border-radius:50%;background:#b8e2c2;margin-right:5px}
+.filters{display:flex;gap:4px;padding:4px;margin:18px 0 20px;border-radius:13px;background:var(--soft)}button{flex:1;min-height:38px;padding:7px 5px;border:0;border-radius:10px;background:transparent;color:var(--muted);font:600 12px/1.3 system-ui,sans-serif}button[aria-pressed=true]{background:var(--surface);color:var(--ink);box-shadow:0 2px 6px #102f2110}button:active{opacity:.7}.section-title{margin:0 0 2px;color:var(--muted);font-size:11px;font-weight:600}.row{padding-top:14px}.row-top{display:flex;align-items:center;gap:10px}.icon{display:flex;align-items:center;justify-content:center;flex-shrink:0;width:30px;height:30px;border-radius:10px;background:var(--soft);color:var(--ink);font-size:11px;font-weight:700}.label{flex:1;min-width:0;overflow-wrap:anywhere;font-size:13px;font-weight:500}.value{font-size:13px;font-weight:650;white-space:nowrap;font-variant-numeric:tabular-nums}.track{height:4px;margin:8px 0 0 40px;border-radius:8px;background:var(--soft);overflow:hidden}.bar{height:100%;border-radius:8px;background:#64a88b}.row:nth-child(2n) .bar{background:#c8a36a}.empty{padding:24px 8px;text-align:center;color:var(--muted)}
+@media(prefers-color-scheme:dark){body{--ink:var(--tg-theme-text-color,#e4f0e8);--muted:var(--tg-theme-hint-color,#97aea2);--surface:var(--tg-theme-bg-color,#17271f);--soft:var(--tg-theme-secondary-bg-color,#24382d)}}
+</style></head><body><main>
+<header><div><p class="eyebrow">ЛИЧНЫЕ ФИНАНСЫ</p><h3 id="title"></h3></div><span class="mark"><svg width="19" height="19" viewBox="0 0 20 20" fill="none"><rect x="3" y="3" width="14" height="14" rx="4" stroke="currentColor" stroke-width="1.5"/><path d="M6 12V9m4 3V6m4 6v-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span></header>
+<section class="hero"><p class="hero-label">Всего расходов</p><p id="total" class="amount"></p><div class="hero-foot"><span><span class="dot"></span><span id="view"></span></span><span id="count"></span></div></section>
+<nav class="filters"><button id="all">Все расходы</button><button id="large">От 1000 ₽</button></nav>
+<p class="section-title">СТРУКТУРА РАСХОДОВ</p><div id="rows"></div>
+<script>
+const W = window.TelegramWidget;
+const money = value => new Intl.NumberFormat('ru-RU').format(value) + ' ₽';
+let large = false;
+function draw() {
+  let data;
+  try { data = JSON.parse(W.chatData || '{}'); } catch (_) { data = {}; }
+  document.getElementById('title').textContent = data.title || 'Расходы';
+  const items = (data.items || []).filter(item => !large || item.amount >= 1000);
+  const total = items.reduce((sum, item) => sum + item.amount, 0);
+  document.getElementById('total').textContent = money(total);
+  document.getElementById('view').textContent = large ? 'От 1000 ₽' : 'Весь период';
+  document.getElementById('count').textContent = 'Записей: ' + items.length;
+  const rows = document.getElementById('rows');
+  rows.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty'; empty.textContent = 'Нет расходов'; rows.appendChild(empty);
+  }
+  items.forEach(item => {
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = '<div class="row-top"><span class="icon"></span><span class="label"></span><span class="value"></span></div><div class="track"><div class="bar"></div></div>';
+    row.querySelector('.icon').textContent = item.label.slice(0, 1).toUpperCase();
+    row.querySelector('.label').textContent = item.label;
+    row.querySelector('.value').textContent = money(item.amount);
+    row.querySelector('.bar').style.width = (total ? item.amount / total * 100 : 0) + '%';
+    rows.appendChild(row);
+  });
+  document.getElementById('all').setAttribute('aria-pressed', String(!large));
+  document.getElementById('large').setAttribute('aria-pressed', String(large));
+}
+document.getElementById('all').onclick = () => { large = false; draw(); };
+document.getElementById('large').onclick = () => { large = true; draw(); };
+W.onEvent('chatDataChanged', draw);
+draw(); W.ready();
+</script></main></body></html>
