@@ -309,21 +309,26 @@ private struct SettingsView: View {
                 Text("Токен").font(.system(size: 12)).foregroundStyle(.secondary)
                 SecureField(hasSavedToken ? "Сохранён в Связке ключей" : "Токен доступа", text: $token).textFieldStyle(.roundedBorder).accessibilityIdentifier("serverToken")
             }
+            if model.connected, url == model.serverURL, let client = model.client {
+                Divider()
+                ScrollView { ChatGPTSettingsView(settings: model.chatGPT, client: client) }
+                    .frame(maxHeight: 380)
+            }
             if let error = model.error { Text(error).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled) }
             HStack {
-                Button("Отмена") { model.showSettings = false }.keyboardShortcut(.cancelAction).disabled(model.connecting)
+                Button("Отмена") { model.showSettings = false }.keyboardShortcut(.cancelAction).disabled(model.connecting || model.chatGPT.busy)
                 Spacer()
                 Button(model.connecting ? "Подключение…" : "Подключить") {
                     guard KeyboardGate.permitsPrimaryAction() else { return }
                     let saved = (try? APIClient.validatedURL(url)).flatMap { try? Keychain.token(for: $0.absoluteString) }
                     Task { await model.connect(url: url, token: token.isEmpty ? saved ?? "" : token) }
-                }.keyboardShortcut(.defaultAction).disabled(model.connecting || (try? APIClient.validatedURL(url)) == nil || (token.isEmpty && !hasSavedToken))
+                }.keyboardShortcut(.defaultAction).disabled(model.connecting || model.chatGPT.busy || (try? APIClient.validatedURL(url)) == nil || (token.isEmpty && !hasSavedToken))
                     .help("Подключить · Return").accessibilityIdentifier("connectServer")
             }
         }.padding(28).frame(width: 400)
             .onAppear { url = model.serverURL; hasSavedToken = (try? Keychain.token(for: model.serverURL)) != nil; focusURL = true }
             .onChange(of: url) { _, value in hasSavedToken = (try? APIClient.validatedURL(value)).flatMap { try? Keychain.token(for: $0.absoluteString) } != nil }
-            .interactiveDismissDisabled(model.connecting)
+            .interactiveDismissDisabled(model.connecting || model.chatGPT.busy)
     }
 }
 

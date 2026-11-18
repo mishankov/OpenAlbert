@@ -6,7 +6,7 @@ import AlbertCore
 /// Explicitly requested screenshots use synthetic data and an isolated profile.
 final class NativeScreenshotTests: DesktopTestCase {
     @MainActor
-    func testCaptureApplicationStates() throws {
+    func testCaptureApplicationStates() async throws {
         guard let destination = ProcessInfo.processInfo.environment["ALBERT_SCREENSHOT_DIR"] else {
             throw XCTSkip("Run python3 apps/macos/desktop_vm.py screenshots to capture native screenshots")
         }
@@ -20,7 +20,9 @@ final class NativeScreenshotTests: DesktopTestCase {
         let updates = AppUpdates(enabled: true, currentVersion: "0.1.0", checkAction: {})
         let model = AppModel(store: LocalStore(directory: temporary), defaults: UserDefaults(suiteName: UUID().uuidString)!, startNetwork: false, updates: updates)
         model.suppressNetwork = true
-        model.client = try APIClient(baseURL: URL(string: "https://screenshots.invalid")!, token: "synthetic-screenshot-fixture")
+        let fixtureSession = URLSessionConfiguration.ephemeral
+        fixtureSession.protocolClasses = [ScreenshotChatGPTProtocol.self]
+        model.client = try APIClient(baseURL: URL(string: "https://screenshots.invalid")!, token: "synthetic-screenshot-fixture", session: URLSession(configuration: fixtureSession))
         model.connected = true
         let lake = Attachment(id: "lake", name: "Озеро.jpg", mime: "image/jpeg", sizeBytes: 234000)
         let forest = Attachment(id: "forest", name: "Тропа.jpg", mime: "image/jpeg", sizeBytes: 335000)
@@ -41,9 +43,15 @@ final class NativeScreenshotTests: DesktopTestCase {
         window.appearance = NSAppearance(named: .aqua)
         app.appearance = window.appearance
         window.setContentSize(NSSize(width: 820, height: 840))
-        func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.25)) }
-        func capture(_ name: String, sheet: Bool = false) throws {
-            settle()
+        func settle() async { try? await Task.sleep(for: .milliseconds(250)) }
+        func capture(_ name: String, sheet: Bool = false) async throws {
+            await settle()
+            if name == "chatgpt-settings" {
+                for _ in 0..<100 where model.chatGPT.busy { try await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertNotNil(model.chatGPT.status)
+                XCTAssertFalse(model.chatGPT.busy)
+                XCTAssertNil(model.chatGPT.error)
+            }
             let target = sheet ? try XCTUnwrap(window.attachedSheet) : window
             let view = try XCTUnwrap(target.contentView?.superview ?? target.contentView)
             target.layoutIfNeeded(); view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
@@ -61,17 +69,17 @@ final class NativeScreenshotTests: DesktopTestCase {
             let jpeg = try XCTUnwrap(preview.representation(using: .jpeg, properties: [.compressionFactor: 0.86]))
             try jpeg.write(to: output.appendingPathComponent(name + "-preview.jpg"))
         }
-        try capture("conversation-light")
+        try await capture("conversation-light")
         model.activity = ServerActivity(state: "processing", text: "Альберт думает…")
-        try capture("conversation-processing")
+        try await capture("conversation-processing")
         model.activity = nil
         window.appearance = NSAppearance(named: .darkAqua); app.appearance = window.appearance
-        try capture("conversation-dark")
+        try await capture("conversation-dark")
         if let sections = window.toolbar?.items.first(where: { $0.itemIdentifier.rawValue == "sections" })?.view as? NSButton {
             window.makeFirstResponder(sections)
             sections.performClick(nil)
             XCTAssertTrue(model.sidebarVisible)
-            try capture("sections-focused-dark")
+            try await capture("sections-focused-dark")
             sections.performClick(nil)
             XCTAssertFalse(model.sidebarVisible)
         } else { XCTFail("Sections toolbar button missing") }
@@ -81,50 +89,77 @@ final class NativeScreenshotTests: DesktopTestCase {
         model.draft.text = "Озеро поставь первым. Из этих двух снимков собери короткую заметку."
         model.draft.attachments = [lake, forest]
         window.setContentSize(NSSize(width: 820, height: 580))
-        try capture("composer-images-light")
+        try await capture("composer-images-light")
         window.appearance = NSAppearance(named: .darkAqua); app.appearance = window.appearance
-        try capture("composer-images-dark")
+        try await capture("composer-images-dark")
         window.appearance = NSAppearance(named: .aqua); app.appearance = window.appearance
         model.draft.attachments = []
         model.draft.text = "Обрати внимание на порядок фотографий."
         model.draft.voice = VoiceDraft(durationSeconds: 18)
-        try capture("composer-voice-ready")
+        try await capture("composer-voice-ready")
         model.draft.voice = nil
         model.voiceActivity = .recording; model.recordingSeconds = 14
-        try capture("composer-voice-recording")
+        try await capture("composer-voice-recording")
         model.voiceActivity = .idle; model.recordingSeconds = 0
         model.draft = Draft()
         model.content.messages = conversation
         window.setContentSize(NSSize(width: 820, height: 680))
         model.sidebarVisible = true; model.section = .tasks
-        try capture("tasks")
+        try await capture("tasks")
         model.selectedTaskID = "photos"
-        try capture("task-detail")
+        try await capture("task-detail")
         model.sidebarVisible = false
         model.draft.text = "Сохрани JPEG, оригиналы оставь."
         model.discuss()
-        try capture("task-context")
+        try await capture("task-context")
         model.draft.taskID = nil
         model.error = "Нет соединения с сервером."
         model.connected = false
         _ = model.draft.request()
-        try capture("offline-draft")
+        try await capture("offline-draft")
         model.error = nil; model.connected = true
         model.sidebarVisible = true; model.section = .memory
-        try capture("memory")
+        try await capture("memory")
         model.section = .files
-        try capture("files")
+        try await capture("files")
         model.preview = lake
-        try capture("image-viewer", sheet: true)
-        model.preview = nil; settle()
+        try await capture("image-viewer", sheet: true)
+        model.preview = nil; await settle()
         model.serverURL = "https://albert.example.invalid"
+        model.connected = false
         model.showSettings = true
-        try capture("connection", sheet: true)
-        model.showSettings = false; settle()
+        try await capture("connection", sheet: true)
+        model.showSettings = false; await settle()
+        let chatGPTSession = URLSessionConfiguration.ephemeral
+        chatGPTSession.protocolClasses = [ScreenshotChatGPTProtocol.self]
+        chatGPTSession.timeoutIntervalForRequest = 3
+        chatGPTSession.timeoutIntervalForResource = 3
+        model.client = try APIClient(baseURL: URL(string: model.serverURL)!, token: "synthetic", session: URLSession(configuration: chatGPTSession))
+        await model.chatGPT.load(try XCTUnwrap(model.client))
+        XCTAssertNotNil(model.chatGPT.status, model.chatGPT.error ?? "Fixture status missing")
+        model.connected = true
+        model.showSettings = true
+        try await capture("chatgpt-settings", sheet: true)
+        model.showSettings = false; await settle()
         updates.receiveReady(version: "0.1.1") { _ in }
         model.showUpdates = true
-        try capture("update-ready", sheet: true)
-        model.showUpdates = false; settle()
+        try await capture("update-ready", sheet: true)
+        model.showUpdates = false; await settle()
         XCTAssertEqual(model.draft.text, "Сохрани JPEG, оригиналы оставь.")
     }
+}
+
+private final class ScreenshotChatGPTProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        print("Synthetic screenshot request: \(request.url!.lastPathComponent)")
+        let json = request.url!.lastPathComponent == "models"
+            ? #"{"models":[{"slug":"account-model","display_name":"Модель ChatGPT"}]}"#
+            : #"{"mode":"auto","active_lane":"siwc","siwc":{"connected":true,"plan_enabled":true,"model":"account-model"},"siwc_requests":12,"api_key_requests":3,"last_429":"2026-11-18T12:00:00Z"}"#
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type":"application/json"])!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(json.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }

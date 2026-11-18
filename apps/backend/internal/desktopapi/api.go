@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"openalbert/apps/backend/internal/domain"
+	"openalbert/apps/backend/internal/integrations"
 )
 
 const MaxAttachmentBytes = 20 << 20
@@ -32,6 +33,7 @@ type MemoryReader interface {
 	ListMemory(context.Context, string) ([]domain.MemoryEntry, error)
 }
 type API struct {
+	Billing *integrations.BillingModel
 	Repo    domain.Repository
 	Memory  MemoryReader
 	OwnerID int64
@@ -70,6 +72,11 @@ func (a *API) Register(mux *http.ServeMux) {
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/status", a.status)
+	mux.HandleFunc("GET /api/v1/chatgpt", a.chatGPTStatus)
+	mux.HandleFunc("POST /api/v1/chatgpt/sign-in", a.chatGPTBegin)
+	mux.HandleFunc("POST /api/v1/chatgpt/callback", a.chatGPTFinish)
+	mux.HandleFunc("GET /api/v1/chatgpt/models", a.chatGPTModels)
+	mux.HandleFunc("PUT /api/v1/chatgpt/model", a.chatGPTModel)
 	mux.HandleFunc("GET /api/v1/messages", a.messages)
 	mux.HandleFunc("POST /api/v1/messages", a.send)
 	mux.HandleFunc("POST /api/v1/stop", a.stop)

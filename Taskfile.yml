@@ -11,6 +11,9 @@ tasks:
   test:
     desc: Run Go integration, backup restore, browser and macOS VM tests
     cmds: [python3 tools/local.py test]
+  test:siwc:
+    desc: Verify ChatGPT OAuth, Responses, billing and owner controls with synthetic providers
+    cmds: [go test -race ./apps/backend/internal/agent ./apps/backend/internal/integrations/... ./apps/backend/internal/config ./apps/backend/internal/desktopapi ./apps/backend/internal/orchestration ./apps/backend/cmd/openalbert]
   test:go:
     desc: Run race tests with disposable PostgreSQL, VictoriaLogs, Chromium and FFmpeg
     cmds: [python3 tools/local.py test:go]

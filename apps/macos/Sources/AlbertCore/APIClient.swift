@@ -82,6 +82,29 @@ public final class APIClient: @unchecked Sendable {
         return try APIJSON.decoder().decode(T.self, from: data)
     }
     public func status() async throws -> ServerStatus { try await get("status") }
+    public func chatGPTStatus() async throws -> ChatGPTStatus { try await get("chatgpt") }
+    public func chatGPTBegin() async throws -> URL {
+        struct Response: Decodable { let url: URL }
+        let (data, _) = try await fetch(["chatgpt", "sign-in"], method: "POST")
+        let value = try APIJSON.decoder().decode(Response.self, from: data)
+        guard value.url.scheme == "https", value.url.host == "auth.openai.com", value.url.path == "/api/accounts/authorize" else { throw APIError.invalidResponse }
+        return value.url
+    }
+    public func chatGPTFinish(_ callback: String) async throws -> ChatGPTStatus {
+        struct Request: Encodable { let url: String }
+        let (data, _) = try await fetch(["chatgpt", "callback"], method: "POST", body: JSONEncoder().encode(Request(url: callback)), contentType: "application/json")
+        return try APIJSON.decoder().decode(ChatGPTStatus.self, from: data)
+    }
+    public func chatGPTModels() async throws -> [ChatGPTModel] {
+        struct Response: Decodable { let models: [ChatGPTModel] }
+        let (data, _) = try await fetch(["chatgpt", "models"])
+        return try APIJSON.decoder().decode(Response.self, from: data).models
+    }
+    public func chatGPTModel(_ slug: String) async throws -> ChatGPTStatus {
+        struct Request: Encodable { let slug: String }
+        let (data, _) = try await fetch(["chatgpt", "model"], method: "PUT", body: JSONEncoder().encode(Request(slug: slug)), contentType: "application/json")
+        return try APIJSON.decoder().decode(ChatGPTStatus.self, from: data)
+    }
     public func messages(before: String? = nil) async throws -> MessagePage {
         var query = [URLQueryItem(name: "limit", value: "100")]
         if let before { query.append(URLQueryItem(name: "before", value: before)) }

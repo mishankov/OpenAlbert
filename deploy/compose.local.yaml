@@ -249,6 +249,10 @@ services:
       TELEGRAM_ALLOWED_USER_IDS: "${TELEGRAM_ALLOWED_USER_IDS:-}"
       TELEGRAM_ALLOWED_GROUP_IDS: "${TELEGRAM_ALLOWED_GROUP_IDS:-}"
       TELEGRAM_ALLOW_BOT_MESSAGES: "${TELEGRAM_ALLOW_BOT_MESSAGES:-false}"
+      OPENAI_AUTH_MODE: "${OPENAI_AUTH_MODE:-api_key}"
+      OPENAI_TOKEN_STORE: /data/chatgpt/credentials.json
+      OPENAI_SIWC_MODEL: "${OPENAI_SIWC_MODEL:-${LLM_MODEL:-}}"
+      OPENAI_LANE_COOLDOWN: "${OPENAI_LANE_COOLDOWN:-15m}"
       LLM_BASE_URL: "${LLM_BASE_URL:-https://api.openai.com/v1}"
       LLM_API_KEY: "${LLM_API_KEY:-}"
       STT_BASE_URL: "${STT_BASE_URL-http://stt:8080/v1}"
@@ -285,6 +289,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - ./container_data/knowledge:/data/knowledge
+      - ./container_data/chatgpt:/data/chatgpt
       - ./container_data/computer/client:/data/computer:ro
       - ./container_data/backup-state:/data/backup-state:ro
     logging: *logging

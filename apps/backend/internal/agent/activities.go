@@ -367,7 +367,7 @@ func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOut
 	defer func() { finishTrace(out, err) }()
 	completion, err := a.Model.Complete(domain.WithModelSession(ctx, ID(in.Turn.Input.ConversationID)), in.Turn.Messages, tools)
 	if err != nil {
-		return out, err
+		return out, modelCallError(err)
 	}
 	out = ModelOutput{Message: completion.Message, InputTokens: completion.InputTokens, OutputTokens: completion.OutputTokens}
 	if out.Message.Role == "" {
@@ -604,6 +604,7 @@ func (a *Activities) Analyze(ctx context.Context, session domain.Session) (err e
 			// Analysing a photograph again is unnecessary and can consume most of a
 			// model's context. Its transcript/caption and artifact reference remain.
 			messages[i].Images = nil
+			messages[i].ResponsesItems = nil
 			for _, call := range messages[i].ToolCalls {
 				if call.Name != "memory_update" && call.Name != "participant_update" {
 					continue

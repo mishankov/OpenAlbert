@@ -231,3 +231,71 @@ extension InterfaceTests {
         XCTAssertNotNil(model.error)
     }
 }
+
+extension InterfaceTests {
+    @MainActor
+    func testChatGPTSettingsKeyboardAndCredentialFlow() async throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory); InterfaceURLProtocol.handler = nil }
+        let model = AppModel(store: LocalStore(directory: directory), defaults: UserDefaults(suiteName: UUID().uuidString)!, startNetwork: false)
+        model.showSettings = false
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [InterfaceURLProtocol.self]
+        let client = try APIClient(baseURL: URL(string: "https://albert.example")!, token: "test", session: URLSession(configuration: config))
+        model.client = client; model.connected = true; model.serverURL = client.baseURL.absoluteString
+        let controller = ApplicationController(model: model)
+        controller.createWindow(show: true)
+        defer { controller.window.orderOut(nil); model.shutdown() }
+        let status = #"{"mode":"auto","active_lane":"siwc","siwc":{"connected":true,"plan_enabled":true,"model":"test"},"siwc_requests":2,"api_key_requests":1}"#
+        var begins = 0; var callbacks = 0; var opened = 0
+        InterfaceURLProtocol.handler = { request in
+            switch request.url!.lastPathComponent {
+            case "sign-in": begins += 1; return Data(#"{"url":"https://auth.openai.com/api/accounts/authorize?state=synthetic"}"#.utf8)
+            case "callback": callbacks += 1; XCTAssertEqual(request.httpMethod, "POST"); return Data(status.utf8)
+            case "models": return Data(#"{"models":[{"slug":"test","display_name":"Test"}]}"#.utf8)
+            default: return Data(status.utf8)
+            }
+        }
+        model.chatGPT.openBrowser = { _ in opened += 1; return true }
+        model.draft.text = "Сохранить черновик"
+        model.openSettings()
+        await model.chatGPT.load(client)
+        model.chatGPT.controlsVisible = true
+        // A callback started in Telegram (or before this app process) can finish
+        // without opening a second authorization attempt in the macOS app.
+        XCTAssertNil(model.chatGPT.pendingURL)
+        model.chatGPT.callback = "http://127.0.0.1:1455/auth/callback?code=external&state=synthetic"
+        controller.chatGPTFinish()
+        for _ in 0..<100 where model.chatGPT.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(callbacks, 1); XCTAssertEqual(begins, 0)
+        XCTAssertEqual(controller.commands["chatGPTSignIn"]?.keyEquivalent, "l")
+        XCTAssertEqual(controller.commands["chatGPTFinish"]?.keyEquivalentModifierMask, [.command, .shift])
+        // Physical L and Return still work with a Russian layout; repeats do not start another flow.
+        XCTAssertTrue(controller.handleCommandKeyEquivalent(KeyboardSmoke.event(code: 37, characters: "Д", modifiers: [.command, .shift])))
+        for _ in 0..<100 where model.chatGPT.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(begins, 1); XCTAssertEqual(opened, 1)
+        XCTAssertTrue(controller.handleCommandKeyEquivalent(KeyboardSmoke.event(code: 37, characters: "Д", modifiers: [.command, .shift], repeatKey: true)))
+        XCTAssertEqual(begins, 1)
+        model.chatGPT.callback = "http://127.0.0.1:1455/auth/callback?code=synthetic&state=synthetic"
+        model.chatGPT.busy = true; model.escape()
+        XCTAssertTrue(model.showSettings)
+        controller.chatGPTFinish(); XCTAssertEqual(callbacks, 1)
+        model.chatGPT.busy = false
+        let editor = NSTextView()
+        NSApp.keyWindow?.makeFirstResponder(editor)
+        editor.setMarkedText("に", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertFalse(KeyboardGate.permitsPrimaryAction(event: nil, responder: editor))
+        editor.unmarkText()
+        XCTAssertTrue(controller.handleCommandKeyEquivalent(KeyboardSmoke.event(code: 36, characters: "Ж", modifiers: [.command, .shift])))
+        for _ in 0..<100 where model.chatGPT.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(callbacks, 2)
+        XCTAssertEqual(model.chatGPT.callback, "")
+        XCTAssertNil(model.chatGPT.pendingURL)
+        XCTAssertEqual(model.draft.text, "Сохранить черновик")
+        model.chatGPT.callback = "unfinished callback"
+        model.escape(); XCTAssertFalse(model.showSettings)
+        model.openSettings(); XCTAssertEqual(model.chatGPT.callback, "unfinished callback")
+        XCTAssertEqual(model.draft.text, "Сохранить черновик")
+        model.showSettings = false
+    }
+}

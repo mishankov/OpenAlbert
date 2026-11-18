@@ -195,3 +195,19 @@ func TestDesktopAPITokenIsOptionalAndValidated(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenAIAuthModes(t *testing.T) {
+	for _, mode := range []string{"api_key", "siwc", "auto", "invalid"} {
+		env := validEnv()
+		env["OPENAI_AUTH_MODE"] = mode
+		env["LLM_API_KEY"] = ""
+		c, err := load(func(k string) string { return env[k] })
+		if mode == "siwc" {
+			if err != nil || c.OpenAILaneCooldown != 15*time.Minute || c.OpenAISiWCModel != "test-model" {
+				t.Fatalf("siwc defaults: %+v %v", c, err)
+			}
+		} else if err == nil {
+			t.Fatalf("accepted %s without key", mode)
+		}
+	}
+}

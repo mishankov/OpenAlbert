@@ -70,16 +70,19 @@ func IsReplyTool(name string) bool {
 }
 
 type Message struct {
-	Reasoning       string     `json:"reasoning,omitempty"`
-	SourceMessageID string     `json:"source_message_id,omitempty"`
-	AuthorName      string     `json:"author_name,omitempty"`
-	AuthorUsername  string     `json:"author_username,omitempty"`
-	AuthorID        int64      `json:"author_id,omitempty"`
-	Role            string     `json:"role"`
-	Content         string     `json:"content"`
-	Images          []string   `json:"images,omitempty"`
-	ToolCalls       []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID      string     `json:"tool_call_id,omitempty"`
+	// ResponsesItems preserves opaque reasoning and tool-call items for stateless
+	// Responses continuation. Chat Completions ignores this transport state.
+	ResponsesItems  []json.RawMessage `json:"responses_items,omitempty"`
+	Reasoning       string            `json:"reasoning,omitempty"`
+	SourceMessageID string            `json:"source_message_id,omitempty"`
+	AuthorName      string            `json:"author_name,omitempty"`
+	AuthorUsername  string            `json:"author_username,omitempty"`
+	AuthorID        int64             `json:"author_id,omitempty"`
+	Role            string            `json:"role"`
+	Content         string            `json:"content"`
+	Images          []string          `json:"images,omitempty"`
+	ToolCalls       []ToolCall        `json:"tool_calls,omitempty"`
+	ToolCallID      string            `json:"tool_call_id,omitempty"`
 }
 type Tool struct {
 	Name        string          `json:"name"`

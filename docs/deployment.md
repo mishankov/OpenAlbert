@@ -109,8 +109,9 @@ ghcr.io/<owner>/<repository>/minio-init:sha-<полный SHA>
 
 ```sh
 cp .env.release.example .env
-mkdir -p container_data/knowledge
-sudo chown 10001:10001 container_data/knowledge
+mkdir -p container_data/knowledge container_data/chatgpt
+sudo chown 10001:10001 container_data/knowledge container_data/chatgpt
+sudo chmod 700 container_data/chatgpt
 ```
 
 В `.env` укажи `OPENALBERT_IMAGE_PREFIX=ghcr.io/<owner>/<repository>` в нижнем регистре

@@ -21,6 +21,7 @@ import (
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/inspector"
 	"openalbert/apps/backend/internal/integrations"
+	"openalbert/apps/backend/internal/integrations/siwc"
 	"openalbert/apps/backend/internal/knowledge"
 	"openalbert/apps/backend/internal/orchestration"
 	"openalbert/apps/backend/internal/storage"
@@ -83,6 +84,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	billing := &integrations.BillingModel{Mode: c.OpenAIAuthMode, API: model, Cooldown: c.OpenAILaneCooldown}
+	if c.OpenAIAuthMode != "api_key" {
+		billing.Plan, err = siwc.New(c.OpenAITokenStore, c.OpenAISiWCModel)
+		if err != nil {
+			return err
+		}
+		defer billing.Plan.Close()
+	}
 	var speech domain.SpeechRecognizer
 	if c.STTBaseURL != "" {
 		speech, err = integrations.NewSTT(integrations.STTConfig{BaseURL: c.STTBaseURL, APIKey: c.STTAPIKey, Model: c.STTModel, Revision: c.STTRevision})
@@ -98,6 +107,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	telegram.ChatGPT = &integrations.ChatGPTControls{Billing: billing, OwnerID: c.TelegramOwnerUserID}
 	if err = telegram.ConfigureCommands(ctx); err != nil {
 		return fmt.Errorf("Telegram command setup failed: %w", err)
 	}
@@ -121,7 +131,7 @@ func run() error {
 		}
 		defer browsers.Close()
 	}
-	activities := &agent.Activities{OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: model, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, ModelName: c.LLMModel, InspectorPublicURL: c.InspectorPublicURL}
+	activities := &agent.Activities{OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: billing, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, ModelName: c.LLMModel, InspectorPublicURL: c.InspectorPublicURL}
 	activities.Logs = logs
 	if c.ComputerSSHAddress != "" {
 		activities.Computer, err = computer.New(computer.Config{Address: c.ComputerSSHAddress, User: c.ComputerSSHUser, Password: c.ComputerSSHPassword, KeyFile: c.ComputerSSHKeyFile})
@@ -161,7 +171,7 @@ func run() error {
 			defer w.Stop()
 		}
 	}
-	(&desktopapi.API{Repo: artifacts, Memory: knowledgeStore, OwnerID: c.TelegramOwnerUserID, Token: c.DesktopAPIToken}).Register(mux)
+	(&desktopapi.API{Repo: artifacts, Memory: knowledgeStore, OwnerID: c.TelegramOwnerUserID, Token: c.DesktopAPIToken, Billing: billing}).Register(mux)
 	inspector.Register(mux, repo, artifacts)
 	inspector.RegisterMemory(mux, repo, knowledgeStore)
 	runtime.Start(ctx)

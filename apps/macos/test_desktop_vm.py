@@ -89,6 +89,9 @@ sys.exit(97)
         self.tart.chmod(0o700)
         self.env = dict(os.environ, ALBERT_TART=str(self.tart), TART_HOME=str(self.directory / "tart-home"),
                         ALBERT_VM_STATE=str(self.directory / "state"), SPARKLE_PRIVATE_KEY="must-not-cross", DESKTOP_API_TOKEN="must-not-cross")
+        # The fake Tart below models the default VM, independent of the selected real test VM.
+        self.env["ALBERT_VM_NAME"] = vm.DEFAULT_NAME
+        self.env["ALBERT_VM_IMAGE"] = vm.DEFAULT_IMAGE
         self.config = vm.Configuration(self.env, home=self.home, root=self.root)
 
     def change(self, **changes):

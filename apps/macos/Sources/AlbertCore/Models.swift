@@ -166,3 +166,30 @@ public enum APIJSON {
         return encoder
     }
 }
+
+public struct ChatGPTStatus: Codable, Sendable {
+    public struct Plan: Codable, Sendable { public let connected: Bool; public let planEnabled: Bool; public let model: String
+        enum CodingKeys: String, CodingKey { case connected, planEnabled = "plan_enabled", model }
+    }
+    public let mode: String
+    public let activeLane: String
+    public let planIneligible: Bool?
+    public let siwc: Plan
+    public let siwcRequests: UInt64
+    public let apiKeyRequests: UInt64
+    public let last429: Date?
+    public let retryAt: Date?
+    public let lastErrorCode: String?
+    public let lastRequestID: String?
+    enum CodingKeys: String, CodingKey {
+        case planIneligible = "plan_ineligible"
+        case mode, siwc, activeLane = "active_lane", siwcRequests = "siwc_requests", apiKeyRequests = "api_key_requests"
+        case last429 = "last_429", retryAt = "retry_at", lastErrorCode = "last_error_code", lastRequestID = "last_request_id"
+    }
+}
+public struct ChatGPTModel: Codable, Identifiable, Sendable {
+    public let slug: String
+    public let displayName: String
+    public var id: String { slug }
+    enum CodingKeys: String, CodingKey { case slug, displayName = "display_name" }
+}
