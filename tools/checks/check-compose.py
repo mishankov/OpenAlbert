@@ -159,9 +159,13 @@ def main():
         app = release["services"]["openalbert"]["environment"]
         assert app["VICTORIALOGS_URL"] == logs_url, "Explicit logs endpoint/disable setting was lost"
         assert app["INSPECTOR_PUBLIC_URL"] == inspector_url, "Public inspector links were lost"
-    for variable in TEST_ENV:
+    for variable in TEST_ENV.keys() - {"LLM_API_KEY"}:
         result = render("deploy/compose.yaml", overrides={variable: ""}, env_file=".env.release.example")
         assert result.returncode and variable in result.stderr, f"{variable}: release should reject an empty required value"
+    plan = check_pair({"OPENAI_AUTH_MODE":"siwc", "LLM_API_KEY":""})
+    assert plan["services"]["openalbert"]["environment"]["OPENAI_AUTH_MODE"] == "siwc"
+    assert plan["services"]["openalbert"]["environment"]["LLM_API_KEY"] == ""
+    # LLM_API_KEY is conditional; backend config validates api_key and auto modes.
     # This is the advertised deployment contract: compose + .env, no source tree.
     with tempfile.TemporaryDirectory(prefix="openalbert-compose-") as directory:
         destination = Path(directory)

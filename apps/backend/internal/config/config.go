@@ -13,6 +13,8 @@ import (
 )
 
 type Config struct {
+	OpenAIAuthMode, OpenAITokenStore, OpenAISiWCModel       string
+	OpenAILaneCooldown                                      time.Duration
 	DesktopAPIToken                                         string
 	TelegramOwnerUserID                                     int64
 	DatabaseURL                                             string
@@ -48,6 +50,7 @@ func load(get func(string) string) (Config, error) {
 		return fallback
 	}
 	c := Config{
+		OpenAIAuthMode: value("OPENAI_AUTH_MODE", "api_key"), OpenAITokenStore: value("OPENAI_TOKEN_STORE", "./container_data/chatgpt/credentials.json"), OpenAISiWCModel: value("OPENAI_SIWC_MODEL", value("LLM_MODEL", "")),
 		DesktopAPIToken: value("DESKTOP_API_TOKEN", ""),
 		STTBaseURL:      value("STT_BASE_URL", ""), STTAPIKey: value("STT_API_KEY", ""), STTModel: value("STT_MODEL", ""), STTRevision: value("STT_REVISION", ""),
 		DatabaseURL: value("DATABASE_URL", ""), TemporalAddress: value("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: value("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: value("TEMPORAL_TASK_QUEUE", "openalbert"),
@@ -87,7 +90,13 @@ func load(get func(string) string) (Config, error) {
 			problems = append(problems, errors.New("STT_MODEL and STT_REVISION are required when STT_BASE_URL is set"))
 		}
 	}
-	required := []struct{ name, value string }{{"DATABASE_URL", c.DatabaseURL}, {"TELEGRAM_BOT_TOKEN", c.TelegramBotToken}, {"LLM_API_KEY", c.LLMAPIKey}, {"LLM_MODEL", c.LLMModel}, {"S3_ACCESS_KEY", c.S3AccessKey}, {"S3_SECRET_KEY", c.S3SecretKey}}
+	if c.OpenAIAuthMode != "api_key" && c.OpenAIAuthMode != "siwc" && c.OpenAIAuthMode != "auto" {
+		problems = append(problems, errors.New("OPENAI_AUTH_MODE must be api_key, siwc or auto"))
+	}
+	if c.OpenAIAuthMode != "siwc" && c.LLMAPIKey == "" {
+		problems = append(problems, errors.New("LLM_API_KEY is required for api_key and auto modes"))
+	}
+	required := []struct{ name, value string }{{"DATABASE_URL", c.DatabaseURL}, {"TELEGRAM_BOT_TOKEN", c.TelegramBotToken}, {"LLM_MODEL", c.LLMModel}, {"S3_ACCESS_KEY", c.S3AccessKey}, {"S3_SECRET_KEY", c.S3SecretKey}}
 	for _, r := range required {
 		if r.value == "" {
 			problems = append(problems, fmt.Errorf("%s is required", r.name))
@@ -131,6 +140,7 @@ func load(get func(string) string) (Config, error) {
 		}
 		return v
 	}
+	c.OpenAILaneCooldown = duration("OPENAI_LANE_COOLDOWN", "15m", false)
 	c.SessionIdleTimeout = duration("SESSION_IDLE_TIMEOUT", "30m", false)
 	c.TaskMinInterval = duration("TASK_MIN_INTERVAL", "5m", false)
 	c.InitiativeInterval = duration("INITIATIVE_INTERVAL", "30m", true)

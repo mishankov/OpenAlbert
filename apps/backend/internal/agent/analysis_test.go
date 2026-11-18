@@ -286,3 +286,23 @@ func TestAnalysisDeduplicatesMemoryWrittenDuringModelCall(t *testing.T) {
 		t.Fatalf("new online fact duplicated %#v", entries)
 	}
 }
+
+func TestAnalysisOmitsOpaqueResponsesItemsAndKeepsStoredContinuation(t *testing.T) {
+	a, repo, _, conv := fixture(t)
+	opaque := json.RawMessage(`{"type":"reasoning","encrypted_content":"` + strings.Repeat("opaque", 15000) + `"}`)
+	session := closedAnalysisSession(t, a, repo, conv.ID, domain.Message{Role: "assistant", Content: "Done", ResponsesItems: []json.RawMessage{opaque}}, domain.Message{Role: "user", Content: "Remember the late user fact"})
+	a.Model = &testModel{respond: func(messages []domain.Message) (domain.Message, error) {
+		raw, _ := json.Marshal(messages)
+		if strings.Contains(string(raw), "opaque") || !strings.Contains(string(raw), "late user fact") {
+			t.Fatal("analysis leaked opaque state or clipped useful text")
+		}
+		return domain.Message{Role: "assistant", Content: `{"summary":"done","memories":[]}`}, nil
+	}}
+	if err := a.Analyze(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := repo.Messages(context.Background(), session.ID)
+	if err != nil || len(stored) == 0 || len(stored[0].ResponsesItems) != 1 {
+		t.Fatal("analysis erased stored continuation")
+	}
+}

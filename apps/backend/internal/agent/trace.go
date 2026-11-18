@@ -90,5 +90,6 @@ func (a *Activities) analysisModelCall(ctx context.Context, session domain.Sessi
 		event.Set("output_tokens", out.OutputTokens)
 		event.End(err)
 	}()
-	return a.Model.Complete(domain.WithModelSession(ctx, ID(session.ConversationID)), messages, nil)
+	out, err = a.Model.Complete(domain.WithModelSession(ctx, ID(session.ConversationID)), messages, nil)
+	return out, modelCallError(err)
 }

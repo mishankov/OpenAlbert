@@ -51,6 +51,7 @@ public final class AppModel: ObservableObject {
     @Published public var connected = false
     public weak var composer: ComposerTextView?
     public var client: APIClient?
+    public let chatGPT = ChatGPTSettings()
     public let store: LocalStore
     public let updates: AppUpdates
     private var updateChanges: AnyCancellable?
@@ -143,7 +144,7 @@ public final class AppModel: ObservableObject {
         }
     }
     public func connect(url: String, token: String) async {
-        guard !connecting, !sending, !uploading, !voiceBusy else { return }
+        guard !connecting, !chatGPT.busy, !sending, !uploading, !voiceBusy else { return }
         connecting = true; error = nil
         defer { connecting = false }
         do {
@@ -306,7 +307,7 @@ public final class AppModel: ObservableObject {
         if updates.phase == .installing { return }
         if showUpdates { closeUpdates() }
         else if preview != nil { preview = nil }
-        else if showSettings { if !connecting { showSettings = false }; return }
+        else if showSettings { if !connecting && !chatGPT.busy { showSettings = false }; return }
         else if section == .conversation && (voiceBusy || draft.voice != nil) && !sending && !uploading { cancelVoice() }
         else if selectedTaskID != nil && section == .tasks { selectedTaskID = nil }
         else if draft.taskID != nil && !sending { clearTaskContext() }

@@ -17,7 +17,9 @@ public final class ApplicationController: NSObject, NSApplicationDelegate, NSMen
     public private(set) var window: NSWindow!
     public private(set) var commands: [String: NSMenuItem] = [:]
     private var observers: [NSObjectProtocol] = []
+    private var settingsKeyMonitor: Any?
     public init(model: AppModel) { self.model = model; super.init() }
+    deinit { if let settingsKeyMonitor { NSEvent.removeMonitor(settingsKeyMonitor) } }
     public func applicationDidFinishLaunching(_ notification: Notification) { createWindow(); model.updates.start() }
     public func createWindow(show: Bool = true) {
         guard window == nil else { return }
@@ -35,6 +37,12 @@ public final class ApplicationController: NSObject, NSApplicationDelegate, NSMen
         if #available(macOS 15.0, *) { toolbar.allowsDisplayModeCustomization = false }
         window.toolbar = toolbar; window.toolbarStyle = .unified
         buildMenu()
+        settingsKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.model.showSettings, event.window === self.window.attachedSheet,
+                  event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command, .shift],
+                  [37, 36].contains(event.keyCode) else { return event }
+            return self.handleCommandKeyEquivalent(event) ? nil : event
+        }
         if show { window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in await self?.model.refresh(force: true) }
@@ -84,6 +92,8 @@ public final class ApplicationController: NSObject, NSApplicationDelegate, NSMen
         }
         let redo = NSMenuItem(title: "Повторить ввод", action: Selector(("redo:")), keyEquivalent: "z"); redo.keyEquivalentModifierMask = [.command, .shift]; edit.addItem(redo)
         let actions = submenu("Действия")
+        command(actions, "Continue with ChatGPT", #selector(chatGPTSignIn), "l", [.command, .shift], id: "chatGPTSignIn")
+        command(actions, "Завершить вход в ChatGPT", #selector(chatGPTFinish), "\r", [.command, .shift], id: "chatGPTFinish")
         command(actions, "Отправить", #selector(primary), "\r", id: "primary")
         command(actions, "Записать / закончить голосовое", #selector(recordVoice), "r", [.command, .shift], id: "recordVoice")
         command(actions, "Прослушать / остановить запись", #selector(playDraftVoice), "p", [.command, .shift], id: "playDraftVoice")
@@ -106,6 +116,8 @@ public final class ApplicationController: NSObject, NSApplicationDelegate, NSMen
     public func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let modal = model.modalPresented
         switch menuItem.identifier?.rawValue {
+        case "chatGPTSignIn": return model.showSettings && model.chatGPT.controlsVisible && !model.chatGPT.busy && (model.chatGPT.status.map { $0.mode != "api_key" } == true)
+        case "chatGPTFinish": return model.showSettings && model.chatGPT.controlsVisible && !model.chatGPT.busy && !model.chatGPT.callback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case "primary":
             menuItem.title = model.section == .tasks && model.selectedTask != nil ? "Обсудить поручение" : "Отправить"
             return !modal && (model.section == .tasks ? model.selectedTask != nil && !model.sending : model.section == .conversation && model.canSend)
@@ -122,7 +134,7 @@ public final class ApplicationController: NSObject, NSApplicationDelegate, NSMen
         case "updates":
             menuItem.title = model.updates.phase == .ready ? "Обновление готово…" : "Обновления…"
             return !modal && !model.voiceBusy
-        case "escape": return KeyboardGate.permitsPrimaryAction() && NSApp.modalWindow == nil && !model.connecting && model.updates.phase != .installing
+        case "escape": return !model.chatGPT.busy && KeyboardGate.permitsPrimaryAction() && NSApp.modalWindow == nil && !model.connecting && model.updates.phase != .installing
         default: return !modal
         }
     }
@@ -131,6 +143,11 @@ public final class ApplicationController: NSObject, NSApplicationDelegate, NSMen
     public func handleCommandKeyEquivalent(_ event: NSEvent) -> Bool {
         guard event.type == .keyDown else { return false }
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if flags == [.command, .shift], [37, 36].contains(event.keyCode), model.showSettings {
+            guard KeyboardGate.permitsPrimaryAction(event: event, responder: NSApp.keyWindow?.firstResponder) else { return true }
+            if event.keyCode == 37 { chatGPTSignIn() } else { chatGPTFinish() }
+            return true
+        }
         if flags == [.command, .shift], [15, 35].contains(event.keyCode) {
             guard KeyboardGate.permitsPrimaryAction(event: event, responder: window?.firstResponder) else { return true }
             if event.keyCode == 15 { model.toggleRecording() } else { model.toggleDraftPlayback() }
@@ -141,6 +158,14 @@ public final class ApplicationController: NSObject, NSApplicationDelegate, NSMen
             model.removeDraftAttachment(); return true
         }
         return false
+    }
+    @objc public func chatGPTSignIn() {
+        guard let item = commands["chatGPTSignIn"], validateMenuItem(item), let client = model.client else { return }
+        model.chatGPT.begin(client)
+    }
+    @objc public func chatGPTFinish() {
+        guard let item = commands["chatGPTFinish"], validateMenuItem(item), let client = model.client else { return }
+        model.chatGPT.finish(client)
     }
     @objc public func recordVoice() { model.toggleRecording() }
     @objc public func playDraftVoice() { model.toggleDraftPlayback() }

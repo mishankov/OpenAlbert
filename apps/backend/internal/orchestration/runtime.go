@@ -152,6 +152,8 @@ func (r *Runtime) poll(ctx context.Context) {
 			event := telemetry.Start(ctx, r.Logger, "telegram.receive")
 			if update.Incoming == nil {
 				err = r.Repo.SetPollOffset(event.Context(), update.Offset)
+			} else if update.Incoming.Command == "chatgpt" {
+				err = r.handleChatGPTUpdate(event.Context(), update)
 			} else {
 				event.Set("conversation_id", update.Incoming.Conversation.ID)
 				event.Set("incoming_id", update.Incoming.ID)
@@ -409,4 +411,17 @@ func (r *Runtime) reapBrowsers(ctx context.Context) {
 		}
 		r.Activities.Browser.Reconcile(active, observedAt)
 	}
+}
+
+// Settings side effects run once before delivery. A rejected notification must
+// neither re-exchange an OAuth code nor stop ingestion for every conversation.
+func (r *Runtime) handleChatGPTUpdate(ctx context.Context, update integrations.Update) error {
+	reply := r.Telegram.PrepareChatGPTReply(ctx, *update.Incoming)
+	if err := r.Repo.SetPollOffset(ctx, update.Offset); err != nil {
+		return err
+	}
+	if err := r.Telegram.SendChatGPTReply(ctx, update.Incoming.Conversation, reply); err != nil {
+		r.record(ctx, "telegram.chatgpt.delivery", err)
+	}
+	return nil
 }

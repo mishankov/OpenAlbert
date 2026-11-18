@@ -34,6 +34,7 @@ type TelegramConfig struct {
 	MaxFileBytes     int64
 }
 type Telegram struct {
+	ChatGPT  *ChatGPTControls
 	config   TelegramConfig
 	client   *http.Client
 	users    map[int64]bool
@@ -45,6 +46,7 @@ type Update struct {
 	Incoming *domain.Incoming
 }
 type TelegramError struct {
+	Rejected       bool // Telegram explicitly returned ok:false; an HTTP error alone is ambiguous.
 	Code           int
 	RetryAfter     time.Duration
 	NotModified    bool
@@ -132,6 +134,9 @@ func (t *Telegram) ConfigureCommands(ctx context.Context) error {
 		{"command": "new", "description": "Начать новый диалог"},
 		{"command": "stop", "description": "Остановить текущую работу"},
 	}
+	if t.ChatGPT != nil {
+		commands = append(commands, map[string]string{"command": "chatgpt", "description": "ChatGPT: вход, модели и статус оплаты"})
+	}
 	return t.api(ctx, "setMyCommands", map[string]any{"commands": commands}, nil)
 }
 
@@ -197,7 +202,7 @@ func (t *Telegram) response(ctx context.Context, req *http.Request, out any) err
 			code = resp.StatusCode
 		}
 		description := strings.ToLower(envelope.Description)
-		return &TelegramError{Code: code, RetryAfter: time.Duration(envelope.Parameters.RetryAfter) * time.Second,
+		return &TelegramError{Code: code, Rejected: !*envelope.OK, RetryAfter: time.Duration(envelope.Parameters.RetryAfter) * time.Second,
 			NotModified:    code == 400 && strings.Contains(description, "message is not modified"),
 			MessageMissing: code == 400 && (strings.Contains(description, "message to delete not found") || strings.Contains(description, "message to edit not found"))}
 	}
@@ -322,6 +327,27 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 		incoming := domain.Incoming{AuthorName: strings.TrimSpace(m.From.FirstName + " " + m.From.LastName), AuthorUsername: m.From.Username, ID: fmt.Sprintf("telegram:%d", u.ID), Conversation: conv, Text: telegramMessageText(m), CreatedAt: time.Unix(m.Date, 0).UTC()}
 		incoming.ReplyTo = telegramReplyContext(m.ReplyTo)
 		incoming.Quote = m.Quote
+		if m.ReplyTo != nil && chatGPTCommand(telegramMessageText(m.ReplyTo)) {
+			incoming.ReplyTo = nil
+			incoming.Quote = nil
+		}
+		if chatGPTCommand(incoming.Text) {
+			fields := strings.Fields(incoming.Text)
+			if len(fields) > 0 {
+				_, name, directed := strings.Cut(fields[0], "@")
+				if directed && (t.username == "" || !strings.EqualFold(name, t.username)) {
+					out = append(out, update)
+					continue
+				}
+			}
+			incoming.Command = "chatgpt"
+			incoming.Text = telegramMessageText(m)
+			incoming.ReplyTo = nil
+			incoming.Quote = nil
+			update.Incoming = &incoming
+			out = append(out, update)
+			continue
+		}
 		add := func(f *telegramFile, kind, name, mime string) {
 			if f == nil {
 				return
@@ -352,7 +378,7 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 		}
 		// Only the immediate reply target is included. Reuse normal attachment
 		// download/size limits, while preserving its origin for model attribution.
-		if reply := m.ReplyTo; reply != nil && incoming.Command == "" {
+		if reply := m.ReplyTo; reply != nil && incoming.Command == "" && !chatGPTCommand(telegramMessageText(reply)) {
 			start := len(incoming.Attachments)
 			if len(reply.Photo) > 0 {
 				photo := reply.Photo[len(reply.Photo)-1]
