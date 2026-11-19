@@ -539,6 +539,30 @@ func TestCommandAcknowledgementRetryDoesNotReplayTaskMutation(t *testing.T) {
 	}
 }
 
+func TestLegacyCommandReplyClaimsAreNotRetried(t *testing.T) {
+	for _, marker := range []string{"claim only", "sending state"} {
+		t.Run(marker, func(t *testing.T) {
+			c, repo, api, conv := setup(t)
+			ctx := context.Background()
+			in := domain.Incoming{ID: "legacy", Conversation: conv, Command: "pause", Text: "/pause nba"}
+			key := "widget-command-send/" + conv.ID + "/" + in.ID
+			checkpoints := map[string]string{commandReplyKey(in): `"acknowledgement"`, key + "/claim": `true`}
+			if marker == "sending state" {
+				checkpoints[key] = `{"message_id":0,"fallback":false}`
+			}
+			for key, raw := range checkpoints {
+				if err := repo.SaveCheckpoint(ctx, key, json.RawMessage(raw)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var unknown *integrations.TelegramDeliveryError
+			if err := c.Command(ctx, in); !errors.As(err, &unknown) || !unknown.DeliveryUnknown() || len(api.calls) != 0 {
+				t.Fatalf("legacy acknowledgement should end without sending: calls=%d err=%v", len(api.calls), err)
+			}
+		})
+	}
+}
+
 func TestWidgetUnavailableExplainsFallbackAndSkipsNextProbe(t *testing.T) {
 	c, repo, api, conv := setup(t)
 	api.reject = 400

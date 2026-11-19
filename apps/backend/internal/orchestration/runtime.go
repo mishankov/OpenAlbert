@@ -233,7 +233,10 @@ func (r *Runtime) DispatchOnce(ctx context.Context) error {
 				continue
 			} // Keep the inbox item for a later, cooldown-aware retry.
 			if err != nil {
-				r.record(ctx, "telegram.widget_command", err)
+				event := telemetry.Start(ctx, r.Logger, "telegram.widget_command")
+				event.Set("conversation_id", in.Conversation.ID)
+				event.Set("incoming_id", in.ID)
+				event.End(err)
 			}
 			cancel()
 			if err := r.Repo.MarkIncomingHandled(ctx, in.ID); err != nil {
