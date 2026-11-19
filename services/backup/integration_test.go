@@ -50,7 +50,7 @@ func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 	pgImage := "postgres:17.9-alpine"
 	minioImage := os.Getenv("OPENALBERT_TEST_BACKUP_MINIO_IMAGE")
 	if minioImage == "" {
-		minioImage = "minio/minio:RELEASE.2025-04-22T22-12-26Z"
+		t.Fatal("OPENALBERT_TEST_BACKUP_MINIO_IMAGE is required; run task test:backup to build MinIO from pinned source")
 	}
 	sleepImage := "node:24-alpine"
 	volume := func(source, target string) map[string]any {

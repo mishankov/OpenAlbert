@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Verify encrypted S3 backup and cold restore with disposable Docker resources.
 
-Uses PostgreSQL 17, two independent MinIO servers, and sleeping placeholders for
-the application/Temporal processes. All three databases, knowledge and artifact
-bytes must survive restore. Requires Docker; never reads the project's .env.
+Uses PostgreSQL 17, two independent MinIO servers built from the project's pinned
+source, and sleeping placeholders for the application/Temporal processes. All
+three databases, knowledge and artifact bytes must survive restore. Requires
+Docker; never reads the project's .env.
 """
 import os
 from pathlib import Path
@@ -19,6 +20,10 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     controller_image = os.environ.get("OPENALBERT_TEST_BACKUP_CONTROLLER_IMAGE", "openalbert-ci:backup")
     subprocess.run(["docker", "build", "-f", "services/backup/Dockerfile", "--target", "backup", "-t", controller_image, "."], cwd=ROOT, check=True)
+    minio_image = os.environ.get("OPENALBERT_TEST_BACKUP_MINIO_IMAGE")
+    if not minio_image:
+        minio_image = "openalbert-ci:minio"
+        subprocess.run(["docker", "build", "-f", "services/minio/Dockerfile", "--target", "minio", "-t", minio_image, "."], cwd=ROOT, check=True)
     # The test executes as root on Linux to preserve PostgreSQL ownership. Its
     # bind mount has the same absolute path on the host and in the test runner.
     with tempfile.TemporaryDirectory(prefix="albert-backup-smoke-", dir="/tmp") as directory:
@@ -32,6 +37,7 @@ def main():
                    "-e", f"TMPDIR={folder}", "-e", "OPENALBERT_TEST_BACKUP_DOCKER=1",
                    "-e", f"OPENALBERT_TEST_BACKUP_PROJECT={project}",
                    "-e", f"OPENALBERT_TEST_BACKUP_CONTROLLER_IMAGE={controller_image}",
+                   "-e", f"OPENALBERT_TEST_BACKUP_MINIO_IMAGE={minio_image}",
                    "--entrypoint", str(binary), "docker:29-cli", "-test.v", "-test.run", "^TestDockerBackupRestore$", "-test.timeout", "8m"]
         try:
             subprocess.run(command, cwd=ROOT, check=True)
