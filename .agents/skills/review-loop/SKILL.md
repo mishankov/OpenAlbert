@@ -5,12 +5,12 @@ description: Use when the user says "review loop".
 
 # review-loop
 
-This is a workflow for making your code changes more correct before (or
-sometimes after) filing a pull request. tl;dr - use OpenAI's GPT Sol to review
-your code in a loop.
+Use a bounded review loop before or after filing a pull request. Default to
+the latest OpenAI GPT Astra model with high reasoning effort. Honor explicit
+model or effort overrides.
 
-Make the most minimal possible changes to appease the Sol reviewers. Be careful
-of scope creep and don't be scared to push back.
+Make the smallest changes that resolve verified findings. Push back on scope
+creep and findings that lack evidence.
 
 ## Budget
 
@@ -21,7 +21,7 @@ of scope creep and don't be scared to push back.
   the user asks.
 - Stop early if a round returns only nits. Declined nits and comment,
   doc, or format-only fixes need no new round.
-- One reviewer only. Sol must not start subagents or reviewers.
+- One reviewer only. The reviewer must not start subagents or reviewers.
 - Keep a ledger: id, severity, outcome, usage if returned. Never guess it.
 
 ## 1. Scope
@@ -43,19 +43,20 @@ Use one diff command all rounds. State intent and out-of-scope in 1-2
 sentences. Run covering checks. Do not send code this change breaks. Note
 missing or pre-failing checks in the brief.
 
-## 2. Start Sol
+## 2. Start the reviewer
 
-In T3, call `orchestrator_capabilities`. Pick the latest Sol unless the user
-named a version. Do not hardcode an ID. Record provider, model, and effort
-only if exposed. Use `delegate_task` every round (`role: "review"`,
-`mode: "async"`). Save `taskId`. New `clientRequestId` per round.
+In T3, call `orchestrator_capabilities`. Resolve the selected model and effort
+from the capabilities and pass the effort in `target.options`. Record provider,
+model, and effort only if exposed. Use `delegate_task` every round
+(`role: "review"`, `mode: "async"`). Save `taskId`. Use a new `clientRequestId`
+per round.
 `childThreadId` is storage, not the next target. Do not use
 `t3_thread_send`, `create_threads`, or `t3_thread_launch` for review.
 
 If T3 tools are not listed, try one direct capability call. Outside T3, use
-a native Sol subagent and keep its ID. In Claude Code, use a custom subagent
-only if it is set up to run Sol. If no route runs Sol, report the blocker. Do
-not substitute a model.
+a native subagent that supports the selected model and effort and keep its ID.
+In Claude Code, use a custom subagent only if it is set up to run those settings.
+If no route supports the selected model and effort, report the blocker.
 
 Do not edit scoped files while review runs. Wait for the notice. Do not
 poll or start a second reviewer. Timeout, error, or no reply is not
@@ -97,7 +98,8 @@ Start one only if budget remains and a blocker or should is open, behavior code
 changed, or approval does not cover the current behavior diff. Use a fresh
 `delegate_task` in T3, or follow up the saved native ID. Send the round 1 brief,
 the ledger (`fixed:` / `disagree:` / `declined:` + evidence), the same base
-diff, and the change since last round. Tell Sol: open ids and changed code only.
+diff, and the change since last round. Ask the reviewer to check open IDs and
+changed code only.
 Mark each old id `resolved` or `still open: <reason>`.
 
 ## 5. Stop and ship
@@ -111,9 +113,9 @@ Do not push during the loop. Push after agreement only if the user asked
 to push, ship, or update the PR. If you push to a PR, add above the model
 blurb:
 
-`Reviewed with review-loop: <N> rounds with <model>. Sol verdict: approved`.
+`Reviewed with review-loop: <N> rounds with <model>. Verdict: approved`.
 
 Add `on <effort>` only if verified.
 
-Report: rounds, model, what Sol changed, diff size before/after, fixed and
+Report: rounds, model, changes made after review, diff size before/after, fixed and
 declined findings with reasons, usage if exposed (else say not), pushed or not.

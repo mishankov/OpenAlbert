@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "skills": {
+    "babysit-pr": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "abcaacb8a53823fab5a1ea963692b4ffe914aff486a9775bebab3b50af5c9fb1"
+    },
+    "capture-issue": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "9eb07bedda3a56a5fcf8d0a3d5100d367d506db41ef66e4501bafe1db1d96ca3"
+    },
+    "file-pr": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "5ebc3c9ac478c066f0b94607705380b8f7673f21f50e7c552d4fffcd005631bf"
+    },
+    "full-send": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "460fc1e9ddd2f50c02f0e7462464b88186531d6592f3a758eaa6e2c316d5ede0"
+    },
+    "full-stop": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "66d196ad5eb9d00f9114b5e0d43ecf77d5e57597f9cf11a61460274994c43972"
+    },
+    "implement": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "7d2204d77894430a121ffbc8604bba02e0aba1f999b341a172476bfe1df4975a"
+    },
+    "leaving-pr-comments": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "dfada04017a20225b7157026f235d13e439b6c673ec9c40bf8592e0ec2ab0c1d"
+    },
+    "manage-mstack-skills": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "e90ccea22ec9936a78125745d717e9a8d88e7d5041c614409973124a56adf67c"
+    },
+    "pick-next-work": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "6ea288ae6b4901eaa9dd877f2c2b76ebaf984c7707354332d58702a925314c90"
+    },
+    "review-group": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "813d95a4e559c19ac936adb68378cffa15ad2acd3dff54256860b56ef53a13df"
+    },
+    "review-loop": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "0a1e47055c1b8ac9637ef20a22a9f5389e3a6900e178ae75f9561ac9a44b2fa6"
+    },
+    "use-ui-sdk": {
+      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
+      "sha256": "882a7f8bb3ad6aad764375e132810394cbb17e3c1c5d15ba56122964c375b2f5"
+    }
+  }
+}
