@@ -151,7 +151,7 @@ func TestBudgetFinalizationHonorsStop(t *testing.T) {
 	a.Model = model
 	env := newEnv(a)
 	env.ExecuteWorkflow(func(ctx workflow.Context) error {
-		_, err := runTurn(options(ctx), agent.RunInput{Key: "stop", SessionID: "stop-session", ConversationID: conv.ID}, 1, func(*agent.Turn) error {
+		_, err := runTurn(options(ctx), agent.RunInput{Key: "stop", SessionID: "stop-session", ConversationID: conv.ID}, 1, func(*agent.Turn, func() error) error {
 			if model.count() > 1 {
 				return temporal.NewCanceledError()
 			}

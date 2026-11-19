@@ -47,6 +47,10 @@ type computerExecutionError struct {
 func (e *computerExecutionError) Error() string { return e.err.Error() }
 func (e *computerExecutionError) Unwrap() error { return e.err }
 
+func ComputerExecutionID(in ToolInput) string {
+	return ID("computer", in.RunKey, fmt.Sprint(in.Step), in.Call.ID)
+}
+
 func (a *Activities) executeComputer(ctx context.Context, in ToolInput) (any, error) {
 	if err := a.computerAccess(in); err != nil {
 		return nil, err
@@ -90,7 +94,7 @@ func (a *Activities) executeComputer(ctx context.Context, in ToolInput) (any, er
 	switch in.Call.Name {
 	case "computer_exec":
 		request.Action = "exec"
-		request.ExecutionID = ID("computer", in.RunKey, fmt.Sprint(in.Step), in.Call.ID)
+		request.ExecutionID = ComputerExecutionID(in)
 		if strings.TrimSpace(p.Command) == "" || len(p.Command) > 32000 || strings.ContainsRune(p.Command, 0) {
 			return nil, errors.New("command must contain 1–32000 bytes without NUL")
 		}
@@ -113,7 +117,13 @@ func (a *Activities) executeComputer(ctx context.Context, in ToolInput) (any, er
 		if prior, ok, err := a.Repo.LoadCheckpoint(ctx, key(request.ExecutionID)); err != nil {
 			return nil, err
 		} else if ok {
-			if !bytes.Equal(prior, registered) {
+			// PostgreSQL JSONB can return the same request with a different key order.
+			var recorded domain.ComputerRequest
+			if err := json.Unmarshal(prior, &recorded); err != nil {
+				return nil, err
+			}
+			canonical, _ := json.Marshal(recorded)
+			if !bytes.Equal(canonical, registered) {
 				return nil, errors.New("execution ID already belongs to another request")
 			}
 		} else if err := a.Repo.SaveCheckpoint(ctx, key(request.ExecutionID), registered); err != nil {

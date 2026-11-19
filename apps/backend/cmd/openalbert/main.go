@@ -132,7 +132,7 @@ func run() error {
 		}
 		defer browsers.Close()
 	}
-	activities := &agent.Activities{OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: billing, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, ModelName: c.LLMModel, InspectorPublicURL: c.InspectorPublicURL}
+	activities := &agent.Activities{Codemode: true, OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: billing, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, ModelName: c.LLMModel, InspectorPublicURL: c.InspectorPublicURL}
 	activities.Logs = logs
 	if c.ComputerSSHAddress != "" {
 		activities.Computer, err = computer.New(computer.Config{Address: c.ComputerSSHAddress, User: c.ComputerSSHUser, Password: c.ComputerSSHPassword, KeyFile: c.ComputerSSHKeyFile})

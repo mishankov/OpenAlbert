@@ -223,9 +223,15 @@ function tabCount(name, d) {
     artifacts: d.artifacts.length,
   }[name];
 }
+function assistantTraceKey(row) {
+  return row.message.parent_tool_call_id
+    ? row.key.replace(/\/codemode\/[^/]+\/[^/]+(\/assistant\/\d+)$/, "$1")
+    : row.key;
+}
 function traceForMessage(row) {
+  const key = assistantTraceKey(row);
   const matches = (t) =>
-    t.kind === "model" && row.key === `${t.turn_id}/assistant/${t.step}`;
+    t.kind === "model" && key === `${t.turn_id}/assistant/${t.step}`;
   return (
     state.data.traces.findLast((t) => matches(t) && t.status === "completed") ||
     state.data.traces.findLast(matches)
@@ -304,7 +310,7 @@ function messageRow(row) {
   return `<article class="event" id="event-${row.seq}"><div class="event-meta"><time title="${esc(date(row.recorded_at))}">${esc(timeOnly(row.recorded_at))}</time><span class="role role-${esc(m.role)}">${role} <span class="seq">#${row.seq}</span></span></div><div class="event-content"><div class="event-line"><span class="event-name">${esc(name)}</span><span class="row-actions">${trace ? traceButton(trace.id) : ""}${recordButton(row.seq)}</span></div>${m.content ? messageText(m.role === "tool" ? pretty(m.content) : m.content, row.seq) : ""}${m.reasoning ? `<details class="reasoning" data-open-key="reasoning-${row.seq}"><summary>Reasoning · ${m.reasoning.length.toLocaleString("ru-RU")} символов</summary><div class="prose">${esc(m.reasoning)}</div></details>` : ""}${m.images?.length ? `<span class="muted">Изображения: ${m.images.length}</span>` : ""}${!m.content && !m.reasoning && !m.images?.length ? '<span class="muted">Завершение без текста</span>' : ""}</div></article>`;
 }
 function toolRow(row, call) {
-  const key = row.key.match(/^(.*)\/assistant\/(\d+)$/);
+  const key = assistantTraceKey(row).match(/^(.*)\/assistant\/(\d+)$/);
   const result = state.data.messages.find(
     (r) => r.key === row.key.replace("/assistant/", "/tool/") + "/" + call.id,
   );

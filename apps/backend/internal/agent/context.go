@@ -5,6 +5,8 @@ import (
 	"openalbert/apps/backend/internal/domain"
 )
 
+const MaxContextMessageRunes = 32000
+
 // CompactContext bounds Temporal Activity payloads while retaining the latest user
 // request and complete tool exchanges. Older details remain in persisted history.
 func CompactContext(messages []domain.Message) []domain.Message {
@@ -21,7 +23,7 @@ func CompactContext(messages []domain.Message) []domain.Message {
 		out[i].Images = kept
 	}
 	for i := range out {
-		out[i].Content = clip(out[i].Content, 32000)
+		out[i].Content = clip(out[i].Content, MaxContextMessageRunes)
 	}
 	for len(out) > 2 {
 		raw, _ := json.Marshal(out)

@@ -70,24 +70,27 @@ class FakeState:
                          "mime_type": "text/plain", "file_size": len(self.document)}}}
 
     @staticmethod
-    def call(name, args, suffix):
-        return {"id": "call_" + suffix, "type": "function", "function": {
-            "name": name, "arguments": json.dumps(args)}}
+    def script(suffix, *statements):
+        code = "\n".join(statements)
+        return {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "call_" + suffix, "type": "function", "function": {
+                "name": "codemode", "arguments": json.dumps({"code": code})}}]}
+
+    @staticmethod
+    def invoke(name, **args):
+        return f"await tools.{name}({json.dumps(args)})"
 
     def model(self, body):
         with self.lock:
             self.completions += 1
         messages = body["messages"]
-        if self.without_search:
-            names = {tool["function"]["name"] for tool in body.get("tools", [])}
-            assert "web_search" not in names, "disabled web_search exposed to model"
-            if body.get("tools"):
-                assert "web_read" in names, "public URL reader was removed"
         if messages[0]["content"].startswith("Review a closed conversation"):
             with self.lock:
                 self.analyses += 1
             return {"role": "assistant", "content": json.dumps({"summary": self.marker,
                 "memories": [{"content": self.marker + " analyzed preference", "kind": "preference"}]})}
+        names = [tool["function"]["name"] for tool in body.get("tools", [])]
+        assert names == ["codemode"], f"unexpected agent model tools: {names}"
         # Background notification rules follow the actual task as another user
         # message. Select the task, while retaining subsequent tool results.
         last_user = max(i for i, message in enumerate(messages)
@@ -95,54 +98,67 @@ class FakeState:
         user_text = messages[last_user]["content"]
         if not isinstance(user_text, str):
             user_text = " ".join(item.get("text", "") for item in user_text)
-        tools = {message.get("tool_call_id"): json.loads(message["content"])
-                 for message in messages[last_user + 1:] if message["role"] == "tool"}
-        browser_setup = self.with_browser and not user_text.startswith("Background task step")
-        if browser_setup:
-            if "call_browser_open" not in tools:
-                return {"role": "assistant", "tool_calls": [self.call("browser_open", {"url": "https://example.com"}, "browser_open")]}
-            opened = tools["call_browser_open"]
-            assert "error" not in opened and opened.get("title") == "Example Domain" and bool(opened.get("text")), "public browser navigation failed"
-            if "call_browser_shot" not in tools:
-                return {"role": "assistant", "tool_calls": [self.call("browser_screenshot", {"page_id": opened["page_id"]}, "browser_shot")]}
-            assert tools["call_browser_shot"].get("artifact_id"), "browser screenshot was not saved"
-        computer_setup = self.with_computer and not user_text.startswith("Background task step")
-        if computer_setup:
-            names = {tool["function"]["name"] for tool in body.get("tools", [])}
-            assert "computer_exec" in names, "owner computer tool missing"
-            if "call_computer_upload" not in tools:
-                artifact_id = re.search(r"artifact_id=([a-f0-9]+)", user_text).group(1)
-                return {"role": "assistant", "tool_calls": [self.call("computer_upload", {
-                    "artifact_id": artifact_id, "path": "/workspace/input.txt"}, "computer_upload")]}
-            assert "error" not in tools["call_computer_upload"], "artifact upload failed"
-            if "call_computer_exec" not in tools:
-                command = "python3 -c 'from pathlib import Path; Path(\"output.txt\").write_bytes(Path(\"input.txt\").read_bytes().upper())'; sudo -n id -u"
-                return {"role": "assistant", "tool_calls": [self.call("computer_exec", {
-                    "command": command, "wait_seconds": 5}, "computer_exec")]}
-            execution = tools["call_computer_exec"]
-            assert execution.get("state") == "completed" and execution.get("stdout") == "0\n", "remote sudo execution failed"
-            if "call_computer_download" not in tools:
-                return {"role": "assistant", "tool_calls": [self.call("computer_download", {
-                    "path": "/workspace/output.txt"}, "computer_download")]}
-            assert tools["call_computer_download"].get("artifact_id"), "computer result was not saved"
-        # A final empty assistant response ends the tool loop after persisted results.
-        if any(message["role"] == "tool" for message in messages[last_user + 1:]) and (not (browser_setup or computer_setup) or "call_memory" in tools):
-            return {"role": "assistant", "content": ""}
+        results = {}
+        for message in messages[last_user + 1:]:
+            if message["role"] != "tool":
+                continue
+            call_id = message["tool_call_id"]
+            receipt = json.loads(message["content"])
+            assert "error" not in receipt, f"Codemode script {call_id} failed: {receipt['error']}"
+            assert "output" in receipt, f"missing Codemode output for {call_id}"
+            results[call_id] = receipt["output"]
+        # A final empty assistant response ends the loop after delivery is queued.
+        for call_id in ("call_interactive_done", "call_task_done"):
+            if call_id in results:
+                assert results[call_id].get("state") == "queued", f"{call_id} did not queue a reply"
+                return {"role": "assistant", "content": ""}
         if user_text.startswith("Background task step"):
             task = json.loads(user_text.split("Task: ", 1)[1])
-            calls = [self.call("task_update", {"id": task["id"], "status": "completed",
-                      "result": self.marker + " task persisted"}, "task_done"),
-                     self.call("send_rich_message", {"text": self.marker + ": completed"}, "notify_done")]
+            update = self.invoke("task_update", id=task["id"], status="completed",
+                                 result=self.marker + " task persisted")
+            notify = self.invoke("send_rich_message", text=self.marker + ": completed")
+            return self.script("task_done", update + ";", "return " + notify + ";")
+
+        if self.with_browser:
+            if "call_browser_open" not in results:
+                return self.script("browser_open", "return " + self.invoke("browser_open", url="https://example.com") + ";")
+            opened = results["call_browser_open"]
+            assert "error" not in opened and opened.get("title") == "Example Domain" and bool(opened.get("text")), "public browser navigation failed"
+            if "call_browser_shot" not in results:
+                screenshot = self.invoke("browser_screenshot", page_id=opened["page_id"])
+                return self.script("browser_shot", "return " + screenshot + ";")
+            assert results["call_browser_shot"].get("artifact_id"), "browser screenshot was not saved"
+        if self.with_computer:
+            if "call_computer_upload" not in results:
+                artifact_id = re.search(r"artifact_id=([a-f0-9]+)", user_text).group(1)
+                upload = self.invoke("computer_upload", artifact_id=artifact_id, path="/workspace/input.txt")
+                return self.script("computer_upload", "return " + upload + ";")
+            assert "error" not in results["call_computer_upload"], "artifact upload failed"
+            if "call_computer_exec" not in results:
+                command = "python3 -c 'from pathlib import Path; Path(\"output.txt\").write_bytes(Path(\"input.txt\").read_bytes().upper())'; sudo -n id -u"
+                execute = self.invoke("computer_exec", command=command, wait_seconds=5)
+                return self.script("computer_exec", "return " + execute + ";")
+            execution = results["call_computer_exec"]
+            assert execution.get("state") == "completed" and execution.get("stdout") == "0\n", "remote sudo execution failed"
+            if "call_computer_download" not in results:
+                download = self.invoke("computer_download", path="/workspace/output.txt")
+                return self.script("computer_download", "return " + download + ";")
+            assert results["call_computer_download"].get("artifact_id"), "computer result was not saved"
+
+        assert self.marker in user_text, f"unexpected model request: {user_text[:500]!r}"
+        later = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=5)).isoformat()
+        if self.without_search:
+            search = (
+                'if (describeTool("web_search") !== undefined || typeof tools.web_search !== "undefined") '
+                'throw new Error("disabled web_search exposed inside Codemode");\n'
+                'if (typeof tools.web_read !== "function") throw new Error("public URL reader was removed");'
+            )
         else:
-            assert self.marker in user_text, f"unexpected model request: {user_text[:500]!r}"
-            later = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=5)).isoformat()
-            calls = [self.call("memory_update", {"content": self.marker + " preference", "kind": "preference"}, "memory"),
-                     self.call("task_create", {"title": self.marker, "goal": self.marker,
-                               "next_run_at": later}, "task"),
-                     self.call("send_message", {"text": self.marker + ": accepted"}, "notify")]
-            if not self.without_search:
-                calls.insert(0, self.call("web_search", {"query": self.marker}, "search"))
-        return {"role": "assistant", "content": "", "tool_calls": calls}
+            search = self.invoke("web_search", query=self.marker) + ";"
+        memory = self.invoke("memory_update", content=self.marker + " preference", kind="preference")
+        task = self.invoke("task_create", title=self.marker, goal=self.marker, next_run_at=later)
+        notify = self.invoke("send_message", text=self.marker + ": accepted")
+        return self.script("interactive_done", search, memory + ";", task + ";", "return " + notify + ";")
 
 
 def handler_for(state):

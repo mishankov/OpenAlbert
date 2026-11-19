@@ -208,6 +208,51 @@ func TestPrepareDropsInterruptedToolExchangeAndKeepsValidTurns(t *testing.T) {
 		t.Fatalf("valid history lost: %s", raw)
 	}
 }
+func TestPrepareKeepsCodemodeResultsWithoutChildPayloads(t *testing.T) {
+	a, repo, _, conv := fixture(t)
+	ctx := context.Background()
+	const sessionID = "codemode-history"
+	if err := repo.StartSession(ctx, domain.Session{ID: sessionID, ConversationID: conv.ID}); err != nil {
+		t.Fatal(err)
+	}
+	call := func(id, name string) domain.ToolCall {
+		return domain.ToolCall{ID: id, Name: name, Arguments: json.RawMessage(`{}`)}
+	}
+	messages := []domain.Message{
+		{Role: "user", Content: "Earlier request"},
+		{Role: "assistant", ToolCalls: []domain.ToolCall{call("script", "codemode")}},
+	}
+	for range 105 {
+		messages = append(messages, domain.Message{Role: "assistant", ParentToolCallID: "script", ToolCalls: []domain.ToolCall{call("child", "web_read")}},
+			domain.Message{Role: "tool", ParentToolCallID: "script", ToolCallID: "child", Content: "Raw child result"})
+	}
+	messages = append(messages,
+		domain.Message{Role: "tool", ToolCallID: "script", Content: "Script summary"},
+		domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{call("abandoned", "codemode")}},
+		domain.Message{Role: "assistant", ParentToolCallID: "abandoned", ToolCalls: []domain.ToolCall{call("unfinished-child", "web_read")}},
+		domain.Message{Role: "user", Content: "Continued request"},
+	)
+	for i, msg := range messages {
+		if err := repo.AppendMessage(ctx, sessionID, ID("history", string(rune(i))), msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turn, err := a.Prepare(ctx, RunInput{Key: "recovered-script", SessionID: sessionID, ConversationID: conv.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range turn.Messages {
+		if msg.ParentToolCallID != "" || (msg.Role == "assistant" && len(msg.ToolCalls) > 0 && msg.ToolCalls[0].ID != "script") {
+			t.Fatalf("invalid exchange in model history: %+v", msg)
+		}
+	}
+	raw, _ := json.Marshal(turn.Messages[1:])
+	for _, wanted := range []string{"Earlier request", "Script summary", "Continued request"} {
+		if !strings.Contains(string(raw), wanted) {
+			t.Fatalf("missing %q from model history: %s", wanted, raw)
+		}
+	}
+}
 func TestModelCheckpointAvoidsPaidRetry(t *testing.T) {
 	a, _, _, conv := fixture(t)
 	m := &testModel{respond: func([]domain.Message) (domain.Message, error) {
