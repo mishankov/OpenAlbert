@@ -118,7 +118,9 @@ func historyCallsContract(t *testing.T, repo domain.Repository, scope, session s
 		message domain.Message
 	}{
 		{"draft", domain.Message{Role: "assistant", Content: "Identical visible text", ToolCalls: []domain.ToolCall{{ID: "find", Name: "task_find", Arguments: json.RawMessage(`{}`)}}}},
-		{"reply", domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "search", Name: "memory_search", Arguments: json.RawMessage(`{"query":"other tool"}`)}, {ID: "actual-send", Name: "send_message", Arguments: json.RawMessage(`{"text":"Identical visible text"}`)}}}},
+		{"script", domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "codemode-script", Name: "codemode", Arguments: json.RawMessage(`{"code":"await tools.send_message(load('reply'))"}`)}}}},
+		{"script-search", domain.Message{Role: "assistant", ParentToolCallID: "codemode-script", ToolCalls: []domain.ToolCall{{ID: "search", Name: "memory_search", Arguments: json.RawMessage(`{"query":"other tool"}`)}}}},
+		{"script-reply", domain.Message{Role: "assistant", ParentToolCallID: "codemode-script", ToolCalls: []domain.ToolCall{{ID: "actual-send", Name: "send_message", Arguments: json.RawMessage(`{"text":"Identical visible text"}`)}}}},
 		{"artifact", domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "send-file", Name: "send_message", Arguments: json.RawMessage(`{"text":"","artifact_id":"file"}`)}}}},
 	}
 	for _, tc := range cases {

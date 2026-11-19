@@ -83,6 +83,9 @@ type Message struct {
 	Images          []string          `json:"images,omitempty"`
 	ToolCalls       []ToolCall        `json:"tool_calls,omitempty"`
 	ToolCallID      string            `json:"tool_call_id,omitempty"`
+
+	// ParentToolCallID links an executed child action to its model-facing call.
+	ParentToolCallID string `json:"parent_tool_call_id,omitempty"`
 }
 type Tool struct {
 	Name        string          `json:"name"`

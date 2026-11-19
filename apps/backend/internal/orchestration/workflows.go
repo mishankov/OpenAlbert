@@ -215,18 +215,24 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 		nextTurn++
 		turns++
 		sessionStarted = true
-		turn, runErr := runTurn(runctx, agent.RunInput{Key: key, SessionID: sessionID, ConversationID: in.ConversationID, IncomingIDs: ids}, in.MaxSteps, func(turn *agent.Turn) error {
+		turn, runErr := runTurn(runctx, agent.RunInput{Key: key, SessionID: sessionID, ConversationID: in.ConversationID, IncomingIDs: ids}, in.MaxSteps, func(turn *agent.Turn, beforeSteer func() error) error {
 			if len(queue) == 0 {
 				return nil
 			}
 			newIDs := []string{}
-			for _, ev := range queue {
+			count := len(queue)
+			for _, ev := range queue[:count] {
 				if ev.Stop || ev.NewSession {
 					return temporal.NewCanceledError()
 				}
 				newIDs = append(newIDs, ev.ID)
 			}
-			queue = nil
+			if beforeSteer != nil {
+				if err := beforeSteer(); err != nil {
+					return err
+				}
+			}
+			queue = queue[count:]
 			steerInput := turn.Input
 			steerInput.IncomingIDs = newIDs
 			// Retain consumed inputs even if preparation is cancelled, so the
@@ -316,7 +322,9 @@ func prepareTurn(ctx workflow.Context, in agent.RunInput) (turn agent.Turn, err 
 	return
 }
 
-func runTurn(ctx workflow.Context, in agent.RunInput, maxSteps int, steer ...func(*agent.Turn) error) (out agent.Turn, err error) {
+type turnSteerer func(*agent.Turn, func() error) error
+
+func runTurn(ctx workflow.Context, in agent.RunInput, maxSteps int, steer ...turnSteerer) (out agent.Turn, err error) {
 	if workflow.GetVersion(ctx, "turn-observability-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
 		in.StartedAt = workflow.Now(ctx)
 	}
@@ -342,14 +350,15 @@ func runTurn(ctx workflow.Context, in agent.RunInput, maxSteps int, steer ...fun
 	if turn.Done {
 		return turn, nil
 	}
+	codemodeTurn := turn.Codemode && workflow.GetVersion(ctx, "codemode/"+in.Key, workflow.DefaultVersion, 1) != workflow.DefaultVersion
 	// Keep recorded turns replayable; new turns let the model finish naturally
 	// after any number of ordinary or rich reply-tool calls.
 	multiMessageTurn := workflow.GetVersion(ctx, "multi-message-turn/"+in.Key, workflow.DefaultVersion, 1) != workflow.DefaultVersion
 	if multiMessageTurn && len(steer) > 0 {
 		steerTurn := steer[0]
-		steer = []func(*agent.Turn) error{func(turn *agent.Turn) error {
+		steer = []turnSteerer{func(turn *agent.Turn, beforeSteer func() error) error {
 			sent := turn.Sent
-			err := steerTurn(turn)
+			err := steerTurn(turn, beforeSteer)
 			turn.Sent = turn.Sent || sent
 			return err
 		}}
@@ -357,7 +366,7 @@ func runTurn(ctx workflow.Context, in agent.RunInput, maxSteps int, steer ...fun
 steps:
 	for step := 0; step < maxSteps; step++ {
 		if len(steer) > 0 {
-			if err := steer[0](&turn); err != nil {
+			if err := steer[0](&turn, nil); err != nil {
 				return turn, err
 			}
 		}
@@ -374,14 +383,14 @@ steps:
 		turn.Messages = agent.CompactContext(turn.Messages)
 		var result agent.ModelOutput
 		turn.Stats.ModelCalls++
-		if err := workflow.ExecuteActivity(ctx, "ModelCall", agent.ModelInput{Turn: turn, Step: step}).Get(ctx, &result); err != nil {
+		if err := workflow.ExecuteActivity(ctx, "ModelCall", agent.ModelInput{Turn: turn, Step: step, Codemode: codemodeTurn}).Get(ctx, &result); err != nil {
 			return turn, err
 		}
 		turn.Stats.InputTokens += result.InputTokens
 		turn.Stats.OutputTokens += result.OutputTokens
 		if len(steer) > 0 {
 			before := len(turn.Input.IncomingIDs)
-			if err := steer[0](&turn); err != nil {
+			if err := steer[0](&turn, nil); err != nil {
 				return turn, err
 			}
 			if len(turn.Input.IncomingIDs) > before {
@@ -397,7 +406,7 @@ steps:
 			turn.LastText = message.Content
 			// Version per turn: replay already-recorded deliveries, while even the next
 			// turn of an existing session/initiative uses explicit delivery only.
-			if workflow.GetVersion(ctx, "explicit-message-delivery/"+in.Key, workflow.DefaultVersion, 1) == workflow.DefaultVersion && message.Content != "" && !turn.Sent {
+			if !codemodeTurn && workflow.GetVersion(ctx, "explicit-message-delivery/"+in.Key, workflow.DefaultVersion, 1) == workflow.DefaultVersion && message.Content != "" && !turn.Sent {
 				args, _ := json.Marshal(map[string]string{"text": message.Content})
 				call := domain.ToolCall{ID: "final-reply", Name: "send_message", Arguments: args}
 				var output string
@@ -413,11 +422,23 @@ steps:
 			}
 			return turn, nil
 		}
+		if codemodeTurn {
+			err := runCodemodeCalls(ctx, &turn, step, message.ToolCalls, false, steer...)
+			switch {
+			case errors.Is(err, errCodemodeSteered):
+				continue steps
+			case errors.Is(err, errCodemodeTaskStopped):
+				return turn, nil
+			case err != nil:
+				return turn, err
+			}
+			continue steps
+		}
 		views := []domain.Message{}
 		for _, call := range message.ToolCalls {
 			if len(steer) > 0 {
 				before := len(turn.Input.IncomingIDs)
-				if err := steer[0](&turn); err != nil {
+				if err := steer[0](&turn, nil); err != nil {
 					return turn, err
 				}
 				if len(turn.Input.IncomingIDs) > before {
@@ -435,18 +456,8 @@ steps:
 				}
 			}
 			var output string
-			toolCtx := ctx
-			activityName := "ToolCall"
-			if strings.HasPrefix(call.Name, "browser_") && workflow.GetVersion(ctx, "browser-activities-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
-				queue := workflow.GetInfo(ctx).TaskQueueName + ".browser-ui"
-				if in.TaskID != "" || in.Initiative {
-					queue = workflow.GetInfo(ctx).TaskQueueName + ".browser-bg"
-				}
-				toolCtx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{TaskQueue: queue, StartToCloseTimeout: 2 * time.Minute, ScheduleToCloseTimeout: 24 * time.Hour, HeartbeatTimeout: 10 * time.Second, WaitForCancellation: true, RetryPolicy: &temporal.RetryPolicy{InitialInterval: 5 * time.Second, MaximumInterval: 5 * time.Second, MaximumAttempts: 0}})
-				activityName = "BrowserToolCall"
-			}
 			recordTool(&turn, call.Name)
-			if err := workflow.ExecuteActivity(toolCtx, activityName, toolInput(turn, step, call)).Get(ctx, &output); err != nil {
+			if err := executeToolActivity(ctx, toolInput(turn, step, call)).Get(ctx, &output); err != nil {
 				turn.Stats.ToolErrors++
 				return turn, err
 			}
@@ -486,32 +497,36 @@ steps:
 		}
 	}
 	if in.TaskID == "" && !in.Initiative && !turn.Sent && workflow.GetVersion(ctx, "budget-finalization/"+in.Key, workflow.DefaultVersion, 1) != workflow.DefaultVersion {
-		return finalizeBudget(ctx, turn, maxSteps, steer...)
+		return finalizeBudget(ctx, turn, maxSteps, codemodeTurn, steer...)
 	}
 	return turn, temporal.NewNonRetryableApplicationError("agent step limit reached", "step_limit", nil)
 }
 
 // One reserved synthesis call can use existing evidence but cannot continue
 // research or mutate task state. The caller retains NotifyFailure as a fallback.
-func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, steer ...func(*agent.Turn) error) (agent.Turn, error) {
+func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, codemodeTurn bool, steer ...turnSteerer) (agent.Turn, error) {
 	multiMessageTurn := workflow.GetVersion(ctx, "multi-message-turn/"+turn.Input.Key, workflow.DefaultVersion, 1) != workflow.DefaultVersion
 	if len(steer) > 0 {
-		if err := steer[0](&turn); err != nil {
+		if err := steer[0](&turn, nil); err != nil {
 			return turn, err
 		}
 	}
-	turn.Messages = append(turn.Messages, domain.Message{Role: "user", Content: "The research step budget is exhausted. This is the single reserved finalization step. Stop researching and queue the remaining answer now from the evidence already collected. You may send multiple requested messages or artifacts in this final tool batch; do not resend parts already queued. Give a useful partial result when possible, clearly mark gaps and uncertainty, and never invent missing facts or claim unfinished work succeeded. If the evidence is insufficient, say what prevented completion. Only send_message and send_rich_message are available. Prefer send_message; choose send_rich_message only if rich formatting is needed. Do not request other tools."})
+	instruction := "The research step budget is exhausted. This is the single reserved finalization step. Stop researching and queue the remaining answer now from the evidence already collected. You may send multiple requested messages or artifacts in this final tool batch; do not resend parts already queued. Give a useful partial result when possible, clearly mark gaps and uncertainty, and never invent missing facts or claim unfinished work succeeded. If the evidence is insufficient, say what prevented completion. Only send_message and send_rich_message are available. Prefer send_message; choose send_rich_message only if rich formatting is needed. Do not request other tools."
+	if codemodeTurn {
+		instruction += " Send the remaining parts in one codemode script using await tools.send_message(...) or await tools.send_rich_message(...)."
+	}
+	turn.Messages = append(turn.Messages, domain.Message{Role: "user", Content: instruction})
 	turn.Messages = agent.CompactContext(turn.Messages)
 	var result agent.ModelOutput
 	turn.Stats.ModelCalls++
-	if err := workflow.ExecuteActivity(ctx, "ModelCall", agent.ModelInput{Turn: turn, Step: step, Finalize: true}).Get(ctx, &result); err != nil {
+	if err := workflow.ExecuteActivity(ctx, "ModelCall", agent.ModelInput{Turn: turn, Step: step, Finalize: true, Codemode: codemodeTurn}).Get(ctx, &result); err != nil {
 		return turn, err
 	}
 	turn.Stats.InputTokens += result.InputTokens
 	turn.Stats.OutputTokens += result.OutputTokens
 	if len(steer) > 0 {
 		before := len(turn.Input.IncomingIDs)
-		if err := steer[0](&turn); err != nil {
+		if err := steer[0](&turn, nil); err != nil {
 			return turn, err
 		}
 		if len(turn.Input.IncomingIDs) > before {
@@ -522,6 +537,18 @@ func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, steer ...fu
 	turn.Messages = append(turn.Messages, message)
 	if err := workflow.ExecuteActivity(ctx, "PersistMessage", turn.Input.SessionID, fmt.Sprintf("%s/assistant/%d", turn.Input.Key, step), message).Get(ctx, nil); err != nil {
 		return turn, err
+	}
+	if codemodeTurn {
+		if err := runCodemodeCalls(ctx, &turn, step, message.ToolCalls, true, steer...); err != nil {
+			if errors.Is(err, errCodemodeSteered) {
+				return turn, temporal.NewNonRetryableApplicationError("agent step limit reached after new input", "step_limit", nil)
+			}
+			return turn, err
+		}
+		if turn.Sent {
+			return turn, nil
+		}
+		return turn, temporal.NewNonRetryableApplicationError("agent finalization did not queue a reply", "step_limit", nil)
 	}
 	for _, call := range message.ToolCalls {
 		// Validate even a forged model response; advertised tools are not a guard.
@@ -628,6 +655,17 @@ func InitiativeWorkflow(ctx workflow.Context, in InitiativeInput) error {
 
 func toolInput(t agent.Turn, step int, call domain.ToolCall) agent.ToolInput {
 	return agent.ToolInput{RunKey: t.Input.Key, Step: step, Call: call, Conversation: t.Conversation, SessionID: t.Input.SessionID, TaskID: t.Input.TaskID, Background: t.Input.Initiative, StartedAt: t.Input.StartedAt, ReceivedAt: t.ReceivedAt}
+}
+func executeToolActivity(ctx workflow.Context, in agent.ToolInput) workflow.Future {
+	if strings.HasPrefix(in.Call.Name, "browser_") && (in.ParentToolCallID != "" || workflow.GetVersion(ctx, "browser-activities-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion) {
+		queue := workflow.GetInfo(ctx).TaskQueueName + ".browser-ui"
+		if in.TaskID != "" || in.Background {
+			queue = workflow.GetInfo(ctx).TaskQueueName + ".browser-bg"
+		}
+		toolCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{TaskQueue: queue, StartToCloseTimeout: 2 * time.Minute, ScheduleToCloseTimeout: 24 * time.Hour, HeartbeatTimeout: 10 * time.Second, WaitForCancellation: true, RetryPolicy: &temporal.RetryPolicy{InitialInterval: 5 * time.Second, MaximumInterval: 5 * time.Second, MaximumAttempts: 0}})
+		return workflow.ExecuteActivity(toolCtx, "BrowserToolCall", in)
+	}
+	return workflow.ExecuteActivity(ctx, "ToolCall", in)
 }
 func recordTool(t *agent.Turn, name string) {
 	t.Stats.ToolCalls++

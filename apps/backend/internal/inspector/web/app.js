@@ -1,3 +1,5 @@
+import { tokenizeJavaScript } from "./prism-javascript.js";
+
 const $ = (s, root = document) => root.querySelector(s);
 const esc = (value) =>
   String(value ?? "").replace(
@@ -18,6 +20,11 @@ const pretty = (value) => {
   return JSON.stringify(value, null, 2) ?? "";
 };
 const json = (value) => `<pre class="raw">${esc(pretty(value))}</pre>`;
+function javascriptToken(token) {
+  if (typeof token === "string") return esc(token);
+  if (Array.isArray(token)) return token.map(javascriptToken).join("");
+  return `<span class="token ${esc(token.type)}">${javascriptToken(token.content)}</span>`;
+}
 const date = (value) =>
   value && !String(value).startsWith("0001-")
     ? new Date(value).toLocaleString("ru-RU", {
@@ -223,9 +230,15 @@ function tabCount(name, d) {
     artifacts: d.artifacts.length,
   }[name];
 }
+function assistantTraceKey(row) {
+  return row.message.parent_tool_call_id
+    ? row.key.replace(/\/codemode\/[^/]+\/[^/]+(\/assistant\/\d+)$/, "$1")
+    : row.key;
+}
 function traceForMessage(row) {
+  const key = assistantTraceKey(row);
   const matches = (t) =>
-    t.kind === "model" && row.key === `${t.turn_id}/assistant/${t.step}`;
+    t.kind === "model" && key === `${t.turn_id}/assistant/${t.step}`;
   return (
     state.data.traces.findLast((t) => matches(t) && t.status === "completed") ||
     state.data.traces.findLast(matches)
@@ -304,7 +317,17 @@ function messageRow(row) {
   return `<article class="event" id="event-${row.seq}"><div class="event-meta"><time title="${esc(date(row.recorded_at))}">${esc(timeOnly(row.recorded_at))}</time><span class="role role-${esc(m.role)}">${role} <span class="seq">#${row.seq}</span></span></div><div class="event-content"><div class="event-line"><span class="event-name">${esc(name)}</span><span class="row-actions">${trace ? traceButton(trace.id) : ""}${recordButton(row.seq)}</span></div>${m.content ? messageText(m.role === "tool" ? pretty(m.content) : m.content, row.seq) : ""}${m.reasoning ? `<details class="reasoning" data-open-key="reasoning-${row.seq}"><summary>Reasoning · ${m.reasoning.length.toLocaleString("ru-RU")} символов</summary><div class="prose">${esc(m.reasoning)}</div></details>` : ""}${m.images?.length ? `<span class="muted">Изображения: ${m.images.length}</span>` : ""}${!m.content && !m.reasoning && !m.images?.length ? '<span class="muted">Завершение без текста</span>' : ""}</div></article>`;
 }
 function toolRow(row, call) {
-  const key = row.key.match(/^(.*)\/assistant\/(\d+)$/);
+  const source =
+    call.name === "codemode" && typeof call.arguments?.code === "string"
+      ? call.arguments.code
+      : null;
+  const argumentPreview = source === null
+    ? JSON.stringify(call.arguments)
+    : source.trimStart();
+  const argumentsMarkup = source === null
+    ? `<h4>Аргументы</h4>${json(call.arguments)}`
+    : `<h4>JavaScript</h4><pre id="source-${row.seq}-${esc(call.id)}" class="raw code-source" tabindex="0" aria-label="Код JavaScript"><code class="language-javascript">${esc(source)}</code></pre>`;
+  const key = assistantTraceKey(row).match(/^(.*)\/assistant\/(\d+)$/);
   const result = state.data.messages.find(
     (r) => r.key === row.key.replace("/assistant/", "/tool/") + "/" + call.id,
   );
@@ -323,7 +346,7 @@ function toolRow(row, call) {
     } catch {}
   }
   const model = traceForMessage(row);
-  return `<details class="tool-event tool-call" id="event-call-${row.seq}-${esc(call.id)}" data-open-key="call-${row.seq}-${esc(call.id)}"><summary><span class="event-meta"><time title="${esc(date(row.recorded_at))}">${esc(timeOnly(row.recorded_at))}</time><span class="role role-tool">TOOL <span class="seq">#${row.seq}</span></span></span><span class="tool-summary"><span class="tool-name">${esc(call.name)}</span><span class="argument-preview">${esc(excerpt(JSON.stringify(call.arguments), 150))}</span><span class="tool-state">${result ? pill(status) : '<span class="muted">Нет результата</span>'}</span><span class="expand-mark" aria-hidden="true">▸</span></span></summary><div class="tool-expanded"><div class="tool-payloads"><section><h4>Аргументы</h4>${json(call.arguments)}</section><section><h4>Результат ${result ? `<span class="muted">#${result.seq}</span>` : ""}</h4>${result ? json(result.message.content) : '<p class="muted">Результата нет в загруженной истории.</p>'}</section></div><div class="tool-footer"><span class="mono muted" title="${esc(call.id)}">${esc(call.id)}</span><span class="row-actions">${model ? traceButton(model.id) : ""}${recordButton(row.seq, "Запись вызова")}${result ? recordButton(result.seq, "Запись результата") : ""}${attempts.map((t) => traceButton(t.id, `Попытка ${t.attempt} · ${duration(t)}`)).join("")}</span></div></div></details>`;
+  return `<details class="tool-event tool-call" id="event-call-${row.seq}-${esc(call.id)}" data-open-key="call-${row.seq}-${esc(call.id)}"><summary><span class="event-meta"><time title="${esc(date(row.recorded_at))}">${esc(timeOnly(row.recorded_at))}</time><span class="role role-tool">TOOL <span class="seq">#${row.seq}</span></span></span><span class="tool-summary"><span class="tool-name">${esc(call.name)}</span><span class="argument-preview">${esc(excerpt(argumentPreview, 150))}</span><span class="tool-state">${result ? pill(status) : '<span class="muted">Нет результата</span>'}</span><span class="expand-mark" aria-hidden="true">▸</span></span></summary><div class="tool-expanded"><div class="tool-payloads${source === null ? "" : " codemode-payloads"}"><section>${argumentsMarkup}</section><section><h4>Результат ${result ? `<span class="muted">#${result.seq}</span>` : ""}</h4>${result ? json(result.message.content) : '<p class="muted">Результата нет в загруженной истории.</p>'}</section></div><div class="tool-footer"><span class="mono muted" title="${esc(call.id)}">${esc(call.id)}</span><span class="row-actions">${model ? traceButton(model.id) : ""}${recordButton(row.seq, "Запись вызова")}${result ? recordButton(result.seq, "Запись результата") : ""}${attempts.map((t) => traceButton(t.id, `Попытка ${t.attempt} · ${duration(t)}`)).join("")}</span></div></div></details>`;
 }
 function timeline(d) {
   const paired = new Set();
@@ -988,6 +1011,21 @@ $("#search").addEventListener("input", () => {
 });
 $("#trigger").addEventListener("change", () => loadList());
 $("#status").addEventListener("change", () => loadList());
+main.addEventListener("toggle", (event) => {
+  const row = event.target;
+  if (!row.open) return;
+  const code = $(".code-source > code", row);
+  if (!code || code.dataset.highlighted) return;
+  code.dataset.highlighted = "true";
+  const source = code.textContent;
+  if (source.length > 32 * 1024) return;
+  try {
+    code.innerHTML = javascriptToken(tokenizeJavaScript(source));
+  } catch {
+    // The plain source remains readable if tokenization fails.
+  }
+}, true);
+
 main.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-tab]");
   if (tab) {

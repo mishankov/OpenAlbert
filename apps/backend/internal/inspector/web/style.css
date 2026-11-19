@@ -717,6 +717,37 @@ main {
 .tool-payloads .raw {
   max-height: 330px;
 }
+.codemode-payloads {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+}
+.code-source {
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  tab-size: 2;
+}
+.code-source code {
+  font: inherit;
+}
+.code-source .token.keyword {
+  color: #6639ba;
+}
+.code-source .token.string,
+.code-source .token.regex,
+.code-source .token.template-punctuation {
+  color: #116329;
+}
+.code-source .token.function,
+.code-source .token.class-name {
+  color: #0550ae;
+}
+.code-source .token.number,
+.code-source .token.boolean {
+  color: #8a4600;
+}
+.code-source .token.comment {
+  color: #57606a;
+}
 h4 {
   font-size: 10px;
   font-weight: 600;

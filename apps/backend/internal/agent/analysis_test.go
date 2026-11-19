@@ -187,6 +187,30 @@ func TestAnalysisForgetSessionSuppressesAllMemoryWrites(t *testing.T) {
 		t.Fatalf("summary omitted %s %v", raw, err)
 	}
 }
+func TestAnalysisSuppressesWritesAfterCodemodeDeletion(t *testing.T) {
+	a, repo, k, conv := fixture(t)
+	ctx := context.Background()
+	session := closedAnalysisSession(t, a, repo, conv.ID,
+		domain.Message{Role: "user", Content: "Forget the old address."},
+		domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "script", Name: "codemode", Arguments: json.RawMessage(`{"code":"await tools.memory_update(load('deletion'))"}`)}}},
+		domain.Message{Role: "assistant", ParentToolCallID: "script", ToolCalls: []domain.ToolCall{{ID: "forget", Name: "memory_update", Arguments: json.RawMessage(`{"id":"hidden-child-argument","delete":true}`)}}},
+		domain.Message{Role: "tool", ParentToolCallID: "script", ToolCallID: "forget", Content: `{"deleted":"hidden-child-result"}`},
+		domain.Message{Role: "tool", ToolCallID: "script", Content: `{"status":"completed"}`},
+	)
+	a.Model = &testModel{respond: func(messages []domain.Message) (domain.Message, error) {
+		if strings.Contains(messages[1].Content, "hidden-child-") {
+			t.Fatal("child payload sent to post-session analysis")
+		}
+		return domain.Message{Content: `{"summary":"Forgot address","memories":[{"content":"Old address is secret","kind":"fact"}]}`}, nil
+	}}
+	if err := a.Analyze(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := k.Search(ctx, conv.ID, "")
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("Codemode deletion did not suppress memory writes: %+v %v", entries, err)
+	}
+}
 func TestAnalysisStripsImagesAndReplayCannotResurrectDeletedResult(t *testing.T) {
 	a, repo, k, conv := fixture(t)
 	ctx := context.Background()

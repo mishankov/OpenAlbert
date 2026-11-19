@@ -114,15 +114,16 @@ type toolArgs struct {
 }
 
 type ToolInput struct {
-	RunKey       string
-	Step         int
-	Call         domain.ToolCall
-	Conversation domain.Conversation
-	SessionID    string
-	TaskID       string
-	Background   bool
-	StartedAt    time.Time
-	ReceivedAt   time.Time
+	RunKey           string
+	Step             int
+	Call             domain.ToolCall
+	Conversation     domain.Conversation
+	SessionID        string
+	TaskID           string
+	Background       bool
+	StartedAt        time.Time
+	ReceivedAt       time.Time
+	ParentToolCallID string `json:",omitempty"`
 }
 
 func taskUpdateAccess(in ToolInput) error {

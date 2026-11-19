@@ -20,6 +20,7 @@ import (
 )
 
 type Activities struct {
+	Codemode           bool
 	Widgets            *widgets.Controller
 	OwnerUserID        int64
 	AllowedGroupIDs    []int64
@@ -59,6 +60,7 @@ type Turn struct {
 	Sent         bool
 	ReceivedAt   time.Time
 	Stats        TurnStats
+	Codemode     bool `json:",omitempty"`
 }
 type TurnStats struct {
 	ModelCalls, ToolCalls, ToolErrors, InputTokens, OutputTokens int
@@ -69,6 +71,7 @@ type ModelInput struct {
 	Turn     Turn
 	Step     int
 	Finalize bool
+	Codemode bool `json:",omitempty"`
 }
 type ModelOutput struct {
 	Message      domain.Message
@@ -130,7 +133,7 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 	if err != nil {
 		return out, err
 	}
-	out = Turn{Input: in, Conversation: conv}
+	out = Turn{Input: in, Conversation: conv, Codemode: a.Codemode}
 	a.startProgress(ctx, in, conv)
 	if err = a.Repo.StartSession(ctx, domain.Session{ID: in.SessionID, ConversationID: conv.ID, Status: "active", CreatedAt: time.Now().UTC()}); err != nil {
 		return
@@ -223,6 +226,7 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 	if err != nil {
 		return out, err
 	}
+	history = validHistory(history)
 	// Preserve complete turns: never cut a tool result away from its assistant call.
 	if len(history) > 100 {
 		start := len(history) - 80
@@ -238,7 +242,6 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 		}
 		imageBudget -= len(history[i].Images)
 	}
-	history = validHistory(history)
 	if !conv.Private {
 		history = groupAuthorMessages(history)
 	}
@@ -355,6 +358,9 @@ func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOut
 			}
 		}
 	}
+	if in.Codemode {
+		tools = []domain.Tool{codemodeDefinition(in.Finalize)}
+	}
 	// Refresh immediately before every uncached model call, including resumed
 	// Temporal activities whose persisted Turn contains an older system prompt.
 	if a.Backups != nil && a.isOwnerPrivate(in.Turn.Conversation) {
@@ -397,6 +403,9 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 	ev.Set("task_id", in.TaskID)
 	ev.Set("step", in.Step)
 	ev.Set("tool_call_id", in.Call.ID)
+	if in.ParentToolCallID != "" {
+		ev.Set("parent_tool_call_id", in.ParentToolCallID)
+	}
 	toolMetadata(ev, in)
 	defer func() {
 		ev.Set("activity_result", "success")
@@ -452,6 +461,17 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 	}
 	finishTrace := a.startTrace(ctx, domain.Trace{SessionID: in.SessionID, TurnID: in.RunKey, Trigger: in.TriggerName(), TaskID: in.TaskID, Kind: "tool", Name: in.Call.Name, Step: in.Step, CallID: in.Call.ID}, in.Call.Arguments, ev)
 	defer func() { finishTrace(out, err) }()
+	if in.ParentToolCallID != "" && codemodeNeedsClaim(in.Call.Name) {
+		claimed, claimErr := a.Repo.ClaimCheckpoint(ctx, key+"/started", json.RawMessage(`true`))
+		if claimErr != nil {
+			return "", claimErr
+		}
+		if !claimed {
+			ev.Fail(diagnosticError("tool_outcome_unknown"))
+			ev.Set("tool_outcome", "error")
+			return CodemodeUnknownOutcome, nil
+		}
+	}
 	result, e := a.execute(ctx, in)
 	if e == nil && in.Call.Name == "send_widget" {
 		if err := a.Repo.ConfirmProgressReply(ctx, in.RunKey); err != nil {
@@ -486,7 +506,11 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 	if e != nil {
 		return "", e
 	}
-	if len(raw) > 32000 {
+	resultLimit := 32000
+	if in.ParentToolCallID != "" {
+		resultLimit = codemodeResultBytes
+	}
+	if len(raw) > resultLimit {
 		raw, _ = json.Marshal(map[string]string{"result": clip(string(raw), 6000), "note": "truncated"})
 	}
 	out = string(raw)
@@ -619,12 +643,9 @@ func (a *Activities) Analyze(ctx context.Context, session domain.Session) (err e
 			existing = existing[:50]
 		}
 		suppress := false
-		for i := range messages {
-			// Analysing a photograph again is unnecessary and can consume most of a
-			// model's context. Its transcript/caption and artifact reference remain.
-			messages[i].Images = nil
-			messages[i].ResponsesItems = nil
-			for _, call := range messages[i].ToolCalls {
+		transcript := messages[:0]
+		for _, message := range messages {
+			for _, call := range message.ToolCalls {
 				if call.Name != "memory_update" && call.Name != "participant_update" {
 					continue
 				}
@@ -635,11 +656,18 @@ func (a *Activities) Analyze(ctx context.Context, session domain.Session) (err e
 					suppress = true
 				}
 			}
+			// Inspect recorded child actions for deletions, then keep their payloads
+			// out of the analysis transcript. Attachment references remain in text.
+			if message.ParentToolCallID == "" {
+				message.Images = nil
+				message.ResponsesItems = nil
+				transcript = append(transcript, message)
+			}
 		}
 		payload := struct {
 			Existing   []domain.MemoryEntry `json:"existing_memories"`
 			Transcript []domain.Message     `json:"transcript"`
-		}{existing, messages}
+		}{existing, transcript}
 		raw, _ := json.Marshal(payload)
 		snapshotAt := time.Now().UTC()
 		groupInstructions := ""
@@ -847,12 +875,12 @@ func (a *Activities) NotifyFailure(ctx context.Context, scope, key string) error
 	return a.Repo.EnqueueOutgoing(ctx, domain.Outgoing{ID: ID("failure", key), Conversation: conv, Text: "Не удалось завершить запрос в пределах текущего запуска. Состояние сохранено; можно уточнить запрос или попробовать снова.", State: "pending", TurnID: key, Trigger: "failure", EnqueuedAt: time.Now().UTC(), PartCount: 1})
 }
 
-// validHistory drops interrupted tool exchanges so a stop cannot poison later model requests.
+// validHistory keeps model-visible messages and their complete tool exchanges.
 func validHistory(messages []domain.Message) []domain.Message {
 	out := []domain.Message{}
 	for i := 0; i < len(messages); i++ {
 		msg := messages[i]
-		if msg.Role == "tool" {
+		if msg.Role == "tool" || msg.ParentToolCallID != "" {
 			continue
 		}
 		if len(msg.ToolCalls) == 0 {
@@ -861,8 +889,15 @@ func validHistory(messages []domain.Message) []domain.Message {
 		}
 		results := map[string]domain.Message{}
 		j := i + 1
-		for ; j < len(messages) && messages[j].Role == "tool"; j++ {
-			results[messages[j].ToolCallID] = messages[j]
+		for ; j < len(messages); j++ {
+			result := messages[j]
+			if result.ParentToolCallID != "" {
+				continue
+			}
+			if result.Role != "tool" {
+				break
+			}
+			results[result.ToolCallID] = result
 		}
 		complete := true
 		for _, call := range msg.ToolCalls {
