@@ -44,7 +44,7 @@ tasks:
     desc: Run all checks, tests, image builds and a fresh deployment/restart test
     cmds: [python3 tools/local.py verify]
   publish:
-    desc: Verify a clean master checkout and publish tested AMD64/ARM64 images
+    desc: Verify server checks (excluding macOS) and publish AMD64/ARM64 images from clean master
     cmds: [python3 tools/local.py publish]
   release:macos:
     desc: Verify and prepare a signed macOS release locally (no upload)

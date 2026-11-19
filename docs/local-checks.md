@@ -14,7 +14,7 @@ GitHub используется для исходников, хранения о
 Desktop или OrbStack. Для native-проверок нужен Apple Silicon Mac с полным Xcode
 и управляемая Tart VM. Установка Task на Mac: `brew install go-task`.
 
-Один раз подготовь VM по [инструкции Tart](macos-development-vm.md):
+Для native-проверок один раз подготовь VM по [инструкции Tart](macos-development-vm.md):
 
 ```sh
 task vm:setup
@@ -46,7 +46,7 @@ Chromium и FFmpeg. На хосте эти два инструмента для 
 | `task verify` | check, все тесты, images и чистое развёртывание с перезапуском |
 | `task screenshots` | Нативные скриншоты в Tart |
 | `task reports` | Сводка последнего завершившегося прогона |
-| `task publish` | Полная проверка и публикация двух архитектур из чистого master |
+| `task publish` | Проверки сервера без macOS и публикация двух архитектур из чистого master |
 | `task release:macos` | Проверка, стабильная подпись и локальные macOS release-артефакты |
 | `task release:macos:draft` | То же с загрузкой нового GitHub draft release |
 
@@ -105,7 +105,13 @@ docker login ghcr.io
 OPENALBERT_IMAGE_PREFIX=ghcr.io/mishankov/openalbert task publish
 ```
 
-Команда повторяет проверки, собирает все шесть релизных компонентов через Bake отдельно
+Пока macOS-клиент находится на ранней стадии, публикация контейнеров выполняет
+`check`, Go race/integration, backup restore и web-проверки без macOS tooling,
+Go/Swift-контракта и Tart. Это относится и к выборочной публикации изменённых
+образов. `task test`, `task verify`, `task test:macos` и macOS-релизы сохраняют
+нативные проверки. Для публикации контейнеров Xcode и Tart не требуются.
+
+Команда собирает все шесть релизных компонентов через Bake отдельно
 для AMD64 и ARM64, проверяет smoke и развёртывание каждой архитектуры. До завершения
 обоих наборов ничего не загружается. Используются именно проверенные локальные
 образы. SHA и чистота checkout проверяются снова непосредственно перед загрузкой.

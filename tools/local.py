@@ -271,11 +271,12 @@ class Run:
         if output(["git", "rev-parse", "HEAD"], self.env) != self.data["revision"]:
             raise RuntimeError("HEAD changed during verification")
 
-    def tests(self):
+    def tests(self, *, include_macos=True):
         self.go()
         self.backup()
         self.web()
-        self.macos()
+        if include_macos:
+            self.macos()
 
     def publish(self):
         prefix = os.environ.get("OPENALBERT_IMAGE_PREFIX", "")
@@ -283,11 +284,12 @@ class Run:
             raise RuntimeError("Set OPENALBERT_IMAGE_PREFIX to a lowercase registry/owner/repository")
         self.clean_checkout(master=True)
         self.check()
-        self.tests()
+        # The early macOS client is verified separately from container releases.
+        self.tests(include_macos=False)
         for arch in ("amd64", "arm64"):
             self.images(arch, deployment=True)
         self.clean_checkout(master=True)
-        # Upload only after BOTH architectures, deployment tests and macOS passed.
+        # Upload only after server checks, BOTH architectures and deployment tests passed.
         for component in COMPONENTS:
             image = prefix + "/" + component
             sha = "sha-" + self.data["revision"]

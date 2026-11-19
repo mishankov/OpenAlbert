@@ -116,6 +116,38 @@ class LocalRunTests(unittest.TestCase):
                 run.tests()
                 computer.assert_not_called()
 
+    def test_image_publication_excludes_macos_and_keeps_server_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.make_run(directory, "publish")
+            calls = []
+
+            def images(arch, deployment=False):
+                self.assertTrue(deployment)
+                calls.append("images-" + arch)
+                run.data["images"][arch] = {"openalbert": "synthetic:" + arch}
+
+            with mock.patch.dict(os.environ, {"OPENALBERT_IMAGE_PREFIX": "registry.example/openalbert"}), \
+                    mock.patch.object(local, "COMPONENTS", ("openalbert",)), \
+                    mock.patch.object(run, "clean_checkout"), mock.patch.object(run, "check"), \
+                    mock.patch.object(run, "go", side_effect=lambda: calls.append("go")), \
+                    mock.patch.object(run, "backup", side_effect=lambda: calls.append("backup")), \
+                    mock.patch.object(run, "web", side_effect=lambda: calls.append("web")), \
+                    mock.patch.object(run, "macos") as macos, \
+                    mock.patch.object(run, "images", side_effect=images), \
+                    mock.patch.object(run, "command", side_effect=lambda *a, **kw: calls.append("upload")):
+                run.publish()
+                macos.assert_not_called()
+            self.assertEqual(calls[:5], ["go", "backup", "web", "images-amd64", "images-arm64"])
+            self.assertEqual(calls[5:], ["upload"] * 5)
+
+    def test_full_test_suite_keeps_macos_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.make_run(directory, "test")
+            with mock.patch.object(run, "go"), mock.patch.object(run, "backup"), \
+                    mock.patch.object(run, "web"), mock.patch.object(run, "macos") as macos:
+                run.tests()
+                macos.assert_called_once_with()
+
     def test_publication_rechecks_sources_before_first_upload(self):
         with tempfile.TemporaryDirectory() as directory:
             run = self.make_run(directory, "publish")
