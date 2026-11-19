@@ -173,7 +173,7 @@ def handler_for(state):
             if method == "getMe":
                 self.json({"ok": True, "result": {"id": 1, "is_bot": True, "username": "openalbert_smoke_bot"}})
             elif method == "setMyCommands":
-                assert {item["command"] for item in body["commands"]} == {"new", "stop"}
+                assert {item["command"] for item in body["commands"]} == {"new", "stop", "schedules", "pause", "resume", "chatgpt"}
                 self.json({"ok": True, "result": True})
             elif method == "getUpdates":
                 offset = body.get("offset", 0)
