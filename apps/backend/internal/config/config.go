@@ -19,6 +19,7 @@ type Config struct {
 	TelegramOwnerUserID                                     int64
 	DatabaseURL                                             string
 	TemporalAddress, TemporalNamespace, TemporalTaskQueue   string
+	TelegramWidgets                                         string
 	TelegramBotToken, TelegramBaseURL                       string
 	TelegramAllowedUserIDs, TelegramAllowedGroupIDs         []int64
 	TelegramAllowBotMessages                                bool
@@ -51,6 +52,7 @@ func load(get func(string) string) (Config, error) {
 	}
 	c := Config{
 		OpenAIAuthMode: value("OPENAI_AUTH_MODE", "api_key"), OpenAITokenStore: value("OPENAI_TOKEN_STORE", "./container_data/chatgpt/credentials.json"), OpenAISiWCModel: value("OPENAI_SIWC_MODEL", value("LLM_MODEL", "")),
+		TelegramWidgets: value("TELEGRAM_WIDGETS", "auto"),
 		DesktopAPIToken: value("DESKTOP_API_TOKEN", ""),
 		STTBaseURL:      value("STT_BASE_URL", ""), STTAPIKey: value("STT_API_KEY", ""), STTModel: value("STT_MODEL", ""), STTRevision: value("STT_REVISION", ""),
 		DatabaseURL: value("DATABASE_URL", ""), TemporalAddress: value("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: value("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: value("TEMPORAL_TASK_QUEUE", "openalbert"),
@@ -66,6 +68,9 @@ func load(get func(string) string) (Config, error) {
 		BackupStateDir:      value("BACKUP_STATE_DIR", ""),
 	}
 	var problems []error
+	if c.TelegramWidgets != "auto" && c.TelegramWidgets != "on" && c.TelegramWidgets != "off" {
+		problems = append(problems, errors.New("TELEGRAM_WIDGETS must be auto, on or off"))
+	}
 	if c.DesktopAPIToken != "" && len(c.DesktopAPIToken) < 32 {
 		problems = append(problems, errors.New("DESKTOP_API_TOKEN must contain at least 32 bytes"))
 	}

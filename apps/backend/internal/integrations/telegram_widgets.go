@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 	"unsafe"
@@ -11,6 +12,7 @@ import (
 	"modernc.org/libc"
 	"modernc.org/libz"
 	"openalbert/apps/backend/internal/domain"
+	"openalbert/apps/backend/internal/telemetry"
 )
 
 type telegramWidgetQuery struct {
@@ -142,6 +144,23 @@ func (t *Telegram) SendWidget(ctx context.Context, c domain.Conversation, w doma
 	if err := ValidateWidget(w); err != nil {
 		return 0, err
 	}
+	if t.config.Widgets == "off" {
+		return 0, &WidgetFallbackError{Reason: "disabled"}
+	}
+	if t.config.Widgets == "auto" {
+		t.widgetMu.Lock()
+		cached, until := t.widgetUnavailable, t.widgetUnavailableUntil
+		t.widgetMu.Unlock()
+		if cached != nil && time.Now().Before(until) {
+			return 0, cached
+		}
+	}
+	event := telemetry.Start(ctx, t.config.Logger, "telegram.widget.send")
+	event.Set("method", "sendWidget")
+	event.Set("chat_id", c.ChatID)
+	event.Set("html_bytes", len(w.HTML))
+	compressed, _ := widgetCompressedSize(w.HTML) // Validation above already checked compression.
+	event.Set("html_compressed_bytes", compressed)
 	payload := map[string]any{"chat_id": c.ChatID, "html": w.HTML, "caption": w.Caption, "allow_queries": w.AllowQueries, "public_data": w.PublicData, "chat_data": w.ChatData, "reply_markup": widgetMarkup(buttons)}
 	if c.ThreadID > 0 {
 		payload["message_thread_id"] = c.ThreadID
@@ -152,7 +171,31 @@ func (t *Telegram) SendWidget(ctx context.Context, c domain.Conversation, w doma
 	if w.Height != 0 {
 		payload["height"] = w.Height
 	}
-	return t.sendWidgetMessage(ctx, "sendWidget", payload)
+	id, err := t.sendWidgetMessage(ctx, "sendWidget", payload)
+	var api *TelegramError
+	if errors.As(err, &api) {
+		event.Set("api_http_status", api.Status)
+		event.Set("api_error_code", api.Code)
+		event.Set("api_description", api.Description)
+	}
+	event.End(err)
+	if err != nil && api != nil && api.Rejected && api.Status < 500 && (api.Code == 400 || api.Code == 404) {
+		reason := "api_rejected"
+		switch {
+		case api.Code == 404, strings.Contains(api.Description, "INPUT_MEDIA_WIDGET_NOT_ALLOWED"):
+			reason = "api_not_supported"
+		case strings.Contains(api.Description, "INPUT_MEDIA_WIDGET_"):
+			reason = "validation"
+		}
+		rejected := &WidgetFallbackError{Reason: reason, APIError: &TelegramAPIDiagnostic{HTTPStatus: api.Status, Code: api.Code, Description: api.Description}}
+		if reason == "api_not_supported" && t.config.Widgets == "auto" {
+			t.widgetMu.Lock()
+			t.widgetUnavailable, t.widgetUnavailableUntil = rejected, time.Now().Add(time.Hour)
+			t.widgetMu.Unlock()
+		}
+		return 0, rejected
+	}
+	return id, err
 }
 
 func (t *Telegram) SendWidgetFallback(ctx context.Context, c domain.Conversation, text string, buttons [][]domain.WidgetButton) (int64, error) {
@@ -229,3 +272,20 @@ func (t *Telegram) AnswerWidgetQuery(ctx context.Context, q domain.WidgetQuery, 
 	}
 	return t.api(ctx, "answerWidgetQuery", map[string]any{"widget_query_id": q.ID, "data": data}, nil)
 }
+
+// TelegramAPIDiagnostic is returned only as metadata for a delivered text
+// fallback. It is not a tool failure and contains no request payload.
+type TelegramAPIDiagnostic struct {
+	HTTPStatus  int    `json:"http_status"`
+	Code        int    `json:"error_code"`
+	Description string `json:"description"`
+}
+
+// WidgetFallbackError is an explicit rejection or local policy decision for
+// which replacing the widget with a text reply is safe.
+type WidgetFallbackError struct {
+	Reason   string
+	APIError *TelegramAPIDiagnostic
+}
+
+func (e *WidgetFallbackError) Error() string { return "Telegram widget unavailable: " + e.Reason }

@@ -157,3 +157,32 @@ func TestOverlappingWidgetCallCannotCacheOverLaterRateLimit(t *testing.T) {
 		t.Fatal("in-flight observation poisoned result cache")
 	}
 }
+
+func TestWidgetFallbackRemainsSuccessfulToolResultWithDiagnostics(t *testing.T) {
+	a, repo, _, conv := fixture(t)
+	probes, texts := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sendWidget") {
+			probes++
+			w.WriteHeader(400)
+			_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED"}`)
+			return
+		}
+		texts++
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":42}}`)
+	}))
+	defer server.Close()
+	tg, _ := integrations.NewTelegram(integrations.TelegramConfig{Token: "synthetic", BaseURL: server.URL, AllowedUserIDs: []int64{7}})
+	a.Widgets = &widgets.Controller{Repo: repo, Transport: tg}
+	in := ToolInput{RunKey: "fallback", Conversation: conv, Call: domain.ToolCall{ID: "send", Name: "send_widget", Arguments: json.RawMessage(`{"kind":"html","html":"ok","caption":"Useful content"}`)}}
+	for _, id := range []string{"send", "again", "send"} {
+		in.Call.ID = id
+		out, err := a.ToolCall(context.Background(), in)
+		if err != nil || ToolFailed(out) || strings.Contains(out, `"error"`) || !strings.Contains(out, `"fallback_reason":"api_not_supported"`) || !strings.Contains(out, `"description":"Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED"`) {
+			t.Fatalf("tool result: %s %v", out, err)
+		}
+	}
+	if probes != 1 || texts != 2 {
+		t.Fatalf("probes=%d texts=%d", probes, texts)
+	}
+}

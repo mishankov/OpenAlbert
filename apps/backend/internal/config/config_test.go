@@ -211,3 +211,26 @@ func TestOpenAIAuthModes(t *testing.T) {
 		}
 	}
 }
+
+func TestTelegramWidgetsSetting(t *testing.T) {
+	for _, value := range []string{"", "auto", "on", "off", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			env := validEnv()
+			env["TELEGRAM_WIDGETS"] = value
+			cfg, err := load(func(k string) string { return env[k] })
+			if value == "invalid" {
+				if err == nil {
+					t.Fatal("invalid mode accepted")
+				}
+				return
+			}
+			want := value
+			if want == "" {
+				want = "auto"
+			}
+			if err != nil || cfg.TelegramWidgets != want {
+				t.Fatalf("mode: %s %v", cfg.TelegramWidgets, err)
+			}
+		})
+	}
+}

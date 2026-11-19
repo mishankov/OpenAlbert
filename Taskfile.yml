@@ -20,7 +20,7 @@ tasks:
   test:widgets:
     desc: Test Telegram widget transport, schedule actions and command routing with the race detector
     cmds:
-      - go test -race ./apps/backend/internal/widgets ./apps/backend/internal/integrations ./apps/backend/internal/agent ./apps/backend/internal/orchestration ./apps/backend/internal/storage ./apps/backend/internal/browser
+      - go test -race ./apps/backend/internal/config ./apps/backend/internal/widgets ./apps/backend/internal/integrations ./apps/backend/internal/agent ./apps/backend/internal/orchestration ./apps/backend/internal/storage ./apps/backend/internal/browser
       - env CGO_ENABLED=0 go build -o /dev/null ./apps/backend/cmd/openalbert
   test:computer:
     desc: Build a disposable user-computer template and test the SSH adapter

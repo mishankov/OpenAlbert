@@ -104,7 +104,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	telegram, err := integrations.NewTelegram(integrations.TelegramConfig{Token: c.TelegramBotToken, BaseURL: c.TelegramBaseURL, AllowedUserIDs: c.TelegramAllowedUserIDs, AllowedGroupIDs: c.TelegramAllowedGroupIDs, AllowBotMessages: c.TelegramAllowBotMessages})
+	telegram, err := integrations.NewTelegram(integrations.TelegramConfig{Widgets: c.TelegramWidgets, Logger: logger, Token: c.TelegramBotToken, BaseURL: c.TelegramBaseURL, AllowedUserIDs: c.TelegramAllowedUserIDs, AllowedGroupIDs: c.TelegramAllowedGroupIDs, AllowBotMessages: c.TelegramAllowBotMessages})
 	if err != nil {
 		return err
 	}

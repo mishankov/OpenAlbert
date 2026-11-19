@@ -37,8 +37,10 @@ type Request struct {
 }
 
 type Result struct {
-	MessageID int64 `json:"message_id"`
-	Fallback  bool  `json:"fallback"`
+	MessageID      int64                               `json:"message_id"`
+	Fallback       bool                                `json:"fallback"`
+	FallbackReason string                              `json:"fallback_reason,omitempty"`
+	APIError       *integrations.TelegramAPIDiagnostic `json:"api_error,omitempty"`
 }
 
 type sendState struct {
@@ -104,7 +106,8 @@ func (c *Controller) Send(ctx context.Context, conv domain.Conversation, key str
 	if state.MessageID > 0 {
 		return state.Result, nil
 	}
-	fallback := state.Fallback
+	result := state.Result
+	fallback := result.Fallback
 	r := registration{Conversation: conv, Kind: req.Kind, Widget: true}
 	var buttons [][]domain.WidgetButton
 	if r.Kind == "schedules" {
@@ -151,7 +154,7 @@ func (c *Controller) Send(ctx context.Context, conv domain.Conversation, key str
 	if !claimed {
 		return Result{}, ErrDeliveryPending
 	}
-	if err := c.saveSend(ctx, sendKey, sendState{Result: Result{Fallback: fallback}}); err != nil {
+	if err := c.saveSend(ctx, sendKey, sendState{Result: result}); err != nil {
 		return Result{}, err
 	}
 	var id int64
@@ -163,25 +166,27 @@ func (c *Controller) Send(ctx context.Context, conv domain.Conversation, key str
 	if err != nil {
 		// A timeout or 5xx may have delivered the widget. Only explicit API
 		// rejection is safe to replace with a text message.
-		var rejected interface{ HTTPStatus() int }
-		if fallback || !errors.As(err, &rejected) || (rejected.HTTPStatus() != 400 && rejected.HTTPStatus() != 404) {
-			return Result{}, c.sendError(ctx, sendKey, fallback, err)
+		var rejected *integrations.WidgetFallbackError
+		if fallback || !errors.As(err, &rejected) {
+			return Result{}, c.sendResultError(ctx, sendKey, result, err)
 		}
-		if err := c.saveSend(ctx, sendKey, sendState{Result: Result{Fallback: true}}); err != nil {
+		result.Fallback = true
+		result.FallbackReason, result.APIError = rejected.Reason, rejected.APIError
+		if err := c.saveSend(ctx, sendKey, sendState{Result: result}); err != nil {
 			return Result{}, err
 		}
 		id, err = c.Transport.SendWidgetFallback(ctx, conv, req.Caption, buttons)
 		fallback = true
 	}
 	if err != nil {
-		return Result{}, c.sendError(ctx, sendKey, fallback, err)
+		return Result{}, c.sendResultError(ctx, sendKey, result, err)
 	}
 	r.Widget = !fallback
 	raw, _ := json.Marshal(r)
 	if err = c.Repo.SaveCheckpoint(ctx, registryKey(conv.ChatID, id), raw); err != nil {
 		return Result{}, err
 	}
-	result := Result{MessageID: id, Fallback: fallback}
+	result.MessageID, result.Fallback = id, fallback
 	raw, _ = json.Marshal(result)
 	return result, c.Repo.SaveCheckpoint(ctx, sendKey, raw)
 }
@@ -265,7 +270,7 @@ func (c *Controller) reply(ctx context.Context, in domain.Incoming, text string)
 	}
 	id, err := c.Transport.SendWidgetFallback(ctx, in.Conversation, text, nil)
 	if err != nil {
-		return c.sendError(ctx, key, true, err)
+		return c.sendResultError(ctx, key, Result{Fallback: true}, err)
 	}
 	return c.saveSend(ctx, key, sendState{Result: Result{MessageID: id, Fallback: true}})
 }
@@ -275,13 +280,13 @@ func (c *Controller) saveSend(ctx context.Context, key string, state sendState) 
 	return c.Repo.SaveCheckpoint(ctx, key, raw)
 }
 
-func (c *Controller) sendError(ctx context.Context, key string, fallback bool, err error) error {
+func (c *Controller) sendResultError(ctx context.Context, key string, result Result, err error) error {
 	var rejected *integrations.TelegramError
-	if !errors.As(err, &rejected) || rejected.Code != 429 {
+	if !errors.As(err, &rejected) || !rejected.Rejected || rejected.Status >= 500 || rejected.Code != 429 {
 		return err
 	}
 	delay := max(time.Second, rejected.RetryAfter)
-	if saveErr := c.saveSend(ctx, key, sendState{Result: Result{Fallback: fallback}, RetryAt: time.Now().Add(delay)}); saveErr != nil {
+	if saveErr := c.saveSend(ctx, key, sendState{Result: result, RetryAt: time.Now().Add(delay)}); saveErr != nil {
 		return saveErr
 	}
 	return &RateLimitError{RetryAfter: delay}
