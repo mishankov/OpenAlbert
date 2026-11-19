@@ -9,12 +9,14 @@ import (
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -24,6 +26,8 @@ import (
 )
 
 type TelegramConfig struct {
+	Widgets          string // auto (default), on (always probe), off (text only).
+	Logger           *slog.Logger
 	Token            string
 	BaseURL          string // Optional Bot API server root; default https://api.telegram.org.
 	AllowedUserIDs   []int64
@@ -34,12 +38,15 @@ type TelegramConfig struct {
 	MaxFileBytes     int64
 }
 type Telegram struct {
-	ChatGPT  *ChatGPTControls
-	config   TelegramConfig
-	client   *http.Client
-	users    map[int64]bool
-	groups   map[int64]bool
-	username string // Set by ConfigureCommands before polling starts.
+	widgetMu               sync.Mutex
+	widgetUnavailableUntil time.Time
+	widgetUnavailable      *WidgetFallbackError
+	ChatGPT                *ChatGPTControls
+	config                 TelegramConfig
+	client                 *http.Client
+	users                  map[int64]bool
+	groups                 map[int64]bool
+	username               string // Set by ConfigureCommands before polling starts.
 }
 type Update struct {
 	Offset      int64
@@ -47,7 +54,9 @@ type Update struct {
 	WidgetQuery *domain.WidgetQuery
 }
 type TelegramError struct {
-	Rejected       bool // Telegram explicitly returned ok:false; an HTTP error alone is ambiguous.
+	Status         int
+	Description    string // Bounded API diagnostic; Error() deliberately stays generic.
+	Rejected       bool   // Telegram explicitly returned ok:false; an HTTP error alone is ambiguous.
 	Code           int
 	RetryAfter     time.Duration
 	NotModified    bool
@@ -71,7 +80,7 @@ func deliveryError(err error) error {
 		return nil
 	}
 	var rejected *TelegramError
-	if errors.As(err, &rejected) && rejected.Code < 500 {
+	if errors.As(err, &rejected) && rejected.Rejected && rejected.Status < 500 && rejected.Code < 500 {
 		return err
 	}
 	return &TelegramDeliveryError{Cause: err, Unknown: true}
@@ -79,6 +88,12 @@ func deliveryError(err error) error {
 
 func (e *TelegramError) Error() string { return fmt.Sprintf("Telegram API error %d", e.Code) }
 func NewTelegram(c TelegramConfig) (*Telegram, error) {
+	if c.Widgets == "" {
+		c.Widgets = "auto"
+	}
+	if c.Widgets != "auto" && c.Widgets != "on" && c.Widgets != "off" {
+		return nil, errors.New("TELEGRAM_WIDGETS must be auto, on or off")
+	}
 	if c.Token == "" || strings.ContainsAny(c.Token, "/?#\r\n") {
 		return nil, errors.New("Telegram bot token is required and must not contain URL separators")
 	}
@@ -200,7 +215,7 @@ func (t *Telegram) response(ctx context.Context, req *http.Request, out any) err
 	}
 	if json.Unmarshal(data, &envelope) != nil {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return &TelegramError{Code: resp.StatusCode}
+			return &TelegramError{Code: resp.StatusCode, Status: resp.StatusCode}
 		}
 		return errors.New("invalid Telegram response")
 	}
@@ -213,7 +228,7 @@ func (t *Telegram) response(ctx context.Context, req *http.Request, out any) err
 			code = resp.StatusCode
 		}
 		description := strings.ToLower(envelope.Description)
-		return &TelegramError{Code: code, Rejected: !*envelope.OK, RetryAfter: time.Duration(envelope.Parameters.RetryAfter) * time.Second,
+		return &TelegramError{Code: code, Status: resp.StatusCode, Description: t.safeAPIDescription(envelope.Description), Rejected: !*envelope.OK, RetryAfter: time.Duration(envelope.Parameters.RetryAfter) * time.Second,
 			NotModified:    code == 400 && strings.Contains(description, "message is not modified"),
 			MessageMissing: code == 400 && (strings.Contains(description, "message to delete not found") || strings.Contains(description, "message to edit not found"))}
 	}
@@ -607,3 +622,17 @@ func (t *Telegram) Download(ctx context.Context, fileID string) ([]byte, error) 
 }
 
 var _ domain.Messenger = (*Telegram)(nil)
+
+// Keep provider diagnostics bounded and remove the bot credential even if a
+// custom Bot API server echoes its request URL. Never log request bodies.
+func (t *Telegram) safeAPIDescription(s string) string {
+	s = strings.ReplaceAll(s, t.config.Token, "[redacted]")
+	s = strings.ToValidUTF8(s, "�")
+	if len(s) > 1024 {
+		s = s[:1024]
+		for !utf8.ValidString(s) {
+			s = s[:len(s)-1]
+		}
+	}
+	return s
+}

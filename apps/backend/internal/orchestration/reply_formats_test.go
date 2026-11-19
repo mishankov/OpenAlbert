@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +13,9 @@ import (
 
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
+	"openalbert/apps/backend/internal/integrations"
 	"openalbert/apps/backend/internal/messagefmt"
+	"openalbert/apps/backend/internal/widgets"
 )
 
 func TestReplyToolsChooseTelegramFormatAndDeliverOnce(t *testing.T) {
@@ -180,5 +183,33 @@ func TestBothReplyToolsPreserveUnknownDeliveryWithoutAutomaticRetry(t *testing.T
 				t.Fatalf("unknown delivery repeated: %d attempts, %v", attempts, repo.states)
 			}
 		})
+	}
+}
+
+func TestWidgetFallbackDiagnosticDoesNotMarkDeliveredReplyFailed(t *testing.T) {
+	a, repo, _, conv := newFixture(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sendWidget") {
+			w.WriteHeader(400)
+			_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"error"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":42}}`)
+	}))
+	defer server.Close()
+	tg, _ := integrations.NewTelegram(integrations.TelegramConfig{Token: "synthetic", BaseURL: server.URL, AllowedUserIDs: []int64{conv.OwnerID}})
+	a.Widgets = &widgets.Controller{Repo: repo, Transport: tg}
+	a.Model = &scriptedModel{run: func(n int, _ []domain.Message) (domain.Message, error) {
+		if n == 0 {
+			return calls(call("widget", "send_widget", map[string]string{"kind": "html", "html": "ok", "caption": "Useful content"})), nil
+		}
+		return finish(""), nil
+	}}
+	env := newEnv(a)
+	env.ExecuteWorkflow(finishOnlyTurn, agent.RunInput{Key: "fallback-diagnostic", SessionID: "widget-session", ConversationID: conv.ID, IncomingIDs: []string{"first"}})
+	requireWorkflowOK(t, env)
+	var turn agent.Turn
+	if err := env.GetWorkflowResult(&turn); err != nil || !turn.Sent {
+		t.Fatalf("delivered fallback not recognized: %+v %v", turn, err)
 	}
 }

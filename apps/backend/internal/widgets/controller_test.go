@@ -24,11 +24,12 @@ type apiCall struct {
 	payload map[string]any
 }
 type testAPI struct {
-	mu         sync.Mutex
-	calls      []apiCall
-	reject     int
-	editError  bool
-	rateMethod string
+	mu          sync.Mutex
+	calls       []apiCall
+	reject      int
+	description string
+	editError   bool
+	rateMethod  string
 }
 
 func (a *testAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +54,7 @@ func (a *testAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			code = 500
 		}
 		w.WriteHeader(code)
-		_, _ = fmt.Fprintf(w, `{"ok":false,"error_code":%d}`, code)
+		_, _ = fmt.Fprintf(w, `{"ok":false,"error_code":%d,"description":%q}`, code, a.description)
 		return
 	}
 	if method == "sendWidget" || method == "sendMessage" {
@@ -174,6 +175,7 @@ func TestRateLimitResumesCorrectSendStageAfterCooldown(t *testing.T) {
 			api.rateMethod = stage
 			if stage == "sendMessage" {
 				api.reject = 400
+				api.description = "Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED"
 			}
 			req := Request{Kind: "schedules", TaskIDs: []string{"nba"}}
 			_, err := c.Send(context.Background(), conv, "limited", req)
@@ -194,6 +196,9 @@ func TestRateLimitResumesCorrectSendStageAfterCooldown(t *testing.T) {
 			_ = json.Unmarshal(raw, &state)
 			if state.Fallback != (stage == "sendMessage") {
 				t.Fatal("retry forgot fallback stage")
+			}
+			if stage == "sendMessage" && (state.FallbackReason != "api_not_supported" || state.APIError == nil || state.APIError.Description != api.description) {
+				t.Fatalf("retry lost fallback diagnostics: %+v", state)
 			}
 			state.RetryAt = time.Now().Add(-time.Second) // Advance the persisted cooldown without a wall-clock wait.
 			if err := c.saveSend(context.Background(), key, state); err != nil {
@@ -529,6 +534,85 @@ func TestCommandAcknowledgementRetryDoesNotReplayTaskMutation(t *testing.T) {
 			}
 			if len(api.calls) != 3 || api.calls[2].method != "sendMessage" {
 				t.Fatal("acknowledgement was not retried exactly once")
+			}
+		})
+	}
+}
+
+func TestWidgetUnavailableExplainsFallbackAndSkipsNextProbe(t *testing.T) {
+	c, repo, api, conv := setup(t)
+	api.reject = 400
+	api.description = "Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED"
+	req := Request{Widget: domain.Widget{HTML: "<b>probe</b>", Caption: "Useful text"}}
+	for _, key := range []string{"first", "second", "first"} {
+		// Recreate the controller too: capability state belongs to the bot transport.
+		c = &Controller{Repo: repo, Transport: c.Transport}
+		result, err := c.Send(context.Background(), conv, key, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(result)
+		var got struct {
+			Fallback bool   `json:"fallback"`
+			Reason   string `json:"fallback_reason"`
+			APIError struct {
+				Description string `json:"description"`
+				Status      int    `json:"http_status"`
+			} `json:"api_error"`
+		}
+		_ = json.Unmarshal(raw, &got)
+		if !got.Fallback || got.Reason != "api_not_supported" || got.APIError.Status != 400 || got.APIError.Description != api.description {
+			t.Fatalf("missing fallback diagnostics: %s", raw)
+		}
+	}
+	probes, texts := 0, 0
+	for _, call := range api.calls {
+		if call.method == "sendWidget" {
+			probes++
+		}
+		if call.method == "sendMessage" {
+			texts++
+		}
+	}
+	if probes != 1 || texts != 2 {
+		t.Fatalf("calls: probes=%d texts=%d", probes, texts)
+	}
+}
+
+func TestAmbiguousWidgetRejectionNeverFallsBackOrCachesCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+	}{
+		{"proxy404", "Not found", 404},
+		{"http503code400", `{"ok":false,"error_code":400,"description":"INPUT_MEDIA_WIDGET_NOT_ALLOWED"}`, 503},
+		{"http503code429", `{"ok":false,"error_code":429,"parameters":{"retry_after":1}}`, 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probes, texts := 0, 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if path.Base(r.URL.Path) == "sendWidget" {
+					probes++
+					w.WriteHeader(tc.status)
+					_, _ = w.Write([]byte(tc.body))
+					return
+				}
+				texts++
+				_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":42}}`))
+			}))
+			defer server.Close()
+			tg, _ := integrations.NewTelegram(integrations.TelegramConfig{Token: "synthetic", BaseURL: server.URL, AllowedUserIDs: []int64{7}})
+			c := &Controller{Repo: storage.NewMemory(), Transport: tg}
+			conv := domain.Conversation{ID: "personal:7", OwnerID: 7, ChatID: 7, Private: true}
+			for _, key := range []string{"first", "first", "second"} {
+				_, err := c.Send(context.Background(), conv, key, Request{Widget: domain.Widget{HTML: "ok", Caption: "Useful text"}})
+				var retry *RateLimitError
+				if err == nil || errors.As(err, &retry) {
+					t.Fatalf("ambiguous delivery authorized fallback/retry: %v", err)
+				}
+			}
+			if probes != 2 || texts != 0 {
+				t.Fatalf("probes=%d texts=%d", probes, texts)
 			}
 		})
 	}

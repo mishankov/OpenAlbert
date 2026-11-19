@@ -6,12 +6,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"openalbert/apps/backend/internal/domain"
 )
@@ -165,5 +169,118 @@ func TestPollIncludesWidgetAndCallbackQueriesWithoutModelInput(t *testing.T) {
 	}
 	if !updates[0].WidgetQuery.DataType || !updates[1].WidgetQuery.Callback || updates[2].WidgetQuery.DataType || updates[3].WidgetQuery.DataType {
 		t.Fatalf("query scopes: %+v", updates)
+	}
+}
+
+func TestWidgetAvailabilityModesAndExpiry(t *testing.T) {
+	for _, mode := range []string{"auto", "on", "off"} {
+		t.Run(mode, func(t *testing.T) {
+			probes := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				probes++
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED"}`))
+			}))
+			defer server.Close()
+			tg, err := NewTelegram(TelegramConfig{Token: "synthetic", BaseURL: server.URL, AllowedUserIDs: []int64{7, 8}, Widgets: mode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 3; i++ {
+				if i == 2 {
+					tg.widgetMu.Lock()
+					tg.widgetUnavailableUntil = time.Now().Add(-time.Second)
+					tg.widgetMu.Unlock()
+				}
+				// The cache applies to all conversations served by this bot.
+				conv := domain.Conversation{ID: "personal:7", ChatID: 7, OwnerID: 7, Private: true}
+				if i == 1 {
+					conv.ID = "personal:8"
+					conv.ChatID = 8
+					conv.OwnerID = 8
+				}
+				_, err := tg.SendWidget(context.Background(), conv, domain.Widget{HTML: "ok", Caption: "ok"}, nil)
+				var rejected *WidgetFallbackError
+				if !errors.As(err, &rejected) {
+					t.Fatalf("missing fallback: %v", err)
+				}
+				wantReason := "api_not_supported"
+				if mode == "off" {
+					wantReason = "disabled"
+				}
+				if rejected.Reason != wantReason {
+					t.Fatal(rejected.Reason)
+				}
+				if mode != "off" && (rejected.APIError == nil || rejected.APIError.HTTPStatus != 400) {
+					t.Fatal("lost API diagnostic")
+				}
+			}
+			want := 2
+			if mode == "on" {
+				want = 3
+			}
+			if mode == "off" {
+				want = 0
+			}
+			if probes != want {
+				t.Fatalf("probes=%d want=%d", probes, want)
+			}
+		})
+	}
+	if _, err := NewTelegram(TelegramConfig{Widgets: "invalid", Token: "synthetic", AllowedUserIDs: []int64{7}}); err == nil {
+		t.Fatal("invalid widgets mode accepted")
+	}
+}
+
+func TestWidgetRejectionDiagnosticsAndCacheClassification(t *testing.T) {
+	for _, tc := range []struct {
+		description, reason  string
+		status, code, probes int
+	}{
+		{"Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED", "api_not_supported", 400, 400, 1},
+		{"Not Found", "api_not_supported", 404, 404, 1},
+		{"Bad Request: INPUT_MEDIA_WIDGET_HTML_INVALID", "validation", 400, 400, 2},
+		{"Bad Request: chat not found", "api_rejected", 200, 400, 2},
+	} {
+		t.Run(tc.reason+tc.description, func(t *testing.T) {
+			var logs bytes.Buffer
+			probes := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				probes++
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": tc.code, "description": tc.description})
+			}))
+			defer server.Close()
+			tg, _ := NewTelegram(TelegramConfig{Token: "synthetic", BaseURL: server.URL, AllowedUserIDs: []int64{7}, Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+			conv := domain.Conversation{ID: "personal:7", OwnerID: 7, ChatID: 7, Private: true}
+			for i := 0; i < 2; i++ {
+				_, err := tg.SendWidget(context.Background(), conv, domain.Widget{HTML: "<b>private-content</b>", ChatData: "private-state", Caption: "caption"}, nil)
+				var rejected *WidgetFallbackError
+				if !errors.As(err, &rejected) || rejected.Reason != tc.reason || rejected.APIError.HTTPStatus != tc.status || rejected.APIError.Code != tc.code || rejected.APIError.Description != tc.description {
+					t.Fatalf("diagnostic: %+v %v", rejected, err)
+				}
+			}
+			if probes != tc.probes {
+				t.Fatalf("probes=%d", probes)
+			}
+			var event map[string]any
+			if err := json.Unmarshal(bytes.Split(logs.Bytes(), []byte("\n"))[0], &event); err != nil {
+				t.Fatal(err)
+			}
+			if event["operation"] != "telegram.widget.send" || event["method"] != "sendWidget" || event["api_http_status"] != float64(tc.status) || event["api_description"] != tc.description || event["chat_id"] != float64(7) || event["html_bytes"] != float64(22) || event["html_compressed_bytes"] == nil {
+				t.Fatalf("missing diagnostic event: %v", event)
+			}
+			if strings.Contains(logs.String(), "private-content") || strings.Contains(logs.String(), "private-state") {
+				t.Fatal("payload leaked into logs")
+			}
+		})
+	}
+}
+
+func TestTelegramDiagnosticRedactsTokenAndBoundsText(t *testing.T) {
+	tg, _ := NewTelegram(TelegramConfig{Token: "synthetic-secret", AllowedUserIDs: []int64{7}})
+	description := tg.safeAPIDescription("https://api.telegram.org/botsynthetic-secret/sendWidget " + strings.Repeat("я", 1024))
+	if strings.Contains(description, "synthetic-secret") || len(description) > 1024 || !utf8.ValidString(description) {
+		t.Fatal("unsafe API diagnostic")
 	}
 }
