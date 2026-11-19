@@ -7,6 +7,7 @@ http
     const file = {
       "/inspect/": "index.html",
       "/inspect/app.js": "app.js",
+      "/inspect/prism-javascript.js": "prism-javascript.js",
       "/inspect/style.css": "style.css",
     }[pathname];
     if (!file) {

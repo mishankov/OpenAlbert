@@ -171,7 +171,13 @@ test("ссылка из лога открывает нужный вызов, Esc
   await expect(page.locator(".session-link")).toBeVisible();
 });
 
-test("вложенный вызов Codemode показывает результат и открывает попытку с клавиатуры", async ({ page }) => {
+test("Codemode подсвечивает исходный код и открывает вложенный вызов с клавиатуры", async ({ page }) => {
+  const code = [
+    '  const query = "Лейкерс";',
+    '  const html = \'<img id="codemode-fixture-html">\';',
+    "  const tasks = await tools.task_find({ query });",
+    "  return { count: tasks.length };",
+  ].join("\n");
   const child = {
     ...detail.messages[1],
     seq: 3,
@@ -196,17 +202,37 @@ test("вложенный вызов Codemode показывает результ
         ...detail.messages[1],
         message: {
           role: "assistant",
-          tool_calls: [{ id: "script", name: "codemode", arguments: { code: "return await tools.task_find({})" } }],
+          tool_calls: [{ id: "script", name: "codemode", arguments: { code } }],
         },
       },
       child,
       childResult,
-      { seq: 5, key: "turn/tool/0/script", message: { role: "tool", tool_call_id: "script", content: "[]" } },
+      {
+        seq: 5,
+        key: "turn/tool/0/script",
+        message: { role: "tool", tool_call_id: "script", content: '{"output":{"count":0}}' },
+      },
     ],
   });
   await openSession(page);
+  const script = page.locator("#event-call-2-script");
+  await script.locator("summary").press("Enter");
+  await expect(script.getByRole("heading", { name: "JavaScript" })).toBeVisible();
+  const source = script.locator("pre.code-source > code.language-javascript");
+  await expect.poll(() => source.textContent()).toBe(code);
+  await expect(source.locator("span.token.keyword").first()).toHaveText("const");
+  await expect(source.locator("span.token.string").last()).toHaveText("'<img id=\"codemode-fixture-html\">'");
+  await expect(page.locator("#codemode-fixture-html")).toHaveCount(0);
+  await expect(script.locator(".tool-payloads")).toContainText('"count": 0');
+  const rawCall = script.getByRole("button", { name: "Запись вызова" });
+  await rawCall.press("Enter");
+  await expect(page.getByRole("dialog")).toContainText('"code"');
+  await page.keyboard.press("Escape");
+  await expect(rawCall).toBeFocused();
+
   const event = page.locator("#event-call-3-c1");
   await event.locator("summary").press("Enter");
+  await expect(event.locator(".tool-payloads")).toContainText('"query"');
   await expect(event.locator(".tool-payloads")).toContainText('"tasks"');
   await expect(event.getByRole("button", { name: "Контекст", exact: true })).toBeVisible();
   const attempt = event.getByRole("button", { name: /^Попытка 1/ });
