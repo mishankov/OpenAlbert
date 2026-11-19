@@ -221,6 +221,11 @@ type CommandReplyError struct{ Cause error }
 func (e *CommandReplyError) Error() string { return e.Cause.Error() }
 func (e *CommandReplyError) Unwrap() error { return e.Cause }
 
+var errCommandReplyUnknown = &integrations.TelegramDeliveryError{
+	Cause:   errors.New("widget command acknowledgement expired before its result was recorded"),
+	Unknown: true,
+}
+
 func commandReplyKey(in domain.Incoming) string {
 	return "widget-command-reply/" + in.Conversation.ID + "/" + in.ID
 }
@@ -252,27 +257,57 @@ func (c *Controller) reply(ctx context.Context, in domain.Incoming, text string)
 	}
 	key := "widget-command-send/" + in.Conversation.ID + "/" + in.ID
 	state, claim, err := c.deliveryState(ctx, key)
+	if errors.Is(err, ErrDeliveryPending) {
+		// A sending marker from before claims had deadlines cannot be retried.
+		return errCommandReplyUnknown
+	}
 	if err != nil {
 		return err
 	}
 	if state.MessageID > 0 {
 		return nil
 	}
-	claimed, err = c.Repo.ClaimCheckpoint(ctx, claim, json.RawMessage(`true`))
+	// Bound the send and result write well within the lifetime of the claim.
+	// Storing the deadline in the claim also covers interruption before HTTP.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	raw, _ = json.Marshal(time.Now().Add(time.Minute))
+	claimed, err = c.Repo.ClaimCheckpoint(ctx, claim, raw)
 	if err != nil {
 		return err
 	}
 	if !claimed {
-		return ErrDeliveryPending
-	}
-	if err := c.saveSend(ctx, key, sendState{}); err != nil {
-		return err
+		return c.observeCommandReply(ctx, key, claim)
 	}
 	id, err := c.Transport.SendWidgetFallback(ctx, in.Conversation, text, nil)
 	if err != nil {
 		return c.sendResultError(ctx, key, Result{Fallback: true}, err)
 	}
 	return c.saveSend(ctx, key, sendState{Result: Result{MessageID: id, Fallback: true}})
+}
+
+func (c *Controller) observeCommandReply(ctx context.Context, key, claim string) error {
+	raw, _, err := c.Repo.LoadCheckpoint(ctx, claim)
+	if err != nil {
+		return err
+	}
+	var deadline time.Time
+	if string(raw) != "true" && json.Unmarshal(raw, &deadline) != nil {
+		return errors.New("invalid widget command acknowledgement claim")
+	}
+	if time.Now().Before(deadline) {
+		return ErrDeliveryPending
+	}
+	// A result may have landed between the original state read and the claim
+	// check. Honor it before deciding that delivery is unknown.
+	state, currentClaim, err := c.deliveryState(ctx, key)
+	if err != nil || state.MessageID > 0 {
+		return err
+	}
+	if currentClaim != claim {
+		return ErrDeliveryPending
+	}
+	return errCommandReplyUnknown
 }
 
 func (c *Controller) saveSend(ctx context.Context, key string, state sendState) error {
