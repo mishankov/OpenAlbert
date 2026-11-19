@@ -17,6 +17,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +28,8 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"openalbert/apps/backend/internal/domain"
 )
+
+var hostIDPattern = regexp.MustCompile(`^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 type oauthFixture struct {
 	c            *Client
@@ -108,6 +112,9 @@ func (f *oauthFixture) begin(t *testing.T) string {
 	}
 	u, _ := url.Parse(link)
 	q := u.Query()
+	if hostID := q.Get("ext_agent_host_id"); !hostIDPattern.MatchString(hostID) {
+		t.Fatalf("expected a UUIDv4 URN in the authorize URL, got %q", hostID)
+	}
 	f.nonce = q.Get("nonce")
 	if q.Get("agent_name_hint") != "OpenAlbert" && f.c.creds.ClientID == "" {
 		t.Fatal("missing app name")
@@ -186,6 +193,62 @@ func TestOAuthInferenceAndRestart(t *testing.T) {
 		t.Fatal("did not reuse registration")
 	}
 }
+func TestLegacyHostIDMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	previous := credentials{
+		HostID:       "openalbert-LEGACYHOST",
+		ClientID:     "issued-client",
+		Subject:      "owner",
+		IDToken:      "id-token",
+		AccessToken:  "access-token",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Date(2026, time.November, 19, 18, 0, 0, 0, time.UTC),
+		Scopes:       []string{"openid", directScope},
+		Model:        "saved-model",
+	}
+	data, err := json.Marshal(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := New(path, "default-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	link, err := c.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostID := u.Query().Get("ext_agent_host_id")
+	if !hostIDPattern.MatchString(hostID) || u.Query().Get("client_id") != previous.ClientID {
+		t.Fatal("authorize URL must use the migrated host ID and the existing client ID")
+	}
+
+	previous.HostID = hostID
+	if !reflect.DeepEqual(c.creds, previous) {
+		t.Fatal("host ID migration changed the saved connection")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := New(path, "default-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if !reflect.DeepEqual(restarted.creds, previous) {
+		t.Fatal("migrated connection did not survive restart")
+	}
+}
+
 func TestIDTokenValidationAndNoScope(t *testing.T) {
 	for _, kind := range []string{"signature", "issuer", "audience", "expiry", "nonce", "subject"} {
 		t.Run(kind, func(t *testing.T) {
