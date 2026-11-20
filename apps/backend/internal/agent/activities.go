@@ -41,14 +41,15 @@ type Activities struct {
 	Backups            *backup.Reader
 }
 type RunInput struct {
-	Key            string
-	SessionID      string
-	ConversationID string
-	IncomingIDs    []string
-	TaskID         string
-	Initiative     bool
-	StartedAt      time.Time
-	BackupEvent    *backup.Event `json:",omitempty"`
+	Key                string
+	SessionID          string
+	ConversationID     string
+	IncomingIDs        []string
+	OriginalIncomingID string `json:",omitempty"`
+	TaskID             string
+	Initiative         bool
+	StartedAt          time.Time
+	BackupEvent        *backup.Event `json:",omitempty"`
 }
 type Turn struct {
 	Input        RunInput
@@ -140,7 +141,7 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 		return
 	}
 	accepted := 0
-	for index, id := range in.IncomingIDs {
+	for _, id := range in.IncomingIDs {
 		if _, done, e := a.Repo.LoadCheckpoint(ctx, "incoming-done/"+id); e != nil {
 			return out, e
 		} else if done {
@@ -215,10 +216,10 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 				}
 			}
 		}
-		// Only the first input is a durable turn boundary. A steering follow-up
-		// must not split a turn whose original request predates turn markers.
+		// Older queued steering activities carry only follow-up IDs. Without an
+		// explicit original input, none can safely establish a durable boundary.
 		turnID := ""
-		if index == 0 {
+		if id == in.OriginalIncomingID {
 			turnID = in.Key
 		}
 		if e = a.Repo.AppendMessage(ctx, in.SessionID, "incoming/"+id, domain.Message{TurnID: turnID, SourceMessageID: msg.ID, AuthorName: msg.AuthorName, AuthorUsername: msg.AuthorUsername, AuthorID: msg.Conversation.OwnerID, Role: "user", Content: text, Images: images}); e != nil {

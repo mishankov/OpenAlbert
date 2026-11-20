@@ -239,6 +239,9 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			allIDs := append(append([]string{}, turn.Input.IncomingIDs...), newIDs...)
 			turn.Input.IncomingIDs = allIDs
 			steerInput.IncomingIDs = allIDs
+			if steerInput.OriginalIncomingID == "" && len(allIDs) > 0 {
+				steerInput.OriginalIncomingID = allIDs[0]
+			}
 			updated, err := prepareTurn(runctx, steerInput)
 			if err != nil {
 				return err
@@ -325,6 +328,9 @@ func prepareTurn(ctx workflow.Context, in agent.RunInput) (turn agent.Turn, err 
 type turnSteerer func(*agent.Turn, func() error) error
 
 func runTurn(ctx workflow.Context, in agent.RunInput, maxSteps int, steer ...turnSteerer) (out agent.Turn, err error) {
+	if in.OriginalIncomingID == "" && len(in.IncomingIDs) > 0 {
+		in.OriginalIncomingID = in.IncomingIDs[0]
+	}
 	if workflow.GetVersion(ctx, "turn-observability-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
 		in.StartedAt = workflow.Now(ctx)
 	}

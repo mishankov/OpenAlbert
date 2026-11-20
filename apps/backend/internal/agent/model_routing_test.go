@@ -139,7 +139,7 @@ func TestPrepareMarksOriginalRequestAndSyntheticBackgroundInstructions(t *testin
 	for _, background := range []bool{false, true} {
 		a, repo, _, conv := fixture(t)
 		ctx := context.Background()
-		in := RunInput{Key: "marked", SessionID: "marked-session", ConversationID: conv.ID, IncomingIDs: []string{"seed"}, Initiative: background}
+		in := RunInput{Key: "marked", SessionID: "marked-session", ConversationID: conv.ID, IncomingIDs: []string{"seed"}, OriginalIncomingID: "seed", Initiative: background}
 		turn, err := a.Prepare(ctx, in)
 		if err != nil {
 			t.Fatal(err)
@@ -298,7 +298,7 @@ func TestTextOnlySessionRecoversAfterUnsupportedImage(t *testing.T) {
 	if _, err = repo.AcceptIncoming(ctx, domain.Incoming{ID: "text", Conversation: conv, Text: "Text question"}, 2); err != nil {
 		t.Fatal(err)
 	}
-	turn, err = a.Prepare(ctx, RunInput{Key: "text", SessionID: "images", ConversationID: conv.ID, IncomingIDs: []string{"text"}})
+	turn, err = a.Prepare(ctx, RunInput{Key: "text", SessionID: "images", ConversationID: conv.ID, IncomingIDs: []string{"text"}, OriginalIncomingID: "text"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,5 +473,83 @@ func TestUnmarkedHistoricalImageBatchLeavesNoDependentText(t *testing.T) {
 		if len(sent) != 4 || sent[1].Content != "Earlier marked text" || sent[3].Content != "Current text" {
 			t.Fatalf("legacy block eviction lost independent text: %d messages", len(sent))
 		}
+	}
+}
+
+func TestQueuedLegacySteeringPrepareDoesNotInventTurnBoundary(t *testing.T) {
+	for _, size := range []int{600000, 800000} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			a, repo, _, conv := fixture(t)
+			ctx := context.Background()
+			const session = "queued-steering"
+			if err := repo.StartSession(ctx, domain.Session{ID: session, ConversationID: conv.ID}); err != nil {
+				t.Fatal(err)
+			}
+			legacy := []domain.Message{
+				{Role: "user", SourceMessageID: "original", Content: strings.Repeat("x", size)},
+				{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "read", Name: "web_read", Arguments: json.RawMessage(`{}`)}}},
+				{Role: "tool", ToolCallID: "read", Content: "Original tool evidence"},
+			}
+			for i, m := range legacy {
+				if err := repo.AppendMessage(ctx, session, fmt.Sprintf("old-%d", i), m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i, id := range []string{"followup", "next"} {
+				if _, err := repo.AcceptIncoming(ctx, domain.Incoming{ID: id, Conversation: conv, Text: id}, int64(10+i)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// This is the old queued activity shape: only new follow-up IDs and
+			// no explicit original ID, even though the activity has a known key.
+			turn, err := a.Prepare(ctx, RunInput{Key: "spanning", SessionID: session, ConversationID: conv.ID, IncomingIDs: []string{"followup"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if size > 750000 {
+				if len(turn.Messages) != 1 || !turn.Messages[0].ContextOverflow {
+					t.Fatal("ambiguous queued payload discarded evidence instead of failing explicitly")
+				}
+			} else {
+				if domain.ModelTurnStart(turn.Messages, "spanning") != 1 || len(turn.Messages) != 5 || len(turn.Messages[1].Content) != size {
+					t.Fatal("old follow-up-only payload failed to protect its ambiguous original")
+				}
+			}
+			stored, err := repo.Messages(ctx, session)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range stored {
+				if m.TurnID != "" {
+					t.Fatal("queued legacy follow-up invented durable boundary")
+				}
+			}
+			if err := repo.AppendMessage(ctx, session, "old-reply", domain.Message{Role: "assistant", Content: "Dependent follow-up reply"}); err != nil {
+				t.Fatal(err)
+			}
+			var sent []domain.Message
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Messages []domain.Message `json:"messages"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				sent = body.Messages
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+			}))
+			defer server.Close()
+			a.Model = httpRoutingModel(t, server.URL, 128000, false)
+			next, err := a.Prepare(ctx, RunInput{Key: "independent", SessionID: session, ConversationID: conv.ID, IncomingIDs: []string{"next"}, OriginalIncomingID: "next"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.ModelCall(ctx, ModelInput{Turn: next}); err != nil {
+				t.Fatal(err)
+			}
+			if len(sent) != 2 || sent[1].Content != "next" {
+				t.Fatalf("next independent turn received a partial legacy turn: %d messages", len(sent))
+			}
+		})
 	}
 }
