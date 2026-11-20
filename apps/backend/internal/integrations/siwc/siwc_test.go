@@ -41,6 +41,7 @@ type oauthFixture struct {
 	scope          string
 	refreshError   string
 	responseStream string
+	responseStatus int
 }
 
 func newFixture(t *testing.T) *oauthFixture {
@@ -99,6 +100,12 @@ func (f *oauthFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		io.WriteString(w, `{"models":[{"slug":"test-model","display_name":"Test model","visibility":"list"},{"slug":"other-model","display_name":"Other model","visibility":"list"},{"slug":"hidden","display_name":"Hidden","visibility":"hidden"}]}`)
 	case "/responses":
+		if f.responseStatus != 0 {
+			w.Header().Set("x-request-id", "rejected-request")
+			w.WriteHeader(f.responseStatus)
+			io.WriteString(w, `{"error":{"code":"rejected","message":"synthetic rejection"}}`)
+			return
+		}
 		var request responseRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
@@ -518,6 +525,21 @@ func TestStreamUsagePresence(t *testing.T) {
 			got, err := readStream(strings.NewReader("data: " + event + "\n\n"))
 			if err != nil || got.Usage.TokenUsageKnown != tc.known || got.InputTokens != tc.input || got.OutputTokens != tc.output {
 				t.Fatalf("usage presence lost: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestHTTPRejectionRetainsRequestedModelWithUnknownUsage(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusTooManyRequests} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			f := newFixture(t)
+			f.responseStatus = status
+			f.login(t)
+			out, err := f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "Hello"}}, nil)
+			var api *APIError
+			if !errors.As(err, &api) || api.Status != status || api.RequestID != "rejected-request" || out.Model != "test-model" || out.Usage.TokenUsageKnown || out.InputTokens != 0 || out.OutputTokens != 0 || !reflect.DeepEqual(out.Message, domain.Message{}) {
+				t.Fatalf("HTTP rejection lost request identity or invented usage/output: %+v %v", out, err)
 			}
 		})
 	}

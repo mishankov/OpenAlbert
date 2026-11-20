@@ -69,7 +69,7 @@ func (r legacySteeringRepo) AppendMessage(ctx context.Context, session, key stri
 			return err
 		}
 	}
-	if m.SourceMessageID != "steer" {
+	if m.SourceMessageID == "first" {
 		m.TurnID = ""
 	}
 	return r.Repository.AppendMessage(ctx, session, key, m)
@@ -81,6 +81,9 @@ func TestSteeringAcrossDeploymentProtectsOriginalSourceAndEvidence(t *testing.T)
 	if _, err := repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "steer", Conversation: conv, Text: "Only official sources"}, 2); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "next", Conversation: conv, Text: "Next independent request"}, 3); err != nil {
+		t.Fatal(err)
+	}
 	model := &scriptedModel{run: func(n int, messages []domain.Message) (domain.Message, error) {
 		if n == 0 {
 			return calls(call("read", "web_read", map[string]string{"url": "https://example.com"})), nil
@@ -90,6 +93,12 @@ func TestSteeringAcrossDeploymentProtectsOriginalSourceAndEvidence(t *testing.T)
 			original = original || (m.SourceMessageID == "first" && strings.Contains(m.Content, "morning meetings"))
 			evidence = evidence || (m.Role == "tool" && strings.Contains(m.Content, "Official release page"))
 			followup = followup || m.SourceMessageID == "steer"
+		}
+		if n == 2 {
+			if original || evidence || followup {
+				return domain.Message{}, fmt.Errorf("next turn retained a dependent part of a deployment-spanning turn")
+			}
+			return reply("Next request answered."), nil
 		}
 		if !original || !evidence || !followup {
 			return domain.Message{}, fmt.Errorf("mixed-marker steering lost current inputs: original=%v evidence=%v followup=%v", original, evidence, followup)
@@ -109,10 +118,17 @@ func TestSteeringAcrossDeploymentProtectsOriginalSourceAndEvidence(t *testing.T)
 			env.SignalWorkflow(MessageSignal, Event{ID: "steer"})
 		}
 	})
+	nextSignalled := false
+	env.SetOnActivityCompletedListener(func(info *activity.Info, _ converter.EncodedValue, err error) {
+		if info.ActivityType.Name == "Finish" && err == nil && !nextSignalled {
+			nextSignalled = true
+			env.SignalWorkflow(MessageSignal, Event{ID: "next"})
+		}
+	})
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
 	requireWorkflowOK(t, env)
-	if !signalled || model.count() != 3 {
+	if !signalled || !nextSignalled || model.count() != 5 {
 		t.Fatalf("steering didn't reuse active turn: signal=%v calls=%d", signalled, model.count())
 	}
 }

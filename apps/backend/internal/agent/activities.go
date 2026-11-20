@@ -140,7 +140,7 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 		return
 	}
 	accepted := 0
-	for _, id := range in.IncomingIDs {
+	for index, id := range in.IncomingIDs {
 		if _, done, e := a.Repo.LoadCheckpoint(ctx, "incoming-done/"+id); e != nil {
 			return out, e
 		} else if done {
@@ -215,7 +215,13 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 				}
 			}
 		}
-		if e = a.Repo.AppendMessage(ctx, in.SessionID, "incoming/"+id, domain.Message{TurnID: in.Key, SourceMessageID: msg.ID, AuthorName: msg.AuthorName, AuthorUsername: msg.AuthorUsername, AuthorID: msg.Conversation.OwnerID, Role: "user", Content: text, Images: images}); e != nil {
+		// Only the first input is a durable turn boundary. A steering follow-up
+		// must not split a turn whose original request predates turn markers.
+		turnID := ""
+		if index == 0 {
+			turnID = in.Key
+		}
+		if e = a.Repo.AppendMessage(ctx, in.SessionID, "incoming/"+id, domain.Message{TurnID: turnID, SourceMessageID: msg.ID, AuthorName: msg.AuthorName, AuthorUsername: msg.AuthorUsername, AuthorID: msg.Conversation.OwnerID, Role: "user", Content: text, Images: images}); e != nil {
 			return out, e
 		}
 	}

@@ -113,7 +113,7 @@ func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools 
 	req.Header.Set("User-Agent", "OpenAlbert/0.1")
 	resp, err := c.do(req)
 	if err != nil {
-		return domain.Completion{}, err
+		return domain.Completion{Model: body.Model}, err
 	}
 	defer resp.Body.Close()
 	result, err := readStream(resp.Body)
