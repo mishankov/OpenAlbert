@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"openalbert/apps/backend/internal/domain"
 	"strings"
 	"testing"
+
+	"openalbert/apps/backend/internal/domain"
+	"openalbert/apps/backend/internal/telemetry"
 )
 
 type tracedRepo struct {
@@ -22,11 +25,65 @@ func (r *tracedRepo) SaveTrace(_ context.Context, tr domain.Trace) error {
 	}
 	return nil
 }
+
+type namedTestModel string
+
+func (m namedTestModel) Complete(context.Context, []domain.Message, []domain.Tool) (domain.Completion, error) {
+	return domain.Completion{Model: string(m), Message: domain.Message{Role: "assistant", Content: "reply"}}, nil
+}
+
+func TestModelAttributionInLogsAndTraces(t *testing.T) {
+	ctx := context.Background()
+	a, repo, _, conv := fixture(t)
+	capture := &tracedRepo{Repository: repo}
+	a.Repo = capture
+	var logs bytes.Buffer
+	a.Logger = telemetry.New(&logs)
+	in := ModelInput{Turn: Turn{Conversation: conv, Input: RunInput{Key: "trace-test", SessionID: "session", ConversationID: conv.ID}}}
+
+	a.Model = namedTestModel("gpt-6.1-terra")
+	if _, err := a.ModelCall(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	a.Model = namedTestModel("another-chatgpt-model")
+	if _, err := a.ModelCall(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.analysisModelCall(ctx, domain.Session{ID: "session", ConversationID: conv.ID}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(capture.traces) != 4 {
+		t.Fatalf("expected two model attempts and no trace for the cache hit: %+v", capture.traces)
+	}
+	for i, want := range []string{"gpt-6.1-terra", "another-chatgpt-model"} {
+		if tr := capture.traces[2*i+1]; tr.Status != "completed" || tr.Name != want {
+			t.Errorf("trace has model %q and status %q, want model %q and completed status", tr.Name, tr.Status, want)
+		}
+	}
+	dec := json.NewDecoder(&logs)
+	for i, want := range []string{"gpt-6.1-terra", "gpt-6.1-terra", "another-chatgpt-model"} {
+		var event struct {
+			Operation string `json:"operation"`
+			Model     string `json:"model"`
+			Cached    bool   `json:"cached"`
+		}
+		if err := dec.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Operation != "llm.complete" || event.Model != want || event.Cached != (i == 1) {
+			t.Errorf("event %d = %+v, want llm.complete with model %s and cached=%t", i, event, want, i == 1)
+		}
+	}
+	if dec.More() {
+		t.Fatal("unexpected extra completion event")
+	}
+}
+
 func TestInspectionTraceCapturesContextAndResultWithoutImageBytes(t *testing.T) {
 	a, repo, _, conv := fixture(t)
 	rec := &tracedRepo{Repository: repo}
 	a.Repo = rec
-	a.ModelName = "configured-model"
 	a.Model = &testModel{respond: func([]domain.Message) (domain.Message, error) {
 		return domain.Message{Role: "assistant", Content: "internal result", Reasoning: "provider explanation"}, nil
 	}}

@@ -106,6 +106,9 @@ func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools 
 		api.RequestID = resp.Header.Get("x-request-id")
 		api.Status = resp.StatusCode
 	}
+	if err == nil {
+		result.Model = body.Model
+	}
 	return result, err
 }
 

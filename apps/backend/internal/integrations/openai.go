@@ -176,7 +176,7 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 	if m.Content == "" && len(m.ToolCalls) == 0 && choice.FinishReason != "stop" {
 		return domain.Completion{}, errors.New("model returned empty response")
 	}
-	return domain.Completion{Message: m, InputTokens: response.Usage.Prompt, OutputTokens: response.Usage.Completion}, nil
+	return domain.Completion{Model: o.config.Model, Message: m, InputTokens: response.Usage.Prompt, OutputTokens: response.Usage.Completion}, nil
 }
 
 var _ domain.Model = (*OpenAI)(nil)

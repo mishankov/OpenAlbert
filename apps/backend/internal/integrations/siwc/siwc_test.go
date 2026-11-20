@@ -96,10 +96,16 @@ func (f *oauthFixture) serve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "auth", 401)
 			return
 		}
-		io.WriteString(w, `{"models":[{"slug":"test-model","display_name":"Test model","visibility":"list"},{"slug":"hidden","display_name":"Hidden","visibility":"hidden"}]}`)
+		io.WriteString(w, `{"models":[{"slug":"test-model","display_name":"Test model","visibility":"list"},{"slug":"other-model","display_name":"Other model","visibility":"list"},{"slug":"hidden","display_name":"Hidden","visibility":"hidden"}]}`)
 	case "/responses":
+		var request responseRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		model, _ := json.Marshal(request.Model)
 		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\"}]}],\"usage\":{\"input_tokens\":7,\"output_tokens\":1}}}\n\n")
+		fmt.Fprintf(w, `data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}],"usage":{"input_tokens":7,"output_tokens":1}}}`+"\n\n", model)
 	default:
 		http.NotFound(w, r)
 	}
@@ -162,18 +168,22 @@ func TestOAuthInferenceAndRestart(t *testing.T) {
 		t.Fatal("second process can rotate same store")
 	}
 	result, err := f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "Hello"}}, nil)
-	if err != nil || result.Message.Content != "Hello" || result.InputTokens != 7 {
+	if err != nil || result.Message.Content != "test-model" || result.Model != "test-model" || result.InputTokens != 7 {
 		t.Fatalf("inference: %+v %v", result, err)
 	}
 	models, err := f.c.Models(context.Background())
-	if err != nil || len(models) != 1 || models[0].DisplayName != "Test model" {
+	if err != nil || len(models) != 2 || models[0].DisplayName != "Test model" {
 		t.Fatalf("catalog %+v %v", models, err)
 	}
 	if err = f.c.SetModel(context.Background(), "hidden"); err == nil {
 		t.Fatal("selected hidden model")
 	}
-	if err = f.c.SetModel(context.Background(), "test-model"); err != nil {
+	if err = f.c.SetModel(context.Background(), "other-model"); err != nil {
 		t.Fatal(err)
+	}
+	result, err = f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "Hello"}}, nil)
+	if err != nil || result.Message.Content != "other-model" || result.Model != "other-model" {
+		t.Fatalf("inference after model switch: %+v %v", result, err)
 	}
 	f.c.Close()
 	restarted, err := New(f.c.path, "ignored")
@@ -181,7 +191,7 @@ func TestOAuthInferenceAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	if !restarted.Status().PlanEnabled || restarted.creds.HostID != f.c.creds.HostID || restarted.creds.Model != "test-model" {
+	if !restarted.Status().PlanEnabled || restarted.creds.HostID != f.c.creds.HostID || restarted.creds.Model != "other-model" {
 		t.Fatal("session did not survive restart")
 	}
 	link, err := restarted.Begin()

@@ -35,7 +35,6 @@ type Activities struct {
 	Logs               domain.LogReader
 	Messenger          domain.Messenger
 	Logger             *slog.Logger
-	ModelName          string
 	InspectorPublicURL string
 	MinTaskInterval    time.Duration
 	TaskChanged        func(context.Context, string, string) error
@@ -77,6 +76,7 @@ type ModelOutput struct {
 	Message      domain.Message
 	InputTokens  int
 	OutputTokens int
+	Model        string `json:",omitempty"`
 }
 type FinishInput struct {
 	Turn        Turn
@@ -330,8 +330,10 @@ func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOut
 	ev.Set("session_id", in.Turn.Input.SessionID)
 	ev.Set("task_id", in.Turn.Input.TaskID)
 	ev.Set("step", in.Step)
-	ev.Set("model", a.ModelName)
 	defer func() {
+		if out.Model != "" {
+			ev.Set("model", out.Model)
+		}
 		ev.Set("input_tokens", out.InputTokens)
 		ev.Set("output_tokens", out.OutputTokens)
 		ev.Set("tool_call_count", len(out.Message.ToolCalls))
@@ -372,13 +374,13 @@ func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOut
 			in.Turn.Messages = append([]domain.Message{{Role: "system", Content: status}}, in.Turn.Messages...)
 		}
 	}
-	finishTrace := a.startTrace(ctx, domain.Trace{SessionID: in.Turn.Input.SessionID, TurnID: in.Turn.Input.Key, Trigger: trigger(in.Turn.Input.TaskID, in.Turn.Input.Initiative), TaskID: in.Turn.Input.TaskID, Kind: "model", Name: a.ModelName, Step: in.Step}, map[string]any{"messages": traceMessages(in.Turn.Messages), "tools": tools}, ev)
-	defer func() { finishTrace(out, err) }()
+	finishTrace := a.startTrace(ctx, domain.Trace{SessionID: in.Turn.Input.SessionID, TurnID: in.Turn.Input.Key, Trigger: trigger(in.Turn.Input.TaskID, in.Turn.Input.Initiative), TaskID: in.Turn.Input.TaskID, Kind: "model", Step: in.Step}, map[string]any{"messages": traceMessages(in.Turn.Messages), "tools": tools}, ev)
+	defer func() { finishTrace(out, err, out.Model) }()
 	completion, err := a.Model.Complete(domain.WithModelSession(ctx, ID(in.Turn.Input.ConversationID)), in.Turn.Messages, tools)
 	if err != nil {
 		return out, modelCallError(err)
 	}
-	out = ModelOutput{Message: completion.Message, InputTokens: completion.InputTokens, OutputTokens: completion.OutputTokens}
+	out = ModelOutput{Message: completion.Message, InputTokens: completion.InputTokens, OutputTokens: completion.OutputTokens, Model: completion.Model}
 	if out.Message.Role == "" {
 		out.Message.Role = "assistant"
 	}
@@ -460,7 +462,7 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 		return string(raw), nil
 	}
 	finishTrace := a.startTrace(ctx, domain.Trace{SessionID: in.SessionID, TurnID: in.RunKey, Trigger: in.TriggerName(), TaskID: in.TaskID, Kind: "tool", Name: in.Call.Name, Step: in.Step, CallID: in.Call.ID}, in.Call.Arguments, ev)
-	defer func() { finishTrace(out, err) }()
+	defer func() { finishTrace(out, err, "") }()
 	if in.ParentToolCallID != "" && codemodeNeedsClaim(in.Call.Name) {
 		claimed, claimErr := a.Repo.ClaimCheckpoint(ctx, key+"/started", json.RawMessage(`true`))
 		if claimErr != nil {

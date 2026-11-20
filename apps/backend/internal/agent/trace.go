@@ -16,7 +16,7 @@ import (
 
 // Inspection must not change whether a side effect succeeds. Failed trace writes
 // are operational warnings; the durable tool checkpoints remain authoritative.
-func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any, event *telemetry.Event) func(any, error) {
+func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any, event *telemetry.Event) func(output any, err error, name string) {
 	tr.Attempt = 1
 	if activity.IsActivity(ctx) {
 		tr.Attempt = int(activity.GetInfo(ctx).Attempt)
@@ -43,7 +43,10 @@ func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any,
 		}
 	}
 	save()
-	return func(output any, err error) {
+	return func(output any, err error, name string) {
+		if name != "" {
+			tr.Name = name
+		}
 		now := time.Now().UTC()
 		tr.EndedAt = &now
 		tr.Status = "completed"
@@ -82,10 +85,12 @@ func (a *Activities) analysisModelCall(ctx context.Context, session domain.Sessi
 	ctx = telemetry.WithFields(ctx, map[string]any{"session_id": session.ID, "turn_id": "analysis/" + session.ID, "conversation_id": session.ConversationID, "trigger": "analysis"})
 	event := a.event(ctx, "llm.complete")
 	ctx = event.Context()
-	event.Set("model", a.ModelName)
-	finish := a.startTrace(ctx, domain.Trace{SessionID: session.ID, TurnID: "analysis/" + session.ID, Trigger: "analysis", Kind: "analysis", Name: a.ModelName}, map[string]any{"messages": traceMessages(messages)}, event)
+	finish := a.startTrace(ctx, domain.Trace{SessionID: session.ID, TurnID: "analysis/" + session.ID, Trigger: "analysis", Kind: "analysis"}, map[string]any{"messages": traceMessages(messages)}, event)
 	defer func() {
-		finish(map[string]any{"Message": out.Message, "InputTokens": out.InputTokens, "OutputTokens": out.OutputTokens}, err)
+		finish(map[string]any{"Message": out.Message, "InputTokens": out.InputTokens, "OutputTokens": out.OutputTokens}, err, out.Model)
+		if out.Model != "" {
+			event.Set("model", out.Model)
+		}
 		event.Set("input_tokens", out.InputTokens)
 		event.Set("output_tokens", out.OutputTokens)
 		event.End(err)

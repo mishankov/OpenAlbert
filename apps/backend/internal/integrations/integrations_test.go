@@ -47,7 +47,7 @@ func TestOpenAIChatContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Message.ToolCalls) != 1 || out.Message.ToolCalls[0].Name != "web_search" || out.InputTokens != 123 || out.Message.Reasoning != "Returned provider reasoning" {
+	if out.Model != "chosen-model" || len(out.Message.ToolCalls) != 1 || out.Message.ToolCalls[0].Name != "web_search" || out.InputTokens != 123 || out.Message.Reasoning != "Returned provider reasoning" {
 		t.Fatalf("unexpected completion %+v", out)
 	}
 }
