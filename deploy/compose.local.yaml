@@ -128,7 +128,7 @@ services:
   temporal:
     labels:
       compose_service: temporal
-    image: temporalio/auto-setup:1.29.1
+    image: temporalio/auto-setup:1.29.3
     restart: unless-stopped
     depends_on:
       postgres:
@@ -162,7 +162,7 @@ services:
   temporal-ui:
     labels:
       compose_service: temporal-ui
-    image: temporalio/ui:2.54.1
+    image: temporalio/ui:2.58.1
     restart: unless-stopped
     depends_on:
       temporal:
