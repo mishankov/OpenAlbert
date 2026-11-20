@@ -672,6 +672,62 @@ func TestHTTPRejectionRetainsRequestedModelWithUnknownUsage(t *testing.T) {
 	}
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
+
+func TestProfileResponsesUseConfiguredDeadlineWithoutChangingAccountTimeout(t *testing.T) {
+	f := newFixture(t)
+	f.login(t)
+	var remaining time.Duration
+	f.c.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			t.Error("request reached transport without a deadline")
+		}
+		remaining = time.Until(deadline)
+		return http.DefaultTransport.RoundTrip(req)
+	})
+	for _, test := range []struct {
+		name string
+		want time.Duration
+		call func() error
+	}{
+		{"long profile", 150 * time.Second, func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+			defer cancel()
+			_, err := f.c.CompleteForModel(ctx, "profile-model", []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			return err
+		}},
+		{"short profile", 5 * time.Second, func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := f.c.CompleteForModel(ctx, "profile-model", []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			return err
+		}},
+		{"legacy completion", 120 * time.Second, func() error {
+			_, err := f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			return err
+		}},
+		{"account catalog", 120 * time.Second, func() error {
+			_, err := f.c.Models(context.Background())
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); err != nil {
+				t.Fatal(err)
+			}
+			if remaining > test.want || remaining < test.want-time.Second {
+				t.Fatalf("transport deadline remaining %s, want %s", remaining, test.want)
+			}
+			if f.c.http.Timeout != 120*time.Second {
+				t.Fatal("profile changed shared account HTTP timeout")
+			}
+		})
+	}
+}
+
 func TestProfileDeadlineIncludesWaitingForCredentialRefresh(t *testing.T) {
 	f := newFixture(t)
 	f.c.mu.Lock()

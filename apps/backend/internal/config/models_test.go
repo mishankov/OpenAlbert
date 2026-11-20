@@ -215,10 +215,15 @@ func TestMixedSubscriptionAndAPIProfiles(t *testing.T) {
 
 func TestSubscriptionProfilesRejectIncompatibleSettings(t *testing.T) {
 	for name, extra := range map[string]string{
-		"endpoint":       `base_url = "https://private-sentinel.invalid"`,
-		"API credential": `api_key_env = "PRIVATE_SENTINEL"`,
-		"API option":     "[profiles.subscription.options]\nreasoning_effort = \"high\"",
-		"API pricing":    "[profiles.subscription.pricing]\ninput_per_million = 1\ncached_input_per_million = 0\noutput_per_million = 2",
+		"endpoint":             `base_url = "https://private-sentinel.invalid"`,
+		"API credential":       `api_key_env = "PRIVATE_SENTINEL"`,
+		"empty endpoint":       `base_url = ""`,
+		"empty API credential": `api_key_env = ""`,
+		"empty API options":    "[profiles.subscription.options]",
+		"false API option":     "[profiles.subscription.options]\ninclude_reasoning_content = false",
+		"empty API pricing":    "[profiles.subscription.pricing]",
+		"API option":           "[profiles.subscription.options]\nreasoning_effort = \"high\"",
+		"API pricing":          "[profiles.subscription.pricing]\ninput_per_million = 1\ncached_input_per_million = 0\noutput_per_million = 2",
 	} {
 		t.Run(name, func(t *testing.T) {
 			content := validModels + subscriptionProfile + "\n" + extra + "\n"

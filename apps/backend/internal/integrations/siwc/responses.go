@@ -109,12 +109,20 @@ func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools 
 	}
 	model := c.creds.Model
 	c.mu.Unlock()
-	return c.CompleteForModel(ctx, model, messages, tools)
+	return c.completeForModel(ctx, model, messages, tools, c.http)
 }
 
 // CompleteForModel uses a request-local model while sharing the connection's
 // serialized token refresh. It never changes the account's saved model choice.
 func (c *Client) CompleteForModel(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	// Profiled Responses use the router's deadline. Keep the shared client's
+	// timeout for legacy completions, token refresh and account management.
+	client := *c.http
+	client.Timeout = 0
+	return c.completeForModel(ctx, model, messages, tools, &client)
+}
+
+func (c *Client) completeForModel(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool, client *http.Client) (domain.Completion, error) {
 	if err := c.mu.LockContext(ctx); err != nil {
 		return domain.Completion{}, err
 	}
@@ -139,7 +147,7 @@ func (c *Client) CompleteForModel(ctx context.Context, model string, messages []
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("User-Agent", "OpenAlbert/0.1")
-	resp, err := c.do(req)
+	resp, err := do(client, req)
 	if err != nil {
 		return domain.Completion{Model: body.Model}, err
 	}

@@ -210,7 +210,11 @@ func responseError(resp *http.Response) *APIError {
 	return e
 }
 func (c *Client) do(req *http.Request) (*http.Response, error) {
-	resp, err := c.http.Do(req)
+	return do(c.http, req)
+}
+
+func do(client *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		if req.Context().Err() != nil {
 			return nil, req.Context().Err()

@@ -99,6 +99,13 @@ func loadModelProfilesForAuth(path string, get func(string) string, authMode str
 		if profile.Adapter == "openai_chatgpt" && authMode != "profiles" {
 			return empty, errors.New("openai_chatgpt profiles require OPENAI_AUTH_MODE=profiles")
 		}
+		if profile.Adapter == "openai_chatgpt" {
+			for _, field := range []string{"base_url", "api_key_env", "options", "pricing"} {
+				if meta.IsDefined("profiles", name, field) {
+					return empty, errors.New("ChatGPT subscription profiles do not accept API endpoints, API keys, provider options or per-token pricing")
+				}
+			}
+		}
 		validated, err := validateModelProfile(profile, get, authMode == "siwc")
 		if err != nil {
 			return empty, err
@@ -171,11 +178,7 @@ func validateModelProfile(raw modelProfileConfig, get func(string) string, allow
 		return empty, errors.New("model profile model must be a nonempty identifier without surrounding whitespace")
 	}
 	key := ""
-	if raw.Adapter == "openai_chatgpt" {
-		if raw.BaseURL != "" || raw.APIKeyEnv != "" || raw.Options != (modelOptionsConfig{}) || raw.Pricing != nil {
-			return empty, errors.New("ChatGPT subscription profiles do not accept API endpoints, API keys, provider options or per-token pricing")
-		}
-	} else {
+	if raw.Adapter == "openai_chat_completions" {
 		u, err := url.Parse(raw.BaseURL)
 		if err != nil || u.Host == "" || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 			return empty, errors.New("model profile base_url must be an HTTP(S) URL without credentials, query or fragment")

@@ -13,7 +13,7 @@ The helper's current source-input map is:
 | minio | services/minio/Dockerfile |
 | minio-init | services/minio/Dockerfile, services/minio/init.sh |
 
-`.dockerignore` or Bake changes conservatively affect every target. Each Go image builds with its own module files and `GOWORK=off`. The backend and backup CLI also copy the shared backup library, so changes to that library select both images. Upgrade a dependency in each module that should pick up the new version. Confirm newly introduced shared files/imports before relying on this map. MinIO builds pinned upstream source. Native app and ordinary documentation changes do not enter these container targets.
+`.dockerignore` or Bake changes conservatively affect every target. Each Go image builds with its own module files and `GOWORK=off`. The backend and backup CLI also copy the shared backup library, so changes to that library select both images. Upgrade a dependency in each module that should pick up the new version. Confirm newly introduced shared files/imports before relying on this map. MinIO builds pinned upstream source. Ordinary documentation changes do not enter these container targets.
 
 Plan without building or pushing:
 
@@ -29,7 +29,7 @@ When building and publishing is authorized, execute through Task using a tempora
 python3 <skill-dir>/scripts/openalbert_publish.py --repo <clean-master-checkout> --prefix ghcr.io/mishankov/openalbert --execute
 ```
 
-The helper reuses `tools/local.py`'s clean-master gate, check/test suites, reports, image smoke scripts, deployment/restart checks, and publication loop. It narrows only the build and upload target set. Container-release verification includes Go race/integration, backup restore and web keyboard flows. While the macOS client is at an early stage, container publication excludes macOS tooling, the Go/Swift contract and native Tart tests/smoke. The dedicated macOS test/release commands and full `task test`/`task verify` retain those checks; when run, native artifacts are compiled on the host and desktop tests execute only in the managed guest. It pulls unchanged deployment companions by platform digest. Existing Docker credentials are used; no application .env is loaded.
+The helper reuses `tools/local.py`'s clean-master gate, check/test suites, reports, image smoke scripts, deployment/restart checks, and publication loop. It narrows only the build and upload target set. Container-release verification includes Go race/integration, backup restore and web keyboard flows. It pulls unchanged deployment companions by platform digest. Existing Docker credentials are used; no application .env is loaded.
 
 Selected images receive `sha-<full revision>-amd64`, `sha-<full revision>-arm64`, `sha-<full revision>`, and `master`. Unselected images retain their existing manifests, tags, and revision labels.
 
