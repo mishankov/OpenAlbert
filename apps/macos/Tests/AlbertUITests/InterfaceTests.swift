@@ -245,7 +245,8 @@ extension InterfaceTests {
 
     @MainActor
     private func checkChatGPTSettingsKeyboardAndCredentialFlow(status: String) async throws {
-        _ = NSApplication.shared
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory); InterfaceURLProtocol.handler = nil }
         let model = AppModel(store: LocalStore(directory: directory), defaults: UserDefaults(suiteName: UUID().uuidString)!, startNetwork: false)
@@ -305,7 +306,8 @@ extension InterfaceTests {
         controller.chatGPTFinish(); XCTAssertEqual(callbacks, 1)
         model.chatGPT.busy = false
         let editor = NSTextView()
-        let keyWindow = try XCTUnwrap(NSApp.keyWindow)
+        let keyWindow = try XCTUnwrap(controller.window.attachedSheet ?? controller.window)
+        keyWindow.makeKeyAndOrderFront(nil)
         keyWindow.contentView?.addSubview(editor)
         XCTAssertTrue(keyWindow.makeFirstResponder(editor))
         editor.setMarkedText("に", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
