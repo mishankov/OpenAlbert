@@ -19,7 +19,8 @@ class SelectionTests(unittest.TestCase):
         self.git('init', '-q')
         self.write('docs/observability.md', 'old docs')
         self.write('apps/backend/main.go', 'old backend')
-        self.write('services/backup/main.go', 'old backup')
+        self.write('services/backup/cmd/albert-backup/main.go', 'old backup CLI')
+        self.write('shared/backup/archive.go', 'old backup library')
         self.old = self.commit()
 
     def git(self, *args):
@@ -51,7 +52,26 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(self.make_plan()['selected'], ['openalbert'])
 
     def test_shared_backup_code_selects_backend_and_backup(self):
-        self.write('services/backup/main.go', 'new backup')
+        self.write('shared/backup/archive.go', 'new backup library')
+        self.commit()
+        self.assertEqual(self.make_plan()['selected'], ['openalbert', 'backup'])
+
+    def test_backup_cli_selects_only_backup(self):
+        self.write('services/backup/cmd/albert-backup/main.go', 'new backup CLI')
+        self.commit()
+        self.assertEqual(self.make_plan()['selected'], ['backup'])
+
+    def test_backend_wazero_upgrade_selects_only_backend(self):
+        self.write('apps/backend/go.mod', 'require github.com/tetratelabs/wazero v1.12.0\n')
+        self.write('apps/backend/go.sum', 'github.com/tetratelabs/wazero v1.12.0 h1:checksum\n')
+        self.commit()
+        plan = self.make_plan()
+        self.assertEqual(plan['selected'], ['openalbert'])
+        self.assertEqual(plan['images']['openalbert']['reasons'], ['apps/backend/go.mod', 'apps/backend/go.sum'])
+
+    def test_dependency_upgrade_in_two_modules_selects_both_consumers(self):
+        self.write('apps/backend/go.sum', 'github.com/minio/minio-go/v7 v7.4.1 h1:checksum\n')
+        self.write('services/backup/go.sum', 'github.com/minio/minio-go/v7 v7.4.1 h1:checksum\n')
         self.commit()
         self.assertEqual(self.make_plan()['selected'], ['openalbert', 'backup'])
 

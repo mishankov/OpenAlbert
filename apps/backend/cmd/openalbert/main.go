@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mishankov/OpenAlbert/shared/backup"
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/blob"
 	"openalbert/apps/backend/internal/browser"
@@ -27,7 +28,6 @@ import (
 	"openalbert/apps/backend/internal/storage"
 	"openalbert/apps/backend/internal/telemetry"
 	"openalbert/apps/backend/internal/widgets"
-	"openalbert/services/backup"
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"

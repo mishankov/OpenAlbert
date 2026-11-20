@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/mishankov/OpenAlbert/shared/backup"
 	"openalbert/apps/backend/internal/agent"
-	"openalbert/services/backup"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/workflow"

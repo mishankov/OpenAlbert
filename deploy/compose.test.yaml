@@ -30,7 +30,7 @@ services:
       - >-
         for attempt in $$(seq 1 30); do
           if curl --fail --silent http://victorialogs:9428/health >/dev/null; then
-            exec go test -json -race -p 1 -count=1 -timeout 10m ./...;
+            exec sh tools/testing/go-modules.sh test -mod=readonly -json -race -p 1 -count=1 -timeout 10m ./...;
           fi;
           sleep 1;
         done;

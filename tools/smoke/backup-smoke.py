@@ -30,8 +30,10 @@ def main():
         folder = Path(directory).resolve()
         project = "albert-backup-test-" + uuid.uuid4().hex[:12]
         binary = folder / "backup.test"
-        env = dict(os.environ, GOOS="linux", GOARCH="arm64" if platform.machine() in {"arm64", "aarch64"} else "amd64", CGO_ENABLED="0")
-        subprocess.run(["go", "test", "-c", "-o", str(binary), "./services/backup"], cwd=ROOT, env=env, check=True)
+        env = dict(os.environ, GOOS="linux", GOARCH="arm64" if platform.machine() in {"arm64", "aarch64"} else "amd64",
+                   CGO_ENABLED="0", GOWORK="off")
+        subprocess.run(["go", "test", "-mod=readonly", "-c", "-o", str(binary), "."],
+                       cwd=ROOT / "shared/backup", env=env, check=True)
         command = ["docker", "run", "--rm", "--user", "0", "--mount", f"type=bind,src={folder},dst={folder}",
                    "--mount", "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
                    "-e", f"TMPDIR={folder}", "-e", "OPENALBERT_TEST_BACKUP_DOCKER=1",

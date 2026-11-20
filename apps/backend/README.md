@@ -7,7 +7,7 @@ Telegram, Desktop API, встроенный веб-инспектор, памя�
 - `internal/` — реализация приложения, тесты и встроенные ресурсы.
 - `Dockerfile` — образ приложения с Chromium.
 
-Go-модуль общий для репозитория. Из его корня:
+У backend свой Go-модуль. Из корня репозитория:
 
 ```sh
 go run ./apps/backend/cmd/openalbert

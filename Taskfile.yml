@@ -13,15 +13,19 @@ tasks:
     cmds: [python3 tools/local.py test]
   test:siwc:
     desc: Verify ChatGPT OAuth, Responses, billing and owner controls with synthetic providers
-    cmds: [go test -race ./apps/backend/internal/agent ./apps/backend/internal/integrations/... ./apps/backend/internal/config ./apps/backend/internal/desktopapi ./apps/backend/internal/orchestration ./apps/backend/cmd/openalbert]
+    env: {GOWORK: 'off'}
+    dir: apps/backend
+    cmds: [go test -race ./internal/agent ./internal/integrations/... ./internal/config ./internal/desktopapi ./internal/orchestration ./cmd/openalbert]
   test:go:
     desc: Run race tests with disposable PostgreSQL, VictoriaLogs, Chromium and FFmpeg
     cmds: [python3 tools/local.py test:go]
   test:widgets:
     desc: Test Telegram widget transport, schedule actions and command routing with the race detector
+    env: {GOWORK: 'off'}
+    dir: apps/backend
     cmds:
-      - go test -race ./apps/backend/internal/config ./apps/backend/internal/widgets ./apps/backend/internal/integrations ./apps/backend/internal/agent ./apps/backend/internal/orchestration ./apps/backend/internal/storage ./apps/backend/internal/browser
-      - env CGO_ENABLED=0 go build -o /dev/null ./apps/backend/cmd/openalbert
+      - go test -race ./internal/config ./internal/widgets ./internal/integrations ./internal/agent ./internal/orchestration ./internal/storage ./internal/browser
+      - env CGO_ENABLED=0 go build -o /dev/null ./cmd/openalbert
   test:computer:
     desc: Build a disposable user-computer template and test the SSH adapter
     cmds: [python3 tools/local.py test:computer]
@@ -30,7 +34,10 @@ tasks:
     cmds: [python3 tools/local.py test:backup]
   test:backup:unit:
     desc: Run backup unit tests, including exclusion and encrypted restore, with the race detector
-    cmds: [go test -race ./services/backup/...]
+    env: {GOWORK: 'off'}
+    cmds:
+      - go -C shared/backup test -race ./...
+      - go -C services/backup test -race ./...
   test:web:
     desc: Build docs and test docs/inspector keyboard flows with Playwright reports
     cmds: [python3 tools/local.py test:web]

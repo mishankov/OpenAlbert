@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mishankov/OpenAlbert/shared/backup"
 	"go.temporal.io/sdk/temporal"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/scheduling"
 	"openalbert/apps/backend/internal/telemetry"
 	"openalbert/apps/backend/internal/widgets"
-	"openalbert/services/backup"
 )
 
 type Activities struct {

@@ -6,14 +6,14 @@ The helper's current source-input map is:
 
 | Target | Inputs |
 | --- | --- |
-| openalbert | apps/backend/, services/backup/, go.mod, go.sum |
-| backup | services/backup/, go.mod, go.sum |
-| stt | services/stt/, go.mod, go.sum |
-| log-gateway | services/log-gateway/, go.mod, go.sum |
+| openalbert | apps/backend/, shared/backup/ |
+| backup | services/backup/, shared/backup/ |
+| stt | services/stt/ |
+| log-gateway | services/log-gateway/ |
 | minio | services/minio/Dockerfile |
 | minio-init | services/minio/Dockerfile, services/minio/init.sh |
 
-`.dockerignore` or Bake changes conservatively affect every target. Confirm newly introduced shared files/imports before relying on this map. MinIO builds pinned upstream source and does not consume the repository's go.mod. The backend imports backup code, so backup changes can require both images. Native app and ordinary documentation changes do not enter these container targets.
+`.dockerignore` or Bake changes conservatively affect every target. Each Go image builds with its own module files and `GOWORK=off`. The backend and backup CLI also copy the shared backup library, so changes to that library select both images. Upgrade a dependency in each module that should pick up the new version. Confirm newly introduced shared files/imports before relying on this map. MinIO builds pinned upstream source. Native app and ordinary documentation changes do not enter these container targets.
 
 Plan without building or pushing:
 

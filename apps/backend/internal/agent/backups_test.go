@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mishankov/OpenAlbert/shared/backup"
 	"openalbert/apps/backend/internal/domain"
-	"openalbert/services/backup"
 )
 
 func TestBackupContextRefreshesEveryModelCallAndSurvivesOldTurn(t *testing.T) {
