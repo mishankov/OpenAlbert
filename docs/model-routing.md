@@ -57,6 +57,19 @@ ANALYSIS_LLM_API_KEY=your-analysis-api-key
 
 `models.toml` и `models.env` исключены из Git и Docker build context. Автоматический backup сохраняет TOML из bind-монтирования и, если существует, точные байты `models.env` внутри зашифрованного архива. Файлы должны находиться внутри каталога установки без символических ссылок. Внешние пути TOML нужно резервировать отдельно или перенести файл внутрь установки. Для необязательного `env_file` нужен Docker Compose 2.24.0 или новее.
 
+## Прокси и HTTP-заголовки
+
+Чтобы направить профиль через прокси, укажи его базовый URL с нужным префиксом пути, например `base_url = "https://proxy.example.com/v1"`. Для `openai_chat_completions` поле `base_url` обязательно. У `openai_chatgpt` по умолчанию используется `https://api.openai.com/v1`.
+
+Оба адаптера поддерживают необязательную таблицу `headers_env`. Ключ таблицы задаёт имя HTTP-заголовка, значение указывает имя переменной окружения. Добавь заголовок в профиль, который использует прокси.
+
+```toml
+[profiles.subscription_chat.headers_env]
+"X-LLM-Proxy-Key" = "OPENALBERT_PROXY_KEY"
+```
+
+В `models.env` укажи `OPENALBERT_PROXY_KEY=your-proxy-key` с ключом своего клиента. При наличии дополнительных заголовков нужен явный `base_url`. Приложение проверяет заголовки при запуске и требует непустое значение каждой указанной переменной. Адаптер передаёт свой API-ключ или access token в `Authorization`. Служебные заголовки адаптера зарезервированы. Для удалённого прокси используй доверенный HTTPS endpoint, который получает запросы и учётные данные профиля.
+
 ## Возможности и настройки провайдера
 
 - `tools` требуется профилям `chat` и `background`.
@@ -84,11 +97,11 @@ output_token_field = "max_tokens"
 
 В `OPENAI_AUTH_MODE=profiles` адаптер каждого профиля определяет оплату: `openai_chat_completions` использует свой API-ключ, `openai_chatgpt` — подключённый ChatGPT plan. Роль выбирает ровно один профиль, его явный `model`, возможности, окно контекста, резерв ответа и таймаут. Глобальная сохранённая модель аккаунта и `OPENAI_SIWC_MODEL` на этот выбор не влияют. Ошибка подписки не запускает API-запрос; переключения между профилями или полосами оплаты нет.
 
-Все `openai_chatgpt` профили используют **один общий вход в ChatGPT**, но могут задавать разные модели. Это не несколько аккаунтов или воркспейсов. У такого профиля обязательны `model`, `capabilities`, `context_window_tokens`, `max_output_tokens` и `timeout`; поля `base_url`, `api_key_env`, `options` и `pricing` запрещены. Endpoint подписки фиксирован. Оценка стоимости в USD для подписки не рассчитывается.
+Все `openai_chatgpt` профили используют **один общий вход в ChatGPT**. Каждый профиль задаёт свои `model`, `capabilities`, `context_window_tokens`, `max_output_tokens` и `timeout` и может выбрать прокси через `base_url` и `headers_env`. Оценка стоимости в USD для подписки не рассчитывается.
 
 `max_output_tokens` подписочного профиля — только локальный резерв для проверки входного контекста, а не ограничение выходного ответа OpenAI: [preview-контракт](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations) запрещает отправлять это поле. И API, и подписочные профили проверяют контекст по своему `context_window_tokens` с этим резервом; оба соблюдают `timeout` профиля.
 
-[Вход в ChatGPT](chatgpt-plan-usage.md) через `/chatgpt login` в Telegram подключает общий аккаунт. `/chatgpt models` и HTTP API каталог остаются доступны, чтобы узнать slug. Меняй модель в TOML и пересоздавай приложение: `/chatgpt model` и `PUT /api/v1/chatgpt/model` в `profiles` отклоняются с объяснением, HTTP возвращает `409 config_managed`. `/chatgpt status` и HTTP API статус показывают для каждой роли профиль, модель и `auth_mode`; активная полоса — `profiles`.
+[Вход в ChatGPT](chatgpt-plan-usage.md) через `/chatgpt login` в Telegram подключает общий аккаунт. `/chatgpt models` и HTTP API получают каталог через первый подписочный профиль среди маршрутов `chat`, `background`, `analysis` в этом порядке. Меняй модель в TOML и пересоздавай приложение: `/chatgpt model` и `PUT /api/v1/chatgpt/model` в `profiles` отклоняются с объяснением, HTTP возвращает `409 config_managed`. `/chatgpt status` и HTTP API статус показывают для каждой роли профиль, модель и `auth_mode`; активная полоса — `profiles`.
 
 ### Совместимость старых глобальных режимов
 

@@ -46,6 +46,11 @@ type oauthFixture struct {
 
 func newFixture(t *testing.T) *oauthFixture {
 	t.Helper()
+	return newFixtureWithCatalog(t, domain.ModelProfile{})
+}
+
+func newFixtureWithCatalog(t *testing.T, profile domain.ModelProfile) *oauthFixture {
+	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +58,7 @@ func newFixture(t *testing.T) *oauthFixture {
 	f := &oauthFixture{key: key, scope: "openid offline_access " + directScope}
 	f.server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.server.Close)
-	f.c, err = New(filepath.Join(t.TempDir(), "credentials.json"), "test-model")
+	f.c, err = NewWithCatalogProfile(filepath.Join(t.TempDir(), "credentials.json"), "test-model", profile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +76,10 @@ func (f *oauthFixture) sign(nonce, subject, audience string, expires time.Time) 
 	return s + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 func (f *oauthFixture) serve(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-LLM-Proxy-Key") != "" || r.Header.Get("X-Proxy-Tenant") != "" {
+		http.Error(w, "proxy header on direct request", http.StatusBadRequest)
+		return
+	}
 	switch r.URL.Path {
 	case "/keys":
 		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]string{"kty": "RSA", "kid": "test", "alg": "RS256", "use": "sig", "n": base64.RawURLEncoding.EncodeToString(f.key.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(f.key.E)).Bytes())}}})
@@ -100,6 +109,10 @@ func (f *oauthFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		io.WriteString(w, `{"models":[{"slug":"test-model","display_name":"Test model","visibility":"list"},{"slug":"other-model","display_name":"Other model","visibility":"list"},{"slug":"hidden","display_name":"Hidden","visibility":"hidden"}]}`)
 	case "/responses":
+		if r.Header.Get("Authorization") != "Bearer access-secret" {
+			http.Error(w, "auth", http.StatusUnauthorized)
+			return
+		}
 		if f.responseStatus != 0 {
 			w.Header().Set("x-request-id", "rejected-request")
 			w.WriteHeader(f.responseStatus)
@@ -130,6 +143,9 @@ func (f *oauthFixture) begin(t *testing.T) string {
 	}
 	u, _ := url.Parse(link)
 	q := u.Query()
+	if u.Scheme+"://"+u.Host != issuer || q.Get("resource") != resource {
+		t.Fatal("authorization uses the wrong issuer or resource")
+	}
 	if hostID := q.Get("ext_agent_host_id"); !hostIDPattern.MatchString(hostID) {
 		t.Fatalf("expected a UUIDv4 URN in the authorize URL, got %q", hostID)
 	}
@@ -365,53 +381,69 @@ func TestRefreshSerializedAndFailureRecovery(t *testing.T) {
 	}
 }
 
-func TestCompleteForModelConcurrentRequestsShareOnlyCredentials(t *testing.T) {
-	f := newFixture(t)
-	f.login(t)
-	f.c.creds.ExpiresAt = time.Now().Add(-time.Hour)
+func TestCompleteForProfileConcurrentRequestsShareOnlyCredentials(t *testing.T) {
 	const requests = 20
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	entered := make(chan struct{}, requests)
 	release := make(chan struct{})
-	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/responses" || r.Header.Get("Authorization") != "Bearer access-secret" {
-			t.Errorf("incorrect response route or shared authorization")
-			http.Error(w, "invalid route or authorization", http.StatusBadRequest)
-			return
-		}
-		var request struct {
-			Model string `json:"model"`
-			Input []struct {
-				Content string `json:"content"`
-			} `json:"input"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request.Input) != 1 || request.Input[0].Content != request.Model {
-			t.Errorf("model leaked across requests: %+v %v", request, err)
-			http.Error(w, "incorrect model", http.StatusBadRequest)
-			return
-		}
-		if calls.Add(1) <= requests {
+	var profiles []domain.ModelProfile
+	for i, model := range []string{"chat-model", "analysis-model"} {
+		proxyKey := "proxy-key-for-" + model
+		tenant := fmt.Sprintf("workspace-%d", i)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer access-secret" || r.Header.Get("X-LLM-Proxy-Key") != proxyKey || r.Header.Get("X-Proxy-Tenant") != tenant {
+				t.Error("incorrect account or profile authorization")
+				http.Error(w, "invalid authorization", http.StatusBadRequest)
+				return
+			}
+			if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+				_ = json.NewEncoder(w).Encode(map[string][]Model{"models": {
+					{Slug: model, DisplayName: model, Visibility: "list"},
+					{Slug: "model-" + proxyKey, DisplayName: "Reflected proxy key", Visibility: "list"},
+					{Slug: "reflected-token", DisplayName: "Bearer access-secret", Visibility: "list"},
+				}})
+				return
+			}
+			if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" || r.Header.Get("Accept") != "text/event-stream" {
+				t.Error("incorrect Responses method, path or stream header")
+				http.NotFound(w, r)
+				return
+			}
+			var request struct {
+				Model string `json:"model"`
+				Input []struct {
+					Content string `json:"content"`
+				} `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Model != model || len(request.Input) != 1 || request.Input[0].Content != model {
+				t.Errorf("model leaked across requests: %+v %v", request, err)
+				http.Error(w, "incorrect model", http.StatusBadRequest)
+				return
+			}
 			entered <- struct{}{}
-		}
-		select {
-		case <-release:
-		case <-r.Context().Done():
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, `data: {"type":"response.completed","response":{"status":"completed","model":%q,"output":[{"type":"message","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":7,"output_tokens":1}}}`+"\n\n", "served-"+request.Model, request.Model)
-	}))
-	defer server.Close()
-	f.c.apiURL = server.URL
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, `data: {"type":"response.completed","response":{"status":"completed","model":%q,"output":[{"type":"message","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":7,"output_tokens":1}}}`+"\n\n", "served-"+model, model)
+		}))
+		t.Cleanup(server.Close)
+		profiles = append(profiles, domain.ModelProfile{Model: model, BaseURL: server.URL + "/v1", Headers: map[string]string{"X-LLM-Proxy-Key": proxyKey, "X-Proxy-Tenant": tenant}})
+	}
+	f := newFixtureWithCatalog(t, profiles[0])
+	f.login(t)
+	f.c.creds.ExpiresAt = time.Now().Add(-time.Hour)
 	var wg sync.WaitGroup
 	for i := range requests {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			model := fmt.Sprintf("profile-model-%d", i)
-			out, err := f.c.CompleteForModel(ctx, model, []domain.Message{{Role: "user", Content: model}}, nil)
+			profile := profiles[i%len(profiles)]
+			model := profile.Model
+			out, err := f.c.CompleteForProfile(ctx, profile, []domain.Message{{Role: "user", Content: model}}, nil)
 			if err != nil || out.Model != model || out.Message.Content != model || out.Usage.Model != "served-"+model || !out.Usage.TokenUsageKnown {
 				t.Errorf("incorrect request-local completion: %+v %v", out, err)
 			}
@@ -434,6 +466,10 @@ func TestCompleteForModelConcurrentRequestsShareOnlyCredentials(t *testing.T) {
 	if f.refreshCalls.Load() != 1 {
 		t.Errorf("shared refresh raced: %d", f.refreshCalls.Load())
 	}
+	models, err := f.c.Models(ctx)
+	if err != nil || len(models) != 1 || models[0].Slug != profiles[0].Model {
+		t.Fatalf("catalog did not use the configured profile: %+v %v", models, err)
+	}
 	data, err := os.ReadFile(f.c.path)
 	var saved credentials
 	if err != nil || json.Unmarshal(data, &saved) != nil || saved.Model != "test-model" || saved.RefreshToken != "rotated-secret" {
@@ -442,6 +478,49 @@ func TestCompleteForModelConcurrentRequestsShareOnlyCredentials(t *testing.T) {
 	out, err := f.c.Complete(ctx, []domain.Message{{Role: "user", Content: "test-model"}}, nil)
 	if err != nil || out.Model != "test-model" || out.Message.Content != "test-model" {
 		t.Fatalf("legacy completion lost the saved selection: %+v %v", out, err)
+	}
+}
+
+func TestProfileProxyErrorsHideCredentials(t *testing.T) {
+	const key = "echoed-proxy-key"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-request-id", "request-"+key)
+		if r.URL.Path == "/stream/responses" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, `data: {"type":"response.failed","response":{"model":%q,"error":{"code":%q,"param":"Bearer access-secret"}}}`+"\n\n", key, key)
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprintf(w, `{"error":{"code":"proxy_error","param":%q}}`, key)
+	}))
+	t.Cleanup(server.Close)
+	profile := domain.ModelProfile{Model: "selected-model", BaseURL: server.URL + "/v1", Headers: map[string]string{"X-LLM-Proxy-Key": key}}
+	f := newFixtureWithCatalog(t, profile)
+	f.login(t)
+	ctx := context.Background()
+	_, catalogErr := f.c.Models(ctx)
+	_, responseErr := f.c.CompleteForProfile(ctx, profile, nil, nil)
+	profile.BaseURL = server.URL + "/stream"
+	out, streamErr := f.c.CompleteForProfile(ctx, profile, nil, nil)
+	if out.Usage.Model != profile.Model {
+		t.Error("stream diagnostics retained a credential as the served model")
+	}
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"catalog", catalogErr, http.StatusBadGateway, "proxy_error"},
+		{"responses", responseErr, http.StatusBadGateway, "proxy_error"},
+		{"stream", streamErr, http.StatusOK, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var api *APIError
+			if !errors.As(tc.err, &api) || api.Status != tc.status || api.Code != tc.code || api.Param != "" || api.RequestID != "" || len(api.Body) != 0 {
+				t.Fatal("API diagnostics retained a credential or lost safe error details")
+			}
+		})
 	}
 }
 
@@ -553,7 +632,7 @@ func TestFailedResponsesPreserveUsageWithoutPartialOutput(t *testing.T) {
 			if err == nil || got.Model != "test-model" || got.InputTokens != 7 || got.OutputTokens != 3 || got.Usage != decoded.Usage || !reflect.DeepEqual(got.Message, domain.Message{}) {
 				t.Fatalf("client lost usage/model or exposed partial output: %+v %v", got, err)
 			}
-			got, err = f.c.CompleteForModel(context.Background(), "profile-model", []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			got, err = f.c.CompleteForProfile(context.Background(), domain.ModelProfile{Model: "profile-model"}, []domain.Message{{Role: "user", Content: "hello"}}, nil)
 			if err == nil || got.Model != "profile-model" || got.InputTokens != 7 || got.OutputTokens != 3 || got.Usage != decoded.Usage || !reflect.DeepEqual(got.Message, domain.Message{}) {
 				t.Fatalf("profile call lost usage/model or exposed partial output: %+v %v", got, err)
 			}
@@ -664,7 +743,7 @@ func TestHTTPRejectionRetainsRequestedModelWithUnknownUsage(t *testing.T) {
 			if !errors.As(err, &api) || api.Status != status || api.RequestID != "rejected-request" || out.Model != "test-model" || out.Usage.TokenUsageKnown || out.InputTokens != 0 || out.OutputTokens != 0 || !reflect.DeepEqual(out.Message, domain.Message{}) {
 				t.Fatalf("HTTP rejection lost request identity or invented usage/output: %+v %v", out, err)
 			}
-			out, err = f.c.CompleteForModel(context.Background(), "profile-model", []domain.Message{{Role: "user", Content: "Hello"}}, nil)
+			out, err = f.c.CompleteForProfile(context.Background(), domain.ModelProfile{Model: "profile-model"}, []domain.Message{{Role: "user", Content: "Hello"}}, nil)
 			if !errors.As(err, &api) || api.Status != status || api.RequestID != "rejected-request" || out.Model != "profile-model" || out.Usage.TokenUsageKnown || out.InputTokens != 0 || out.OutputTokens != 0 || !reflect.DeepEqual(out.Message, domain.Message{}) {
 				t.Fatalf("profile HTTP rejection lost request identity or invented usage/output: %+v %v", out, err)
 			}
@@ -696,13 +775,13 @@ func TestProfileResponsesUseConfiguredDeadlineWithoutChangingAccountTimeout(t *t
 		{"long profile", 150 * time.Second, func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 			defer cancel()
-			_, err := f.c.CompleteForModel(ctx, "profile-model", []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			_, err := f.c.CompleteForProfile(ctx, domain.ModelProfile{Model: "profile-model"}, []domain.Message{{Role: "user", Content: "hello"}}, nil)
 			return err
 		}},
 		{"short profile", 5 * time.Second, func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, err := f.c.CompleteForModel(ctx, "profile-model", []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			_, err := f.c.CompleteForProfile(ctx, domain.ModelProfile{Model: "profile-model"}, []domain.Message{{Role: "user", Content: "hello"}}, nil)
 			return err
 		}},
 		{"legacy completion", 120 * time.Second, func() error {
@@ -734,7 +813,10 @@ func TestProfileDeadlineIncludesWaitingForCredentialRefresh(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { _, err := f.c.CompleteForModel(ctx, "profile-model", nil, nil); done <- err }()
+	go func() {
+		_, err := f.c.CompleteForProfile(ctx, domain.ModelProfile{Model: "profile-model"}, nil, nil)
+		done <- err
+	}()
 	select {
 	case err := <-done:
 		f.c.mu.Unlock()

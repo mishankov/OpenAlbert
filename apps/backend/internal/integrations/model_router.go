@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strings"
 
@@ -13,7 +14,7 @@ import (
 
 // SubscriptionModel shares account authentication while keeping model selection request-local.
 type SubscriptionModel interface {
-	CompleteForModel(context.Context, string, []domain.Message, []domain.Tool) (domain.Completion, error)
+	CompleteForProfile(context.Context, domain.ModelProfile, []domain.Message, []domain.Tool) (domain.Completion, error)
 }
 
 type ProfileRouteStatus struct {
@@ -55,17 +56,18 @@ func NewModelRouterWithPlan(config domain.ModelProfiles, plan SubscriptionModel)
 			p.Pricing = &prices
 		}
 		p.Capabilities = append([]string(nil), p.Capabilities...)
+		p.Headers = maps.Clone(p.Headers)
 		var client *OpenAI
 		if p.Adapter == "openai_chatgpt" {
 			if plan == nil {
 				return nil, errors.New("ChatGPT model profiles require a subscription client")
 			}
-			if p.BaseURL != "" || p.APIKey != "" || p.APIKeyEnv != "" || p.Options != (domain.ModelOptions{}) || p.Pricing != nil {
+			if p.APIKey != "" || p.APIKeyEnv != "" || p.Options != (domain.ModelOptions{}) || p.Pricing != nil {
 				return nil, errors.New("ChatGPT model profiles do not support API fields, options or pricing")
 			}
 		} else {
 			var err error
-			client, err = NewOpenAI(OpenAIConfig{BaseURL: p.BaseURL, APIKey: p.APIKey, Model: p.Model, Timeout: p.Timeout, MaxOutputTokens: p.MaxOutputTokens, Options: p.Options})
+			client, err = NewOpenAI(OpenAIConfig{BaseURL: p.BaseURL, Headers: p.Headers, APIKey: p.APIKey, Model: p.Model, Timeout: p.Timeout, MaxOutputTokens: p.MaxOutputTokens, Options: p.Options})
 			if err != nil {
 				return nil, err
 			}
@@ -254,7 +256,7 @@ func (r *ModelRouter) request(model routedModel, role domain.ModelRole) (inputEs
 		return func(messages []domain.Message, tools []domain.Tool) (int, error) {
 				return siwc.EstimateInput(model.profile.Model, messages, tools)
 			}, func(ctx context.Context, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
-				return r.plan.CompleteForModel(ctx, model.profile.Model, messages, tools)
+				return r.plan.CompleteForProfile(ctx, model.profile, messages, tools)
 			}
 	}
 	client := *model.client

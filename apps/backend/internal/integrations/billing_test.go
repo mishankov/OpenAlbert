@@ -123,9 +123,9 @@ func TestBillingPreservesFailedPlanUsageWithoutPartialOutput(t *testing.T) {
 
 // Explicit implementation keeps profile routing from calling the nil embedded
 // client in the legacy control stub.
-func (m *billingStub) CompleteForModel(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+func (m *billingStub) CompleteForProfile(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
 	out, err := m.Complete(ctx, messages, tools)
-	out.Model = model
+	out.Model = profile.Model
 	return out, err
 }
 

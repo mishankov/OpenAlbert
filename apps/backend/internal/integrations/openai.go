@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 type OpenAIConfig struct {
 	BaseURL         string
 	APIKey          string
+	Headers         map[string]string `json:"-"`
 	Model           string
 	HTTPClient      *http.Client
 	Timeout         time.Duration
@@ -51,6 +53,7 @@ func NewOpenAI(c OpenAIConfig) (*OpenAI, error) {
 	if c.Options.SessionHeader != "" && c.Options.SessionHeader != "x-opencode-session" {
 		return nil, errors.New("unsupported model session header")
 	}
+	c.Headers = maps.Clone(c.Headers)
 	return &OpenAI{config: c, client: httpClient(c.HTTPClient, c.Timeout)}, nil
 }
 
@@ -134,6 +137,9 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 	if err != nil {
 		return domain.Completion{}, errors.New("invalid model request")
 	}
+	for name, value := range o.config.Headers {
+		req.Header.Set(name, value)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "OpenAlbert/0.1")
 	if o.config.Options.SessionHeader != "" {
@@ -172,6 +178,16 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 		return domain.Completion{}, err
 	}
 	model := response.Model
+	// The provider model is logged as usage metadata. A proxy can echo credentials.
+	if key := strings.TrimSpace(o.config.APIKey); key != "" && strings.Contains(model, key) {
+		model = ""
+	}
+	for _, value := range o.config.Headers {
+		if value != "" && strings.Contains(model, value) {
+			model = ""
+			break
+		}
+	}
 	if model == "" {
 		model = o.config.Model
 	}

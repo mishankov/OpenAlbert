@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
+	"openalbert/apps/backend/internal/domain"
 )
 
 const resource = "https://api.openai.com/v1"
@@ -60,9 +62,15 @@ type Client struct {
 	pending                   *attempt
 	http                      *http.Client
 	authURL, tokenURL, apiURL string
+	catalogEndpoint           apiEndpoint
 	keys                      oidc.KeySet
 	catalog                   []Model
 	catalogUntil              time.Time
+}
+
+type apiEndpoint struct {
+	baseURL string
+	headers map[string]string
 }
 
 // credentialLock keeps authorization/refresh serialized while allowing a model
@@ -88,6 +96,11 @@ func (m *credentialLock) Lock()   { _ = m.LockContext(context.Background()) }
 func (m *credentialLock) Unlock() { <-m.held }
 
 func New(path, model string) (*Client, error) {
+	return NewWithCatalogProfile(path, model, domain.ModelProfile{})
+}
+
+// NewWithCatalogProfile uses the selected profile for the account's model catalog.
+func NewWithCatalogProfile(path, model string, profile domain.ModelProfile) (*Client, error) {
 	if path == "" {
 		return nil, errors.New("OPENAI_TOKEN_STORE is required")
 	}
@@ -103,6 +116,7 @@ func New(path, model string) (*Client, error) {
 		return nil, errors.New("ChatGPT credential store is already in use")
 	}
 	c := &Client{path: path, lock: f, http: &http.Client{Timeout: 120 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, authURL: issuer + "/api/accounts/authorize", tokenURL: issuer + "/api/accounts/oauth/token", apiURL: resource}
+	c.catalogEndpoint = apiEndpoint{baseURL: profile.BaseURL, headers: maps.Clone(profile.Headers)}
 	c.keys = oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), c.http), issuer+"/.well-known/jwks.json")
 	data, err := os.ReadFile(path)
 	if err == nil {
@@ -227,15 +241,56 @@ func do(client *http.Client, req *http.Request) (*http.Response, error) {
 	}
 	return resp, nil
 }
-func (c *Client) get(ctx context.Context, path, token string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiURL+path, nil)
+func (c *Client) apiRequest(ctx context.Context, endpoint apiEndpoint, method, path, token string, body io.Reader) (*http.Request, error) {
+	baseURL := endpoint.baseURL
+	if baseURL == "" {
+		baseURL = c.apiURL
+	}
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, body)
 	if err != nil {
-		return errors.New("invalid ChatGPT request")
+		return nil, errors.New("invalid ChatGPT request")
+	}
+	for name, value := range endpoint.headers {
+		req.Header.Set(name, value)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := c.do(req)
+	return req, nil
+}
+
+func (endpoint apiEndpoint) safeDiagnostic(value, token string) string {
+	if token != "" && strings.Contains(value, token) {
+		return ""
+	}
+	for _, header := range endpoint.headers {
+		if secret := strings.TrimSpace(header); secret != "" && strings.Contains(value, secret) {
+			return ""
+		}
+	}
+	return value
+}
+
+func (endpoint apiEndpoint) sanitizeError(err error, token string) error {
+	var api *APIError
+	if errors.As(err, &api) {
+		api.Code = endpoint.safeDiagnostic(api.Code, token)
+		api.Param = endpoint.safeDiagnostic(api.Param, token)
+		api.RequestID = endpoint.safeDiagnostic(api.RequestID, token)
+		if endpoint.baseURL != "" || len(endpoint.headers) != 0 {
+			// An opaque response body may echo credentials in an encoded form.
+			api.Body = nil
+		}
+	}
+	return err
+}
+
+func (c *Client) get(ctx context.Context, endpoint apiEndpoint, path, token string, out any) error {
+	req, err := c.apiRequest(ctx, endpoint, http.MethodGet, path, token, nil)
 	if err != nil {
 		return err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return endpoint.sanitizeError(err, token)
 	}
 	defer resp.Body.Close()
 	if err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out); err != nil {
@@ -256,12 +311,12 @@ func (c *Client) Models(ctx context.Context) ([]Model, error) {
 	var response struct {
 		Models []Model `json:"models"`
 	}
-	if err = c.get(ctx, "/models", token, &response); err != nil {
+	if err = c.get(ctx, c.catalogEndpoint, "/models", token, &response); err != nil {
 		return nil, err
 	}
 	models := []Model{}
 	for _, m := range response.Models {
-		if m.Visibility == "list" && m.Slug != "" && m.DisplayName != "" {
+		if m.Visibility == "list" && c.catalogEndpoint.safeDiagnostic(m.Slug, token) != "" && c.catalogEndpoint.safeDiagnostic(m.DisplayName, token) != "" {
 			models = append(models, m)
 		}
 	}

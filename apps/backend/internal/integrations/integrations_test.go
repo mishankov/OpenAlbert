@@ -51,6 +51,63 @@ func TestOpenAIChatContract(t *testing.T) {
 		t.Fatalf("unexpected completion %+v", out)
 	}
 }
+
+func TestOpenAIProfileHeaders(t *testing.T) {
+	const apiKey = "provider-key"
+	const proxyKey = "profile-proxy-key"
+	const proxyHeader = "X-LLM-Proxy-Key"
+	for _, tc := range []struct {
+		name, key, responseModel, usageModel string
+	}{
+		{name: "direct", responseModel: "served-model", usageModel: "served-model"},
+		{name: "proxy", key: proxyKey, responseModel: "served-model", usageModel: "served-model"},
+		{name: "reflected header", key: proxyKey, responseModel: "model-" + proxyKey, usageModel: "requested-model"},
+		{name: "reflected bearer", key: proxyKey, responseModel: "model-" + apiKey, usageModel: "requested-model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				if r.Header.Get("Authorization") != "Bearer "+apiKey || r.Header.Get(proxyHeader) != tc.key {
+					t.Error("unexpected authorization or proxy header")
+				}
+				if r.Header.Get("X-OpenCode-Session") != "conversation-id" {
+					t.Error("missing session header")
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"model": tc.responseModel,
+					"choices": []map[string]any{{
+						"message": map[string]string{"content": "hello"},
+					}},
+				})
+			}))
+			defer server.Close()
+			cfg := OpenAIConfig{
+				BaseURL: server.URL + "/v1",
+				APIKey:  apiKey,
+				Model:   "requested-model",
+				Options: domain.ModelOptions{SessionHeader: "x-opencode-session"},
+			}
+			if tc.key != "" {
+				cfg.Headers = map[string]string{proxyHeader: tc.key}
+			}
+			client, err := NewOpenAI(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := domain.WithModelSession(context.Background(), "conversation-id")
+			out, err := client.Complete(ctx, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Message.Content != "hello" || out.Usage.Model != tc.usageModel {
+				t.Error("unexpected completion content or usage model")
+			}
+		})
+	}
+}
+
 func TestOpenAIRejectsTruncatedOrInvalidToolCall(t *testing.T) {
 	for _, body := range []string{`{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}`, `{"choices":[{"message":{"tool_calls":[{"id":"c","type":"function","function":{"name":"x","arguments":"broken"}}]}}]}`} {
 		t.Run(body, func(t *testing.T) {
@@ -65,11 +122,15 @@ func TestOpenAIRejectsTruncatedOrInvalidToolCall(t *testing.T) {
 }
 func TestProviderErrorsNeverExposeBodyOrURL(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", r.Header.Get("X-LLM-Proxy-Key"))
 		w.WriteHeader(401)
-		_, _ = io.WriteString(w, "SECRET_FROM_BODY")
+		_, _ = io.WriteString(w, "SECRET_FROM_BODY "+r.Header.Get("X-LLM-Proxy-Key"))
 	}))
 	defer s.Close()
-	m, _ := NewOpenAI(OpenAIConfig{BaseURL: s.URL, Model: "x", APIKey: "SECRET_FROM_KEY"})
+	m, _ := NewOpenAI(OpenAIConfig{
+		BaseURL: s.URL, Model: "x", APIKey: "SECRET_FROM_KEY",
+		Headers: map[string]string{"X-LLM-Proxy-Key": "SECRET_FROM_HEADER"},
+	})
 	_, err := m.Complete(context.Background(), nil, nil)
 	if err == nil || strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), s.URL) {
 		t.Fatalf("unsafe error %v", err)
