@@ -490,6 +490,25 @@ main {
 .empty-panel p {
   margin: 0 0 7px;
 }
+.timeline-filter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  margin: 0 12px;
+  padding: 5px 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+.timeline-filter input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+.hide-other-tools .other-tool {
+  display: none;
+}
 .error {
   padding: 7px 10px;
   margin: 4px 0;
