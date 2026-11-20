@@ -1,6 +1,6 @@
 # MinIO's former public images are unavailable. Build the unmodified upstream
 # sources at fixed commits; keep their licenses and source references in images.
-FROM golang:1.26.9-alpine AS source
+FROM golang:1.27.4-alpine AS source
 RUN apk add --no-cache git
 
 FROM source AS minio-build
@@ -17,7 +17,7 @@ WORKDIR /src
 RUN git init && git remote add origin https://github.com/minio/mc.git && git fetch --depth=1 origin ${MC_REVISION} && git checkout --detach FETCH_HEAD
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="$(go run buildscripts/gen-ldflags.go)" -o /out/mc .
 
-FROM alpine:3.23 AS runtime
+FROM alpine:3.24 AS runtime
 RUN apk add --no-cache ca-certificates tzdata
 
 FROM runtime AS minio
