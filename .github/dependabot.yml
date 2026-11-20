@@ -1,0 +1,118 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /apps/backend
+    schedule:
+      interval: monthly
+    groups:
+      backend-go:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: /services/backup
+    schedule:
+      interval: monthly
+    groups:
+      backup-go:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: /services/log-gateway
+    schedule:
+      interval: monthly
+    groups:
+      log-gateway-go:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: /services/stt
+    schedule:
+      interval: monthly
+    groups:
+      stt-go:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: /shared/backup
+    schedule:
+      interval: monthly
+    groups:
+      shared-backup-go:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /apps/backend
+    schedule:
+      interval: monthly
+    groups:
+      backend-docker:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /services/backup
+    schedule:
+      interval: monthly
+    groups:
+      backup-docker:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /services/computer
+    schedule:
+      interval: monthly
+    groups:
+      computer-docker:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /services/log-gateway
+    schedule:
+      interval: monthly
+    groups:
+      log-gateway-docker:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /services/minio
+    schedule:
+      interval: monthly
+    groups:
+      minio-docker:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /services/stt
+    schedule:
+      interval: monthly
+    groups:
+      stt-docker:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /tools/testing
+    schedule:
+      interval: monthly
+    groups:
+      testing-docker:
+        patterns: ["*"]
+
+  # Keep repeated image pins in the release, local and test manifests together.
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule:
+      interval: monthly
+    groups:
+      postgres-compose:
+        patterns: [postgres]
+      temporal-compose:
+        patterns: [temporalio/*]
+      victorialogs-compose:
+        patterns: [victoriametrics/victoria-logs]
+
+  - package-ecosystem: npm
+    directory: /docs
+    schedule:
+      interval: monthly
+    groups:
+      docs-npm:
+        patterns: ["*"]
