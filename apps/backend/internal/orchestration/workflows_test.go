@@ -154,9 +154,17 @@ func TestProgressToolDoesNotEndTheTurn(t *testing.T) {
 	}
 }
 func twoSessions(ctx workflow.Context, in SessionInput) error {
-	for _, id := range []string{"first-session", "second-session"} {
-		child := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: id})
-		if err := workflow.ExecuteChildWorkflow(child, SessionWorkflow, in).Get(ctx, nil); err != nil {
+	sessions := []struct{ workflowID, incomingID string }{
+		{workflowID: "first-session", incomingID: "first"},
+		{workflowID: "second-session", incomingID: "tomorrow"},
+	}
+	for _, session := range sessions {
+		childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: session.workflowID})
+		child := workflow.ExecuteChildWorkflow(childCtx, SessionWorkflow, in)
+		if err := child.SignalChildWorkflow(ctx, MessageSignal, Event{ID: session.incomingID}).Get(ctx, nil); err != nil {
+			return err
+		}
+		if err := child.Get(ctx, nil); err != nil {
 			return err
 		}
 	}
@@ -202,16 +210,6 @@ func TestSessionsPreservePersonalMemoryAndIndependentTask(t *testing.T) {
 	a.Model = model
 	env := newEnv(a)
 	env.RegisterWorkflow(SessionWorkflow)
-	env.RegisterDelayedCallback(func() {
-		if err := env.SignalWorkflowByID("first-session", MessageSignal, Event{ID: "first"}); err != nil {
-			t.Error(err)
-		}
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		if err := env.SignalWorkflowByID("second-session", MessageSignal, Event{ID: "tomorrow"}); err != nil {
-			t.Error(err)
-		}
-	}, 2*time.Minute)
 	env.ExecuteWorkflow(twoSessions, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 6})
 	requireWorkflowOK(t, env)
 	tasks, err := repo.FindTasks(ctx, conv.ID, "")
