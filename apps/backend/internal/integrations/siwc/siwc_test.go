@@ -32,14 +32,15 @@ import (
 var hostIDPattern = regexp.MustCompile(`^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 type oauthFixture struct {
-	c            *Client
-	server       *httptest.Server
-	key          *rsa.PrivateKey
-	nonce        string
-	tokenCalls   atomic.Int32
-	refreshCalls atomic.Int32
-	scope        string
-	refreshError string
+	c              *Client
+	server         *httptest.Server
+	key            *rsa.PrivateKey
+	nonce          string
+	tokenCalls     atomic.Int32
+	refreshCalls   atomic.Int32
+	scope          string
+	refreshError   string
+	responseStream string
 }
 
 func newFixture(t *testing.T) *oauthFixture {
@@ -105,6 +106,10 @@ func (f *oauthFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		model, _ := json.Marshal(request.Model)
 		w.Header().Set("Content-Type", "text/event-stream")
+		if f.responseStream != "" {
+			io.WriteString(w, f.responseStream)
+			return
+		}
 		fmt.Fprintf(w, `data: {"type":"response.completed","response":{"status":"completed","model":"served-model-version","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}],"usage":{"input_tokens":7,"output_tokens":1,"input_tokens_details":{"cached_tokens":4}}}}`+"\n\n", model)
 	default:
 		http.NotFound(w, r)
@@ -393,6 +398,65 @@ func TestStreamTerminalEventsAndDiagnostics(t *testing.T) {
 	e := responseError(resp)
 	if e.Code != "subscription_sharing_route_not_supported" || e.Param != "model" || e.RequestID != "req-test" || e.Status != 403 || !strings.Contains(string(e.Body), "secret") || strings.Contains(fmt.Sprint(e), "secret") {
 		t.Fatalf("lost or leaked diagnostics: %+v", e)
+	}
+}
+
+func TestFailedResponsesPreserveUsageWithoutPartialOutput(t *testing.T) {
+	f := newFixture(t)
+	f.login(t)
+	partial := `{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","namespace":"openalbert","call_id":"partial-call","name":"lookup","arguments":"{}"}`
+	for _, tc := range []struct {
+		name, eventType, status, output string
+	}{
+		{"incomplete", "response.incomplete", "incomplete", partial},
+		{"failed", "response.failed", "failed", partial},
+		{"error", "error", "failed", partial},
+		{"invalid call", "response.completed", "completed", partial + `,{"type":"function_call","call_id":"bad","name":"lookup","arguments":"invalid"}`},
+		{"invalid item", "response.completed", "completed", partial + `,{"type":"message","content":true}`},
+		{"invalid status", "response.completed", "incomplete", partial},
+		{"empty output", "response.completed", "completed", `{"type":"reasoning","encrypted_content":"partial"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := fmt.Sprintf(`{"type":%q,"code":"failure","response":{"status":%q,"model":"served-model-version","output":[%s],"usage":{"input_tokens":7,"output_tokens":3,"input_tokens_details":{"cached_tokens":4}}}}`, tc.eventType, tc.status, tc.output)
+			f.responseStream = "data: " + event + "\n\n"
+			decoded, err := readStream(strings.NewReader(f.responseStream))
+			if err == nil || decoded.InputTokens != 7 || decoded.OutputTokens != 3 || !decoded.Usage.TokenUsageKnown || decoded.Usage.CachedInputTokens != 4 || decoded.Usage.Model != "served-model-version" || !reflect.DeepEqual(decoded.Message, domain.Message{}) {
+				t.Fatalf("decoder lost usage or exposed partial output: %+v %v", decoded, err)
+			}
+			got, err := f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			if err == nil || got.Model != "test-model" || got.InputTokens != 7 || got.OutputTokens != 3 || got.Usage != decoded.Usage || !reflect.DeepEqual(got.Message, domain.Message{}) {
+				t.Fatalf("client lost usage/model or exposed partial output: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestTerminalResponseUsageValidation(t *testing.T) {
+	for _, eventType := range []string{"response.completed", "response.incomplete", "response.failed", "error"} {
+		for _, tc := range []struct {
+			name, usage           string
+			known                 bool
+			input, output, cached int
+		}{
+			{"negative input", `{"input_tokens":-1,"output_tokens":3}`, false, 0, 0, 0},
+			{"negative output", `{"input_tokens":7,"output_tokens":-1}`, false, 0, 0, 0},
+			{"cache above input", `{"input_tokens":7,"output_tokens":3,"input_tokens_details":{"cached_tokens":20}}`, true, 7, 3, 7},
+			{"negative cache", `{"input_tokens":7,"output_tokens":3,"input_tokens_details":{"cached_tokens":-1}}`, true, 7, 3, 0},
+		} {
+			t.Run(eventType+"/"+tc.name, func(t *testing.T) {
+				event := fmt.Sprintf(`{"type":%q,"response":{"status":"completed","model":"served","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":%s}}`, eventType, tc.usage)
+				got, err := readStream(strings.NewReader("data: " + event + "\n\n"))
+				if (eventType != "response.completed" || !tc.known) && err == nil {
+					t.Fatal("accepted failed response or invalid usage")
+				}
+				if got.InputTokens != tc.input || got.OutputTokens != tc.output || got.Usage.TokenUsageKnown != tc.known || got.Usage.CachedInputTokens != tc.cached || got.Usage.Model != "served" {
+					t.Fatalf("invalid usage: %+v %v", got, err)
+				}
+				if err != nil && !reflect.DeepEqual(got.Message, domain.Message{}) {
+					t.Fatalf("failed response exposed output: %+v", got.Message)
+				}
+			})
+		}
 	}
 }
 

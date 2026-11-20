@@ -434,3 +434,44 @@ func TestAnalysisRefillsTranscriptAfterTrimmingMemorySnapshot(t *testing.T) {
 		t.Fatalf("analysis discarded useful transcript after freeing memory budget: %+v", fitted)
 	}
 }
+
+func TestUnmarkedHistoricalImageBatchLeavesNoDependentText(t *testing.T) {
+	var sent []domain.Message
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []domain.Message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		sent = body.Messages
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	for _, size := range []int{1000, 450000} {
+		messages := []domain.Message{
+			{Role: "system", Content: "Rules"},
+			// No recoverable boundaries separate the legacy batch parts.
+			{Role: "user", Content: "Image from old batch", Images: []string{strings.Repeat("a", size)}},
+			{Role: "user", Content: "What does the same image show?"},
+			{Role: "assistant", Content: "Dependent image answer"},
+			{Role: "user", TurnID: "prior", Content: "Earlier marked text"},
+			{Role: "assistant", Content: "Prior answer"},
+			{Role: "user", TurnID: "current", Content: "Current text"},
+		}
+		compact := CompactContext(messages, "current")
+		model := httpRoutingModel(t, server.URL, 128000, false)
+		ctx := domain.WithModelTurn(domain.WithModelRole(context.Background(), domain.RoleChat), "current")
+		if _, err := model.Complete(ctx, compact, nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range sent {
+			if strings.Contains(m.Content, "old batch") || strings.Contains(m.Content, "same image") || strings.Contains(m.Content, "Dependent image") {
+				t.Fatalf("legacy image batch leaked bare text (size%d): %+v", size, m)
+			}
+		}
+		if len(sent) != 4 || sent[1].Content != "Earlier marked text" || sent[3].Content != "Current text" {
+			t.Fatalf("legacy block eviction lost independent text: %d messages", len(sent))
+		}
+	}
+}

@@ -122,11 +122,9 @@ func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools 
 		api.RequestID = resp.Header.Get("x-request-id")
 		api.Status = resp.StatusCode
 	}
-	if err == nil {
-		result.Model = body.Model
-		if result.Usage.Model == "" {
-			result.Usage.Model = body.Model
-		}
+	result.Model = body.Model
+	if result.Usage.Model == "" {
+		result.Usage.Model = body.Model
 	}
 	return result, err
 }
@@ -165,6 +163,25 @@ type responseEvent struct {
 	} `json:"response"`
 }
 
+// Usage belongs to the request even when its output is incomplete or invalid.
+// Keep it separate so no partially decoded message can escape on an error.
+func (event responseEvent) completionUsage() (domain.Completion, error) {
+	result := domain.Completion{Usage: domain.ModelUsage{Model: event.Response.Model}}
+	usage := event.Response.Usage
+	if (usage.Input != nil && *usage.Input < 0) || (usage.Output != nil && *usage.Output < 0) {
+		return result, errors.New("ChatGPT returned invalid token usage")
+	}
+	result.Usage.TokenUsageKnown = usage.Input != nil && usage.Output != nil
+	if usage.Input != nil {
+		result.InputTokens = *usage.Input
+	}
+	if usage.Output != nil {
+		result.OutputTokens = *usage.Output
+	}
+	result.Usage.CachedInputTokens = max(0, min(usage.InputDetails.Cached, result.InputTokens))
+	return result, nil
+}
+
 // Partial deltas are never executed or returned. The authoritative completed
 // response contains final text/calls and usage; EOF alone cannot be success.
 func readStream(reader io.Reader) (domain.Completion, error) {
@@ -186,56 +203,52 @@ func readStream(reader io.Reader) (domain.Completion, error) {
 		}
 		switch event.Type {
 		case "response.failed", "error":
+			result, _ := event.completionUsage()
 			e := &APIError{Body: append([]byte{}, raw...), Code: event.Code, Param: event.Param}
 			if event.Response.Error != nil {
 				e.Code = event.Response.Error.Code
 				e.Param = event.Response.Error.Param
 			}
-			return domain.Completion{}, false, e
+			return result, false, e
 		case "response.incomplete":
-			return domain.Completion{}, false, errors.New("ChatGPT response incomplete")
+			result, _ := event.completionUsage()
+			return result, false, errors.New("ChatGPT response incomplete")
 		case "response.completed":
+			result, err := event.completionUsage()
+			if err != nil {
+				return result, false, err
+			}
 			if event.Response.Status != "completed" {
-				return domain.Completion{}, false, errors.New("invalid ChatGPT completion status")
+				return result, false, errors.New("invalid ChatGPT completion status")
 			}
-			usage := event.Response.Usage
-			result := domain.Completion{Message: domain.Message{Role: "assistant"}, Usage: domain.ModelUsage{Model: event.Response.Model, TokenUsageKnown: usage.Input != nil && usage.Output != nil}}
-			if usage.Input != nil {
-				result.InputTokens = *usage.Input
-			}
-			if usage.Output != nil {
-				result.OutputTokens = *usage.Output
-			}
-			if result.InputTokens < 0 || result.OutputTokens < 0 {
-				return domain.Completion{}, false, errors.New("ChatGPT returned invalid token usage")
-			}
-			result.Usage.CachedInputTokens = max(0, min(usage.InputDetails.Cached, result.InputTokens))
+			message := domain.Message{Role: "assistant"}
 			for _, rawItem := range event.Response.Output {
 				var item responseOutput
 				if json.Unmarshal(rawItem, &item) != nil {
-					return domain.Completion{}, false, errors.New("invalid ChatGPT output item")
+					return result, false, errors.New("invalid ChatGPT output item")
 				}
-				result.Message.ResponsesItems = append(result.Message.ResponsesItems, rawItem)
+				message.ResponsesItems = append(message.ResponsesItems, rawItem)
 				switch item.Type {
 				case "message":
 					for _, part := range item.Content {
 						if part.Type == "output_text" {
-							result.Message.Content += part.Text
+							message.Content += part.Text
 						}
 						if part.Type == "refusal" {
-							result.Message.Content += part.Refusal
+							message.Content += part.Refusal
 						}
 					}
 				case "function_call":
 					if item.CallID == "" || item.Name == "" || !json.Valid([]byte(item.Arguments)) || (item.Namespace != "" && item.Namespace != "openalbert") {
-						return domain.Completion{}, false, errors.New("ChatGPT returned an invalid tool call")
+						return result, false, errors.New("ChatGPT returned an invalid tool call")
 					}
-					result.Message.ToolCalls = append(result.Message.ToolCalls, domain.ToolCall{ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(item.Arguments)})
+					message.ToolCalls = append(message.ToolCalls, domain.ToolCall{ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(item.Arguments)})
 				}
 			}
-			if result.Message.Content == "" && len(result.Message.ToolCalls) == 0 {
-				return domain.Completion{}, false, errors.New("ChatGPT returned an empty response")
+			if message.Content == "" && len(message.ToolCalls) == 0 {
+				return result, false, errors.New("ChatGPT returned an empty response")
 			}
+			result.Message = message
 			return result, true, nil
 		}
 		return domain.Completion{}, false, nil

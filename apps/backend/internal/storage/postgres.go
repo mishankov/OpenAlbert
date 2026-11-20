@@ -322,10 +322,14 @@ func (s *Store) EndSession(ctx context.Context, id, summary string) error {
 	return err
 }
 func (s *Store) PendingAnalysis(ctx context.Context, n int) ([]domain.Session, error) {
-	return selectJSON[domain.Session](ctx, s.pool, "SELECT data FROM openalbert_sessions WHERE NOT analyzed AND data->>'status'='closed' ORDER BY seq LIMIT $1", limitValue(n))
+	return selectJSON[domain.Session](ctx, s.pool, "SELECT data FROM openalbert_sessions WHERE NOT analyzed AND data->>'status'='closed' AND COALESCE(data->>'analysis_error','')='' ORDER BY seq LIMIT $1", limitValue(n))
 }
 func (s *Store) MarkAnalyzed(ctx context.Context, id string) error {
-	_, err := s.pool.Exec(ctx, "UPDATE openalbert_sessions SET analyzed=true WHERE id=$1 AND data->>'status'='closed'", id)
+	_, err := s.pool.Exec(ctx, "UPDATE openalbert_sessions SET analyzed=true WHERE id=$1 AND data->>'status'='closed' AND COALESCE(data->>'analysis_error','')=''", id)
+	return err
+}
+func (s *Store) MarkAnalysisFailed(ctx context.Context, id, code string) error {
+	_, err := s.pool.Exec(ctx, "UPDATE openalbert_sessions SET data=jsonb_set(data,'{analysis_error}',to_jsonb($2::text)) WHERE id=$1 AND NOT analyzed AND data->>'status'='closed' AND COALESCE(data->>'analysis_error','')=''", id, code)
 	return err
 }
 func (s *Store) AppendMessage(ctx context.Context, session, key string, m domain.Message) error {

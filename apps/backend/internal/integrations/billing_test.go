@@ -2,7 +2,9 @@ package integrations
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,13 +15,17 @@ import (
 
 type billingStub struct {
 	*siwc.Client
-	calls atomic.Int32
-	model string
-	err   error
+	calls      atomic.Int32
+	model      string
+	err        error
+	completion *domain.Completion
 }
 
 func (m *billingStub) Complete(context.Context, []domain.Message, []domain.Tool) (domain.Completion, error) {
 	m.calls.Add(1)
+	if m.completion != nil {
+		return *m.completion, m.err
+	}
 	return domain.Completion{Model: m.model, Message: domain.Message{Role: "assistant", Content: "ok"}}, m.err
 }
 func (m *billingStub) Status() siwc.Status {
@@ -88,5 +94,26 @@ func TestBillingDoesNotChangePaymentForInvalidRequests(t *testing.T) {
 	b = &BillingModel{Mode: "api_key", API: api}
 	if _, err := b.Complete(context.Background(), nil, nil); err != nil || api.calls.Load() != 1 {
 		t.Fatal("default API route changed")
+	}
+}
+
+func TestBillingPreservesFailedPlanUsageWithoutPartialOutput(t *testing.T) {
+	for _, mode := range []string{"siwc", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			failure := errors.New("ChatGPT response incomplete")
+			completion := domain.Completion{
+				Model: "requested-model", InputTokens: 7, OutputTokens: 3,
+				Usage:   domain.ModelUsage{Model: "served-model", TokenUsageKnown: true, CachedInputTokens: 4},
+				Message: domain.Message{Role: "assistant", Content: "partial", ToolCalls: []domain.ToolCall{{ID: "partial-call", Name: "lookup"}}, ResponsesItems: []json.RawMessage{json.RawMessage(`{"type":"reasoning"}`)}},
+			}
+			plan := &billingStub{completion: &completion, err: failure}
+			api := &billingStub{}
+			b := &BillingModel{Mode: mode, Plan: plan, API: api}
+			got, err := b.Complete(context.Background(), nil, nil)
+			completion.Message = domain.Message{}
+			if !errors.Is(err, failure) || !reflect.DeepEqual(got, completion) || plan.calls.Load() != 1 || api.calls.Load() != 0 {
+				t.Fatalf("lost usage, exposed partial output or changed billing: %+v %v", got, err)
+			}
+		})
 	}
 }

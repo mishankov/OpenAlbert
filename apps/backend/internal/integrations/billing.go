@@ -123,7 +123,8 @@ func (b *BillingModel) Complete(ctx context.Context, messages []domain.Message, 
 		}
 		b.mu.Unlock()
 		if !canFallback {
-			return domain.Completion{}, err
+			result.Message = domain.Message{}
+			return result, err
 		}
 	}
 	b.mu.Lock()

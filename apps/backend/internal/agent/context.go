@@ -9,6 +9,8 @@ import (
 
 const MaxContextMessageRunes = 32000
 
+var ErrAnalysisContextLimit = errors.New("latest analysis entry exceeds the profile context budget")
+
 // CompactContext bounds Temporal payloads by removing complete historical turns.
 // The caller supplies the current turn key; old prepared payloads without that
 // marker are ambiguous and must remain intact or fail with an overflow marker.
@@ -125,7 +127,7 @@ func (a *Activities) fitAnalysisContext(ctx context.Context, instructions string
 		} else if len(payload.Existing) > 0 {
 			payload.Existing = payload.Existing[:len(payload.Existing)-1]
 		} else {
-			return nil, payload, errors.New("latest analysis entry exceeds the profile context budget")
+			return nil, payload, ErrAnalysisContextLimit
 		}
 	}
 }

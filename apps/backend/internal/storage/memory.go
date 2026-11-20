@@ -209,7 +209,7 @@ func (m *Memory) PendingAnalysis(ctx context.Context, n int) ([]domain.Session, 
 	out := []domain.Session{}
 	for _, id := range m.sessionOrder {
 		v := m.sessions[id]
-		if v.Status == "closed" && !m.analyzed[id] {
+		if v.Status == "closed" && !m.analyzed[id] && v.AnalysisError == "" {
 			out = append(out, v)
 			if len(out) >= limitValue(n) {
 				break
@@ -224,8 +224,20 @@ func (m *Memory) MarkAnalyzed(ctx context.Context, id string) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if s, ok := m.sessions[id]; ok && s.Status == "closed" {
+	if s, ok := m.sessions[id]; ok && s.Status == "closed" && s.AnalysisError == "" {
 		m.analyzed[id] = true
+	}
+	return nil
+}
+func (m *Memory) MarkAnalysisFailed(ctx context.Context, id, code string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.sessions[id]; ok && s.Status == "closed" && !m.analyzed[id] && s.AnalysisError == "" {
+		s.AnalysisError = code
+		m.sessions[id] = s
 	}
 	return nil
 }

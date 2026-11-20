@@ -181,6 +181,7 @@ type Session struct {
 	ConversationID string    `json:"conversation_id"`
 	Status         string    `json:"status"`
 	Summary        string    `json:"summary,omitempty"`
+	AnalysisError  string    `json:"analysis_error,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
@@ -234,6 +235,7 @@ type Repository interface {
 	PendingAnalysis(context.Context, int) ([]Session, error)
 	ActiveSessions(context.Context) ([]Session, error)
 	MarkAnalyzed(context.Context, string) error
+	MarkAnalysisFailed(context.Context, string, string) error
 	AppendMessage(context.Context, string, string, Message) error
 	Messages(context.Context, string) ([]Message, error)
 	CreateTask(context.Context, Task) (Task, error)

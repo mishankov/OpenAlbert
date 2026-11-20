@@ -56,7 +56,8 @@ func ModelTurnStart(messages []Message, turn string) int {
 }
 
 // OldestModelTurn returns one removable historical turn, never an instruction.
-// Unmarked user messages inside a marked turn are artifact views, not boundaries.
+// Unmarked user messages cannot identify a new turn: they may be a batch part or
+// artifact view. Treat an unmarked historical block as one ambiguous unit.
 func OldestModelTurn(messages []Message, protected int) (start, end int) {
 	for start = 0; start < protected; start++ {
 		role := messages[start].Role
@@ -73,7 +74,7 @@ func OldestModelTurn(messages []Message, protected int) (start, end int) {
 		if m.Role != "user" && m.Role != "assistant" && m.Role != "tool" {
 			break
 		}
-		if (m.TurnID != "" && m.TurnID != turn) || (turn == "" && m.Role == "user") {
+		if m.TurnID != "" && m.TurnID != turn {
 			break
 		}
 	}

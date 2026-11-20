@@ -234,11 +234,11 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			}
 			queue = queue[count:]
 			steerInput := turn.Input
-			steerInput.IncomingIDs = newIDs
 			// Retain consumed inputs even if preparation is cancelled, so the
 			// dispatcher cannot resurrect them after Finish.
 			allIDs := append(append([]string{}, turn.Input.IncomingIDs...), newIDs...)
 			turn.Input.IncomingIDs = allIDs
+			steerInput.IncomingIDs = allIDs
 			updated, err := prepareTurn(runctx, steerInput)
 			if err != nil {
 				return err
@@ -630,7 +630,14 @@ func TaskWorkflow(ctx workflow.Context, in TaskInput) error {
 }
 func AnalysisWorkflow(ctx workflow.Context, session domain.Session) error {
 	ctx = options(ctx)
-	return workflow.ExecuteActivity(ctx, "Analyze", session).Get(ctx, nil)
+	err := workflow.ExecuteActivity(ctx, "Analyze", session).Get(ctx, nil)
+	var failure *temporal.ApplicationError
+	if errors.As(err, &failure) && failure.Type() == agent.AnalysisContextLimitErrorType && failure.NonRetryable() {
+		// An activity error wrapper otherwise allows the workflow retry policy to
+		// restart this terminal analysis indefinitely.
+		return temporal.NewNonRetryableApplicationError(failure.Message(), failure.Type(), err)
+	}
+	return err
 }
 func InitiativeWorkflow(ctx workflow.Context, in InitiativeInput) error {
 	ctx = options(ctx)
