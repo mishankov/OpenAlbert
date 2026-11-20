@@ -2,36 +2,36 @@
   "version": 1,
   "skills": {
     "babysit-pr": {
-      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
-      "sha256": "abcaacb8a53823fab5a1ea963692b4ffe914aff486a9775bebab3b50af5c9fb1"
+      "commit": "f71cdb809bf33feeca30327260d2898d38175569",
+      "sha256": "18cb1fdcab618f1adaa7aba8ee9cbf63018d2ac0a8968312b2cfa961b25844b7"
     },
     "capture-issue": {
       "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
       "sha256": "9eb07bedda3a56a5fcf8d0a3d5100d367d506db41ef66e4501bafe1db1d96ca3"
     },
     "file-pr": {
-      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
-      "sha256": "5ebc3c9ac478c066f0b94607705380b8f7673f21f50e7c552d4fffcd005631bf"
+      "commit": "f71cdb809bf33feeca30327260d2898d38175569",
+      "sha256": "7909c0a5fc66e0a77d03cedbfc8c37f648cb93416c04398aa2a6face63f4809c"
     },
     "full-send": {
-      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
-      "sha256": "460fc1e9ddd2f50c02f0e7462464b88186531d6592f3a758eaa6e2c316d5ede0"
+      "commit": "f71cdb809bf33feeca30327260d2898d38175569",
+      "sha256": "4db121f2d59b777c406d8182c6ea6c226e3aa52841cfcdf86a7a6d86e8fde036"
     },
     "full-stop": {
       "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
       "sha256": "66d196ad5eb9d00f9114b5e0d43ecf77d5e57597f9cf11a61460274994c43972"
     },
     "implement": {
-      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
-      "sha256": "7d2204d77894430a121ffbc8604bba02e0aba1f999b341a172476bfe1df4975a"
+      "commit": "f71cdb809bf33feeca30327260d2898d38175569",
+      "sha256": "f18dbf231e53b930e68f7f183260d6a0a16ec53f3a34694b1853baac001d7734"
     },
     "leaving-pr-comments": {
       "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
       "sha256": "dfada04017a20225b7157026f235d13e439b6c673ec9c40bf8592e0ec2ab0c1d"
     },
     "manage-mstack-skills": {
-      "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",
-      "sha256": "e90ccea22ec9936a78125745d717e9a8d88e7d5041c614409973124a56adf67c"
+      "commit": "f71cdb809bf33feeca30327260d2898d38175569",
+      "sha256": "aeff8fa3b657cd7dedda9a6221f8f3d329af25d611810f5523914d4db3eb4a30"
     },
     "pick-next-work": {
       "commit": "ee6779fc8f004a91fe891031ee6e61f951b5b341",

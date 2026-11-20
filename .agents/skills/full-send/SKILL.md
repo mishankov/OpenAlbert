@@ -44,14 +44,17 @@ one appears.
 
 1. **Finish the change.** Complete the goal from the user's request with the
    smallest change that works. Fix the case that happened, not every case
-   that could. If you are on the default branch, create a branch first.
+   that could. If you are on the default branch, create a branch first. When
+   starting implementation, follow the update-check step in
+   [implement](../implement/SKILL.md#check-for-skill-updates). Treat this
+   workflow as unattended for that step.
 2. **Prove it.** Get proof for every change you made. See "Proof".
-3. **Get feedback.** Use the `review-loop` skill to verify changes.
-4. **File the PR** with the `file-pr` skill. Rebase onto the latest default
-   branch first. Add one short line to the description that says how you proved
-   the change.
-5. **Babysit the PR** with the `babysit-pr` skill. Fix real findings and CI
-   failures. Get proof for each fix before you push it.
+3. **Get feedback.** Use [review-loop](../review-loop/SKILL.md) to verify changes.
+4. **File the PR** with [file-pr](../file-pr/SKILL.md). Rebase onto the latest
+   default branch first. Add one short line to the description that says how
+   you proved the change.
+5. **Babysit the PR** with [babysit-pr](../babysit-pr/SKILL.md). Fix real findings
+   and CI failures. Get proof for each fix before you push it.
 6. **Merge** when the merge gate passes.
 7. **Report** in your final message: the PR link, the merge commit, your proof,
    and each decision you made for the user.
@@ -85,8 +88,8 @@ Full confidence means all of these are true on the latest commit:
 
 - Your proof covers every change in the diff.
 - Required checks are green.
-- Review bots have finished, and each finding is fixed or dismissed with a
-  written reason.
+- Repository-required reviews are complete, and each review finding is fixed
+  or dismissed with a written reason.
 - No human review still requests changes.
 - The branch is up to date with the default branch, and GitHub reports it as
   mergeable.

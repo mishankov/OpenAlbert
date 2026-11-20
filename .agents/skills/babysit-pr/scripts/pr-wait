@@ -9,10 +9,10 @@ monitor (Claude Code's Monitor tool) wakes the agent once per real event.
 Progress and errors that do not end the run go to stderr.
 
 --until
-  green       required checks passed on the current head (every CI check when
-              the base branch requires none)
-  ready      green, Greptile or Macroscope reviewed the current head, and no
-              review thread is unresolved (default)
+  green       required checks passed on the current head (reported CI checks
+              when the base branch requires none)
+  ready       green, no unresolved review threads, and no conflicts or
+              behind-branch status (default)
   any-change  stop after the first poll that prints an event
 
 Exit codes
@@ -27,8 +27,7 @@ Events
   - all checks finished on the head (one summary line)
   - a new comment, review, thread, or thread reply from someone other than the
     PR author or the gh user
-  - Greptile, Macroscope, or CodeRabbit finished on the head, or a Greptile or
-    Macroscope summary changed after that
+  - CodeRabbit finished on the head
   - the base branch moved and the new commits touch files in this PR
   - merge state became BEHIND or DIRTY
   - the PR merged or closed
@@ -47,7 +46,6 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import hashlib
 import html
 import json
 import os
@@ -59,10 +57,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
-GATING_BOTS = ("greptile", "macroscope")
-ADVISORY_BOTS = ("coderabbit",)
 # CI and deploy bots report through checks. Their PR comments are status reports.
 STATUS_BOTS = ("github-actions", "vercel", "netlify", "railway", "cloudflare")
+# Match complete check names so CI jobs can mention these tools in their names.
+CODERABBIT_CHECKS = {"coderabbit", "coderabbit review"}
+ADVISORY_REVIEW_CHECKS = CODERABBIT_CHECKS | {
+    "greptile", "greptile review", "macroscope", "macroscope review",
+}
 STATE_DIR = Path.home() / ".local" / "state" / "pr-wait"
 # A state file older than this describes an old session. Start a fresh baseline
 # instead of replaying hours of comments as new events.
@@ -142,10 +143,8 @@ def gh_lines(args: list[str]) -> list[str]:
     return [line for line in gh(args).stdout.splitlines() if line]
 
 
-def bot_name(text: str | None) -> str | None:
-    """Which review bot a login or check name belongs to, if any."""
-    lowered = (text or "").lower()
-    return next((bot for bot in GATING_BOTS + ADVISORY_BOTS if bot in lowered), None)
+def is_coderabbit(text: str) -> bool:
+    return "coderabbit" in text.lower()
 
 
 def who(node: Json) -> tuple[str, bool]:
@@ -164,15 +163,11 @@ def snippet(body: str, limit: int = 100) -> str:
 
 
 def verdict(body: str) -> str:
-    """The verdict line of a bot summary (Macroscope, Greptile), if it has one."""
+    """The verdict line of a bot summary, if it has one."""
     for line in plain(body).splitlines():
         if re.search(r"verdict|confidence score", line, re.IGNORECASE):
             return snippet(line.replace("*", ""), 80)
     return ""
-
-
-def digest(body: str) -> str:
-    return hashlib.sha1(re.sub(r"\s+", " ", plain(body)).encode()).hexdigest()[:12]
 
 
 def parse_target(raw: str | None, repo: str | None) -> tuple[str, int]:
@@ -253,7 +248,7 @@ class Watcher:
         state = self.load()
         # First run for this PR: record what exists and report nothing.
         self.baseline = state is None
-        self.state: Json = state or {"reported": [], "summaries": {}, "base_oid": None, "merge_state": None}
+        self.state: Json = state or {"reported": [], "base_oid": None, "merge_state": None}
         self.reported: set[str] = set(self.state["reported"])
         self.printed: set[str] = set()
         self.events = 0
@@ -362,9 +357,11 @@ class Watcher:
         threads = pr["reviewThreads"]["nodes"]
         self.events = 0
 
-        # Required checks. With no required checks configured, every CI check
-        # gates except the review bots' own checks.
-        gate = self.required or {name for name in checks if not bot_name(name)}
+        watched = {
+            name: check for name, check in checks.items()
+            if name in self.required or name.lower() not in ADVISORY_REVIEW_CHECKS
+        }
+        gate = self.required or watched.keys()
         label = "required check" if self.required else "check"
 
         def bucket(name: str) -> str:
@@ -376,7 +373,6 @@ class Watcher:
                 link = checks[name]["link"]
                 fail_lines.append(f"{label} failed: {name} {link}")
                 self.emit(f"fail:{head}:{name}:{link}", fail_lines[-1])
-        watched = {name: c for name, c in checks.items() if bot_name(name) not in ADVISORY_BOTS}
         gate_done = bool(gate) and all(bucket(n) != "pending" for n in gate)
         all_done = gate_done and all(c["bucket"] != "pending" for c in watched.values())
         # Checks appear a few seconds after a push. Two identical polls in a row
@@ -389,7 +385,7 @@ class Watcher:
         # People and bots talking. Edits are never events.
         for comment in comments:
             login, is_bot = who(comment)
-            if login in mine or bot_name(login) or (is_bot and any(b in login for b in STATUS_BOTS)):
+            if login in mine or is_coderabbit(login) or (is_bot and any(b in login for b in STATUS_BOTS)):
                 continue
             self.emit(f"c:{comment['id']}", f"comment from {login}: {snippet(comment['body'])} {comment['url']}")
         for review in reviews:
@@ -412,45 +408,26 @@ class Watcher:
                 kind = "new thread" if index == 0 else "thread reply"
                 self.emit(f"c:{comment['id']}", f"{kind} from {login} on {where}: {snippet(comment['body'])} {comment['url']}")
 
-        # Review bots on the current head. A bot with checks is done when they
-        # finish. Otherwise it is done once it reviews the head commit or its
-        # summary names the head.
-        bot_status: dict[str, str] = {}
-        reviewed: list[str] = []
-        for bot in GATING_BOTS + ADVISORY_BOTS:
-            own_checks = {name: c for name, c in checks.items() if bot_name(name) == bot}
-            summaries = [c for c in comments if bot_name(who(c)[0]) == bot]
-            own_reviews = [r for r in reviews if bot_name(who(r)[0]) == bot]
-            on_head = any((r.get("commit") or {}).get("oid") == head for r in own_reviews)
-            if own_checks:
-                done = all(c["bucket"] != "pending" for c in own_checks.values())
-            else:
-                done = on_head or any(short in s["body"] for s in summaries)
-            seen = bool(own_checks or summaries or own_reviews)
-            if bot in ADVISORY_BOTS and own_checks:
-                desc = next(iter(own_checks.values()))
-                bot_status[bot] = f"{bot} {desc['description'] or desc['bucket']} (advisory)"
-            elif seen:
-                bot_status[bot] = f"{bot} {'done' if done else 'pending'}{' (advisory)' if bot in ADVISORY_BOTS else ''}"
-            key = f"bot:{bot}:{head}"
-            was_done = key in self.reported
-            if done:
-                if bot in GATING_BOTS:
-                    reviewed.append(bot)
-                failed = [name for name, c in own_checks.items() if c["bucket"] in FAILED]
-                detail = "; ".join(filter(None, [
-                    next((v for v in map(verdict, (s["body"] for s in summaries)) if v), ""),
-                    f"failed: {', '.join(failed)}" if failed else "",
-                ]))
-                tag = " (advisory, not waited on)" if bot in ADVISORY_BOTS else ""
-                self.emit(key, f"{bot} finished on {short}{': ' + detail if detail else ''}{tag}")
-            if bot in GATING_BOTS:
-                for s in summaries:
-                    new, old = digest(s["body"]), self.state["summaries"].get(s["id"])
-                    self.state["summaries"][s["id"]] = new
-                    if was_done and old and old != new:
-                        text = verdict(s["body"]) or snippet(s["body"])
-                        self.emit(f"summary:{s['id']}:{new}", f"{bot} summary changed on {short}: {text} {s['url']}")
+        # Report CodeRabbit activity on the current head as advisory feedback.
+        advisory = {name: c for name, c in checks.items() if name.lower() in CODERABBIT_CHECKS}
+        summaries = [c for c in comments if is_coderabbit(who(c)[0])]
+        own_reviews = [r for r in reviews if is_coderabbit(who(r)[0])]
+        on_head = any((r.get("commit") or {}).get("oid") == head for r in own_reviews)
+        done = (all(c["bucket"] != "pending" for c in advisory.values())
+                if advisory else on_head or any(short in s["body"] for s in summaries))
+        bot_status = ""
+        if advisory:
+            check = next(iter(advisory.values()))
+            bot_status = f"coderabbit {check['description'] or check['bucket']} (advisory)"
+        elif summaries or own_reviews:
+            bot_status = f"coderabbit {'done' if done else 'pending'} (advisory)"
+        if done:
+            failed = [name for name, c in advisory.items() if c["bucket"] in FAILED]
+            detail = "; ".join(filter(None, [
+                next((v for v in map(verdict, (s["body"] for s in summaries)) if v), ""),
+                f"failed: {', '.join(failed)}" if failed else "",
+            ]))
+            self.emit(f"bot:coderabbit:{head}", f"coderabbit finished on {short}{': ' + detail if detail else ''} (advisory, not waited on)")
 
         # Base branch and merge state.
         base_oid = ((pr.get("baseRef") or {}).get("target") or {}).get("oid")
@@ -485,8 +462,7 @@ class Watcher:
             f"required {sum(bucket(n) in ('pass', 'skipping') for n in self.required)}/{len(self.required)} green"
             if self.required
             else "",
-            ", ".join(bot_status[b] for b in GATING_BOTS + ADVISORY_BOTS if b in bot_status)
-            or "no Greptile or Macroscope yet",
+            bot_status,
             f"{len(unresolved)} unresolved threads",
             f"merge state {merge_state}",
         ]
@@ -503,8 +479,7 @@ class Watcher:
             if green and self.until == "green":
                 self.reported.add(checks_key)
                 self.finish(0, [f"green on {short}: {summary}{self.behind(base, base_oid, head)}"])
-            # ready waits for Greptile or Macroscope, never for CodeRabbit.
-            if green and reviewed:
+            if green and self.until == "ready":
                 if unresolved:
                     self.finish(1, [f"blocked by {len(unresolved)} unresolved threads on {short}: {' '.join(unresolved)}"])
                 if merge_state == "BEHIND":

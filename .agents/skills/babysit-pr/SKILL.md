@@ -37,21 +37,22 @@ branch conflicts.
 
 ### Everywhere else: `pr-wait`
 
-Wait with `scripts/pr-wait` from this skill's directory (use its absolute
-path).
+Run [`scripts/pr-wait`](scripts/pr-wait) using its absolute path.
 
 ```bash
 pr-wait <pr> [--repo owner/name] [--until ready|green|any-change]
 ```
 
 It prints one line per real event. It exits 0 when the `--until` condition is
-met or the PR merges, 1 when it needs you (a required check failed, conflicts,
-unresolved threads, PR closed), and 2 on bad input.
+met or the PR merges, 1 when it needs you (a required check failed, the branch
+is behind or has conflicts, review threads are unresolved, or the PR closed),
+and 2 on bad input.
 
-- `ready` (default): required checks green, Greptile or Macroscope reviewed the
-  head, and no unresolved threads. Use this to babysit.
-- `green`: required checks only. Use it when the repo has no Greptile or
-  Macroscope.
+- `ready` (default) waits for green checks. Unresolved threads and GitHub's
+  `BEHIND` or `DIRTY` merge status block readiness.
+- `green` exits after checks pass or stops early on `DIRTY`. If the branch
+  has no required checks, both modes use the reported CI checks and skip
+  advisory review-bot checks.
 - `any-change`: exit on the first event.
 
 In Claude Code, run it with the Monitor tool (`timeout_ms: 3600000`), so each
@@ -80,15 +81,13 @@ finding against the source before changing code. Fix real findings and CI
 failures, distinguish repository failures from infrastructure flakes, and reply
 with a written reason when dismissing false positives.
 
-If the repo has `.macroscope/check-run-agents/*.md`, read those rules before you
-reply to a Macroscope finding. Its findings cite them.
-
-CodeRabbit is advisory. Treat its findings like any other finding, but never
-wait for it and never hold a merge for it.
+Treat CodeRabbit feedback as advisory. Wait for its check only if the branch
+requires it.
 
 If a review bot leaves feedback you believe is not worth addressing, reply with
-a written reason and resolve the comment. Use the `leaving-pr-comments` skill
-for every comment posted on the user's behalf.
+a written reason and resolve the comment. Use
+[leaving-pr-comments](../leaving-pr-comments/SKILL.md) for comments posted on the
+user's behalf.
 
 Screenshots and videos help as well, when you have a way to upload them.
 
