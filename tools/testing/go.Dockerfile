@@ -1,4 +1,4 @@
-FROM golang:1.26.9-bookworm
+FROM golang:1.27.4-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends chromium ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
