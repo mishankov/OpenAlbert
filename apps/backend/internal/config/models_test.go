@@ -172,3 +172,78 @@ func TestModelTimeoutFitsEnclosingActivity(t *testing.T) {
 		t.Fatal("maximum model timeout should retain checkpoint headroom", err)
 	}
 }
+
+const subscriptionProfile = `
+[profiles.subscription]
+adapter = "openai_chatgpt"
+model = "chatgpt-chat-model"
+capabilities = ["tools", "vision", "structured_output"]
+context_window_tokens = 128000
+max_output_tokens = 8192
+timeout = "90s"
+`
+
+func mixedSubscriptionModels() string {
+	content := strings.Replace(validModels, `chat = "chosen-name"`, `chat = "subscription"`, 1)
+	content = strings.Replace(content, `analysis = "chosen-name"`, `analysis = "analysis-plan"`, 1)
+	return content + subscriptionProfile + strings.ReplaceAll(strings.Replace(subscriptionProfile, "chatgpt-chat-model", "chatgpt-analysis-model", 1), "profiles.subscription", "profiles.analysis-plan")
+}
+
+func TestMixedSubscriptionAndAPIProfiles(t *testing.T) {
+	var lookups []string
+	get := func(key string) string { lookups = append(lookups, key); return modelEnv(key) }
+	models, err := loadModelProfiles(modelFile(t, mixedSubscriptionModels()), get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !models.HasSubscription() || models.Routes[domain.RoleChat] != "subscription" || models.Routes[domain.RoleBackground] != "chosen-name" || models.Routes[domain.RoleAnalysis] != "analysis-plan" {
+		t.Fatal("mixed role configuration lost")
+	}
+	for _, name := range []string{"subscription", "analysis-plan"} {
+		p := models.Profiles[name]
+		if p.APIKey != "" || p.APIKeyEnv != "" || p.BaseURL != "" || p.Options != (domain.ModelOptions{}) || p.Timeout != 90*time.Second || p.Pricing != nil {
+			t.Fatal("subscription profile acquired API-only settings")
+		}
+	}
+	if len(lookups) != 1 || lookups[0] != "MAIN_MODEL_KEY" {
+		t.Fatalf("subscription adapter read credentials from API environment: %v", lookups)
+	}
+	if models.Profiles["subscription"].Model == models.Profiles["analysis-plan"].Model {
+		t.Fatal("independent subscription models lost")
+	}
+}
+
+func TestSubscriptionProfilesRejectIncompatibleSettings(t *testing.T) {
+	for name, extra := range map[string]string{
+		"endpoint":       `base_url = "https://private-sentinel.invalid"`,
+		"API credential": `api_key_env = "PRIVATE_SENTINEL"`,
+		"API option":     "[profiles.subscription.options]\nreasoning_effort = \"high\"",
+		"API pricing":    "[profiles.subscription.pricing]\ninput_per_million = 1\ncached_input_per_million = 0\noutput_per_million = 2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			content := validModels + subscriptionProfile + "\n" + extra + "\n"
+			_, err := loadModelProfiles(modelFile(t, content), modelEnv)
+			if err == nil || strings.Contains(err.Error(), "private-sentinel") || strings.Contains(err.Error(), "PRIVATE_SENTINEL") {
+				t.Fatalf("invalid subscription settings accepted or echoed: %v", err)
+			}
+		})
+	}
+	for _, mode := range []string{"api_key", "siwc", "auto"} {
+		_, err := loadModelProfilesForAuth(modelFile(t, mixedSubscriptionModels()), modelEnv, mode)
+		if err == nil || !strings.Contains(err.Error(), "OPENAI_AUTH_MODE=profiles") {
+			t.Fatalf("legacy global %s silently overrides subscription routes: %v", mode, err)
+		}
+	}
+}
+
+func TestSubscriptionOnlyRequiresNoAPISecretButMixedAPIStillDoes(t *testing.T) {
+	allPlan := strings.ReplaceAll(mixedSubscriptionModels(), `background = "chosen-name"`, `background = "subscription"`)
+	// Unused API profiles are validated too; remove it from this all-plan file.
+	allPlan = strings.SplitN(allPlan, "[profiles.chosen-name]", 2)[0] + subscriptionProfile + strings.ReplaceAll(subscriptionProfile, "profiles.subscription", "profiles.analysis-plan")
+	if _, err := loadModelProfiles(modelFile(t, allPlan), func(string) string { t.Fatal("plan-only config read API credentials"); return "" }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadModelProfiles(modelFile(t, mixedSubscriptionModels()), func(string) string { return "" }); err == nil {
+		t.Fatal("mixed config accepted missing API credential")
+	}
+}

@@ -8,36 +8,46 @@ OpenAlbert выбирает роль по операции приложения.
 
 Скопируй `deploy/models.example.toml` в `models.toml` рядом с `.env` и задай параметры своей модели. Приложению обязателен `LLM_CONFIG_FILE`; Compose выставляет `/etc/openalbert/models.toml` и подключает файл хоста из `LLM_CONFIG_HOST_FILE` (по умолчанию `./models.toml`) только для чтения. Вне Docker укажи `LLM_CONFIG_FILE=./models.toml`.
 
+Пример смешанной конфигурации: `chat` и `analysis` используют разные модели одной подписки, а `background` — API. В `.env` оставь `OPENAI_AUTH_MODE=profiles` (значение по умолчанию) и задай `LLM_API_KEY` для API-профиля. Slug моделей ChatGPT возьми из `/chatgpt models` после входа; ID, возможности и лимиты ниже иллюстративные и требуют проверки для выбранной модели.
+
 ```toml
 [routes]
-chat = "everyday"
-background = "everyday"
-analysis = "economical"
+chat = "subscription_chat"
+background = "api_background"
+analysis = "subscription_analysis"
 
-[profiles.everyday]
+[profiles.subscription_chat]
+adapter = "openai_chatgpt"
+model = "your-chatgpt-chat-slug"
+capabilities = ["tools", "vision"]
+context_window_tokens = 128000
+max_output_tokens = 8192
+timeout = "120s"
+
+[profiles.api_background]
 adapter = "openai_chat_completions"
-base_url = "https://api.example.com/v1"
-model = "your-main-model"
+base_url = "https://api.openai.com/v1"
+model = "your-api-model"
 api_key_env = "LLM_API_KEY"
 capabilities = ["tools", "vision", "structured_output"]
 context_window_tokens = 128000
 max_output_tokens = 8192
 timeout = "120s"
 
-[profiles.economical]
-adapter = "openai_chat_completions"
-base_url = "https://api.example.com/v1"
-model = "your-analysis-model"
-api_key_env = "ANALYSIS_LLM_API_KEY"
+[profiles.subscription_analysis]
+adapter = "openai_chatgpt"
+model = "your-chatgpt-analysis-slug"
 capabilities = ["structured_output"]
 context_window_tokens = 64000
 max_output_tokens = 4096
 timeout = "60s"
 ```
 
+`deploy/models.example.toml` остаётся API-only по умолчанию; в конце есть полностью закомментированный пример подписочного профиля и указания по смене маршрутов. Для конфигурации только с подпиской API-ключи не нужны.
+
 Имена профилей произвольные. Все три роли обязательны, каждая ссылается на один профиль. Несколько ролей могут использовать один профиль, в том числе одну модель с разными настройками. Лимиты и ID в примере иллюстративные: проверь их по контракту выбранного endpoint.
 
-Значение `api_key_env` — имя переменной окружения процесса, не сам ключ. Compose передаёт `LLM_API_KEY` из `.env`. Для дополнительных имён создай рядом необязательный `models.env`:
+Для `openai_chat_completions` значение `api_key_env` — имя переменной окружения процесса, не сам ключ. Compose передаёт `LLM_API_KEY` из `.env`. Для дополнительных имён создай рядом необязательный `models.env`:
 
 ```dotenv
 ANALYSIS_LLM_API_KEY=your-analysis-api-key
@@ -53,10 +63,10 @@ ANALYSIS_LLM_API_KEY=your-analysis-api-key
 - `vision` требуется, когда запрос действительно содержит изображения. Возможность не выдаёт новые инструменты или права.
 - `structured_output` требуется `analysis`; для этой роли адаптер запрашивает JSON-объект.
 
-Адаптер проверяет совместимость запроса перед HTTP-вызовом. Настройки endpoint задаются явно, без распознавания модели по имени или провайдера по хосту:
+Адаптер проверяет совместимость запроса перед HTTP-вызовом. Для API-профилей `openai_chat_completions` настройки endpoint задаются явно, без распознавания модели по имени или провайдера по хосту:
 
 ```toml
-[profiles.everyday.options]
+[profiles.api_background.options]
 reasoning_effort = "high"
 thinking = "enabled"
 include_reasoning_content = true
@@ -68,13 +78,23 @@ output_token_field = "max_tokens"
 
 Включай только поддерживаемые провайдером поля. `include_reasoning_content` возвращает сохранённое служебное reasoning в историю ассистента для DeepSeek thinking с tools. `session_header` задаёт поддерживаемый заголовок OpenCode Go; его значение — непрозрачный ID разговора. `output_token_field` выбирает `max_tokens` (по умолчанию) или `max_completion_tokens`. Эти настройки не обязательно нужны вместе.
 
-Необязательная таблица `profiles.<имя>.pricing` принимает `input_per_million`, `cached_input_per_million`, `output_per_million`: неотрицательные цены в USD за миллион токенов. Если таблица задана, нужны все три значения. Без неё стоимость неизвестна; показанная оценка не заменяет биллинг провайдера.
+Для API-профилей необязательная таблица `profiles.<имя>.pricing` принимает `input_per_million`, `cached_input_per_million`, `output_per_million`: неотрицательные цены в USD за миллион токенов. Если таблица задана, нужны все три значения. Без неё стоимость неизвестна; показанная оценка не заменяет биллинг провайдера.
 
 ## ChatGPT plan и API key
 
-Существующий `OPENAI_AUTH_MODE` выбирает billing lane перед API-маршрутизатором. В `api_key` используются профили ролей из TOML. В `siwc` сохраняется модель ChatGPT, выбранная через `/chatgpt model`; API-ключи профилей могут быть пустыми. `auto` сохраняет существующий переход с ChatGPT plan на API при предусмотренных ошибках; для API lane нужны ключи профилей. Это не fallback между TOML-профилями.
+В `OPENAI_AUTH_MODE=profiles` адаптер каждого профиля определяет оплату: `openai_chat_completions` использует свой API-ключ, `openai_chatgpt` — подключённый ChatGPT plan. Роль выбирает ровно один профиль, его явный `model`, возможности, окно контекста, резерв ответа и таймаут. Глобальная сохранённая модель аккаунта и `OPENAI_SIWC_MODEL` на этот выбор не влияют. Ошибка подписки не запускает API-запрос; переключения между профилями или полосами оплаты нет.
 
-`OPENAI_SIWC_MODEL` по-прежнему задаёт начальную модель ChatGPT. Если он пуст, используется model ID профиля `chat`. Существующие команды и Desktop API настройки ChatGPT продолжают работать. В API lane расчёт контекста анализа проходит через billing wrapper к выбранному профилю.
+Все `openai_chatgpt` профили используют **один общий вход в ChatGPT**, но могут задавать разные модели. Это не несколько аккаунтов или воркспейсов. У такого профиля обязательны `model`, `capabilities`, `context_window_tokens`, `max_output_tokens` и `timeout`; поля `base_url`, `api_key_env`, `options` и `pricing` запрещены. Endpoint подписки фиксирован. Оценка стоимости в USD для подписки не рассчитывается.
+
+`max_output_tokens` подписочного профиля — только локальный резерв для проверки входного контекста, а не ограничение выходного ответа OpenAI: [preview-контракт](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations) запрещает отправлять это поле. И API, и подписочные профили проверяют контекст по своему `context_window_tokens` с этим резервом; оба соблюдают `timeout` профиля.
+
+[Вход в ChatGPT](chatgpt-plan-usage.md) через macOS или `/chatgpt login` подключает общий аккаунт. `/chatgpt models` и Desktop API каталог остаются доступны, чтобы узнать slug. Меняй модель в TOML и пересоздавай приложение: `/chatgpt model` и `PUT /api/v1/chatgpt/model` в `profiles` отклоняются с объяснением, HTTP возвращает `409 config_managed`. `/chatgpt status` и Desktop API статус показывают для каждой роли профиль, модель и `auth_mode`; активная полоса — `profiles`.
+
+### Совместимость старых глобальных режимов
+
+`api_key`, `siwc` и `auto` поддерживаются только с TOML, содержащим исключительно `openai_chat_completions`. `api_key` использует API-профили ролей; `siwc` отправляет все роли в общий ChatGPT plan; `auto` сначала использует план, затем API-профиль при предусмотренных ошибках доступности/лимита. Для `api_key` и `auto` нужны ключи API-профилей. Добавление `openai_chatgpt` требует перехода на `profiles`.
+
+Только в старых `siwc`/`auto` `OPENAI_SIWC_MODEL` задаёт начальную общую модель (по умолчанию model ID профиля `chat`); `/chatgpt model` или настройки macOS меняют и сохраняют её для всех ролей. Глобальный `auto` не является fallback между TOML-профилями.
 
 ## Исполнение и ошибки
 
@@ -84,6 +104,6 @@ TOML загружается и проверяется при старте. Не�
 
 Телеметрия и результат вызова показывают роль, профиль, фактическую модель, токены и при заданных ценах оценку стоимости. Возврат сохранённого checkpoint не означает новый платный запрос. Ошибки не переключают модель.
 
-В чистом `siwc` анализ сохраняет целые записи в пределах локального лимита 64 000 байт сериализованного Responses-запроса, независимо от API-профилей. Это защитный лимит приложения, а не заявленное контекстное окно модели ChatGPT. В `auto` остаётся бюджет API-профиля, чтобы запрос помещался и при переходе на API.
+Только в старом глобальном `siwc` анализ сохраняет целые записи в пределах локального лимита 64 000 байт сериализованного Responses-запроса, независимо от API-профилей. Это защитный лимит приложения, а не заявленное контекстное окно модели ChatGPT. В `auto` остаётся бюджет API-профиля, чтобы запрос помещался и при переходе на API.
 
 Если даже новейшая целая запись анализа не помещается без памяти, сессия сохраняет `analysis_error=context_limit` и исключается из очереди автоматического анализа. Неудача не считается успешным анализом; исходная история остаётся в хранилище, а другие сессии продолжают обрабатываться. Временные ошибки провайдера по-прежнему допускают повторную попытку.

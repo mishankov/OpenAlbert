@@ -54,7 +54,7 @@ func load(get func(string) string) (Config, error) {
 		return fallback
 	}
 	c := Config{
-		OpenAIAuthMode: value("OPENAI_AUTH_MODE", "api_key"), OpenAITokenStore: value("OPENAI_TOKEN_STORE", "./container_data/chatgpt/credentials.json"), OpenAISiWCModel: value("OPENAI_SIWC_MODEL", ""),
+		OpenAIAuthMode: value("OPENAI_AUTH_MODE", "profiles"), OpenAITokenStore: value("OPENAI_TOKEN_STORE", "./container_data/chatgpt/credentials.json"), OpenAISiWCModel: value("OPENAI_SIWC_MODEL", ""),
 		TelegramWidgets: value("TELEGRAM_WIDGETS", "auto"),
 		DesktopAPIToken: value("DESKTOP_API_TOKEN", ""),
 		STTBaseURL:      value("STT_BASE_URL", ""), STTAPIKey: value("STT_API_KEY", ""), STTModel: value("STT_MODEL", ""), STTRevision: value("STT_REVISION", ""),
@@ -85,6 +85,14 @@ func load(get func(string) string) (Config, error) {
 	}
 	if c.OpenAISiWCModel == "" {
 		c.OpenAISiWCModel = c.Models.Profiles[c.Models.Routes[domain.RoleChat]].Model
+		if c.OpenAIAuthMode == "profiles" {
+			for _, role := range []domain.ModelRole{domain.RoleChat, domain.RoleBackground, domain.RoleAnalysis} {
+				if p := c.Models.Profiles[c.Models.Routes[role]]; p.Adapter == "openai_chatgpt" {
+					c.OpenAISiWCModel = p.Model
+					break
+				}
+			}
+		}
 	}
 	if c.DesktopAPIToken != "" && len(c.DesktopAPIToken) < 32 {
 		problems = append(problems, errors.New("DESKTOP_API_TOKEN must contain at least 32 bytes"))
@@ -110,8 +118,8 @@ func load(get func(string) string) (Config, error) {
 			problems = append(problems, errors.New("STT_MODEL and STT_REVISION are required when STT_BASE_URL is set"))
 		}
 	}
-	if c.OpenAIAuthMode != "api_key" && c.OpenAIAuthMode != "siwc" && c.OpenAIAuthMode != "auto" {
-		problems = append(problems, errors.New("OPENAI_AUTH_MODE must be api_key, siwc or auto"))
+	if c.OpenAIAuthMode != "profiles" && c.OpenAIAuthMode != "api_key" && c.OpenAIAuthMode != "siwc" && c.OpenAIAuthMode != "auto" {
+		problems = append(problems, errors.New("OPENAI_AUTH_MODE must be profiles, api_key, siwc or auto"))
 	}
 	required := []struct{ name, value string }{{"DATABASE_URL", c.DatabaseURL}, {"TELEGRAM_BOT_TOKEN", c.TelegramBotToken}, {"S3_ACCESS_KEY", c.S3AccessKey}, {"S3_SECRET_KEY", c.S3SecretKey}}
 	for _, r := range required {

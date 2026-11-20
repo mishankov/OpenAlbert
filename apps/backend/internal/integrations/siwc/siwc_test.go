@@ -364,6 +364,125 @@ func TestRefreshSerializedAndFailureRecovery(t *testing.T) {
 		}
 	}
 }
+
+func TestCompleteForModelConcurrentRequestsShareOnlyCredentials(t *testing.T) {
+	f := newFixture(t)
+	f.login(t)
+	f.c.creds.ExpiresAt = time.Now().Add(-time.Hour)
+	const requests = 20
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	entered := make(chan struct{}, requests)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" || r.Header.Get("Authorization") != "Bearer access-secret" {
+			t.Errorf("incorrect response route or shared authorization")
+			http.Error(w, "invalid route or authorization", http.StatusBadRequest)
+			return
+		}
+		var request struct {
+			Model string `json:"model"`
+			Input []struct {
+				Content string `json:"content"`
+			} `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request.Input) != 1 || request.Input[0].Content != request.Model {
+			t.Errorf("model leaked across requests: %+v %v", request, err)
+			http.Error(w, "incorrect model", http.StatusBadRequest)
+			return
+		}
+		if calls.Add(1) <= requests {
+			entered <- struct{}{}
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, `data: {"type":"response.completed","response":{"status":"completed","model":%q,"output":[{"type":"message","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":7,"output_tokens":1}}}`+"\n\n", "served-"+request.Model, request.Model)
+	}))
+	defer server.Close()
+	f.c.apiURL = server.URL
+	var wg sync.WaitGroup
+	for i := range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			model := fmt.Sprintf("profile-model-%d", i)
+			out, err := f.c.CompleteForModel(ctx, model, []domain.Message{{Role: "user", Content: model}}, nil)
+			if err != nil || out.Model != model || out.Message.Content != model || out.Usage.Model != "served-"+model || !out.Usage.TokenUsageKnown {
+				t.Errorf("incorrect request-local completion: %+v %v", out, err)
+			}
+		}()
+	}
+	for range requests {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Errorf("requests did not reach the provider concurrently: %v", ctx.Err())
+		}
+	}
+	// Observe the saved choice while every request is still in flight: a
+	// temporary account mutation must not serve as per-request routing.
+	if got := f.c.Status().Model; got != "test-model" {
+		t.Errorf("concurrent profile calls changed the saved model: %q", got)
+	}
+	close(release)
+	wg.Wait()
+	if f.refreshCalls.Load() != 1 {
+		t.Errorf("shared refresh raced: %d", f.refreshCalls.Load())
+	}
+	data, err := os.ReadFile(f.c.path)
+	var saved credentials
+	if err != nil || json.Unmarshal(data, &saved) != nil || saved.Model != "test-model" || saved.RefreshToken != "rotated-secret" {
+		t.Fatalf("profile calls changed persisted model or lost token rotation: %+v %v", saved, err)
+	}
+	out, err := f.c.Complete(ctx, []domain.Message{{Role: "user", Content: "test-model"}}, nil)
+	if err != nil || out.Model != "test-model" || out.Message.Content != "test-model" {
+		t.Fatalf("legacy completion lost the saved selection: %+v %v", out, err)
+	}
+}
+
+func TestEstimateInputUsesExactRequestAndConservativeFraming(t *testing.T) {
+	messages := []domain.Message{
+		{Role: "system", Content: "Инструкция <&>"},
+		{Role: "user", Content: "画像", Images: []string{"data:image/png;base64,AA=="}},
+		{Role: "assistant", ResponsesItems: []json.RawMessage{json.RawMessage(`{"type":"reasoning","encrypted_content":"opaque state"}`), json.RawMessage(`{"type":"function_call","namespace":"openalbert","call_id":"c1","name":"lookup","arguments":"{}"}`)}},
+		{Role: "tool", ToolCallID: "c1", Content: "résultat"},
+	}
+	tools := []domain.Tool{{Name: "lookup", Description: "Поиск", Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`)}}
+	body, err := buildRequest("profile-model", messages, tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := EstimateInput("profile-model", messages, tools)
+	want := len(raw) + len(messages)*64 + len(tools)*128 + 256
+	if err != nil || got != want {
+		t.Fatalf("estimate omitted serialized request data/framing: got %d, want %d: %v", got, want, err)
+	}
+	for _, tc := range []struct {
+		name     string
+		messages []domain.Message
+		tools    []domain.Tool
+	}{
+		{"unsupported role", []domain.Message{{Role: "invalid", Content: "text"}}, nil},
+		{"invalid tool schema", nil, []domain.Tool{{Name: "broken", Parameters: json.RawMessage(`invalid`)}}},
+		{"invalid opaque history", []domain.Message{{Role: "assistant", ResponsesItems: []json.RawMessage{json.RawMessage(`invalid`)}}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if estimate, err := EstimateInput("profile-model", tc.messages, tc.tools); err == nil || estimate != 0 {
+				t.Fatalf("invalid input estimated as usable: %d %v", estimate, err)
+			}
+		})
+	}
+}
+
 func TestRequestAllowlistAndToolHistory(t *testing.T) {
 	messages := []domain.Message{{Role: "system", Content: "instructions"}, {Role: "user", Content: "look", Images: []string{"data:image/png;base64,AA=="}}, {Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "c1", Name: "lookup", Arguments: json.RawMessage(`{"x":1}`)}}}, {Role: "tool", ToolCallID: "c1", Content: "result"}}
 	body, err := buildRequest("model", messages, []domain.Tool{{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`)}})
@@ -433,6 +552,10 @@ func TestFailedResponsesPreserveUsageWithoutPartialOutput(t *testing.T) {
 			got, err := f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "hello"}}, nil)
 			if err == nil || got.Model != "test-model" || got.InputTokens != 7 || got.OutputTokens != 3 || got.Usage != decoded.Usage || !reflect.DeepEqual(got.Message, domain.Message{}) {
 				t.Fatalf("client lost usage/model or exposed partial output: %+v %v", got, err)
+			}
+			got, err = f.c.CompleteForModel(context.Background(), "profile-model", []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			if err == nil || got.Model != "profile-model" || got.InputTokens != 7 || got.OutputTokens != 3 || got.Usage != decoded.Usage || !reflect.DeepEqual(got.Message, domain.Message{}) {
+				t.Fatalf("profile call lost usage/model or exposed partial output: %+v %v", got, err)
 			}
 		})
 	}
@@ -541,6 +664,30 @@ func TestHTTPRejectionRetainsRequestedModelWithUnknownUsage(t *testing.T) {
 			if !errors.As(err, &api) || api.Status != status || api.RequestID != "rejected-request" || out.Model != "test-model" || out.Usage.TokenUsageKnown || out.InputTokens != 0 || out.OutputTokens != 0 || !reflect.DeepEqual(out.Message, domain.Message{}) {
 				t.Fatalf("HTTP rejection lost request identity or invented usage/output: %+v %v", out, err)
 			}
+			out, err = f.c.CompleteForModel(context.Background(), "profile-model", []domain.Message{{Role: "user", Content: "Hello"}}, nil)
+			if !errors.As(err, &api) || api.Status != status || api.RequestID != "rejected-request" || out.Model != "profile-model" || out.Usage.TokenUsageKnown || out.InputTokens != 0 || out.OutputTokens != 0 || !reflect.DeepEqual(out.Message, domain.Message{}) {
+				t.Fatalf("profile HTTP rejection lost request identity or invented usage/output: %+v %v", out, err)
+			}
 		})
+	}
+}
+
+func TestProfileDeadlineIncludesWaitingForCredentialRefresh(t *testing.T) {
+	f := newFixture(t)
+	f.c.mu.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := f.c.CompleteForModel(ctx, "profile-model", nil, nil); done <- err }()
+	select {
+	case err := <-done:
+		f.c.mu.Unlock()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("credential wait ignored deadline: %v", err)
+		}
+	case <-time.After(time.Second):
+		f.c.mu.Unlock()
+		<-done
+		t.Fatal("profile request waited beyond its deadline for another refresh")
 	}
 }

@@ -29,3 +29,22 @@ timeout = "120s"
 # input_per_million = 0.0
 # cached_input_per_million = 0.0
 # output_per_million = 0.0
+
+# Optional ChatGPT subscription profile (keep commented until configured).
+# Use OPENAI_AUTH_MODE=profiles (default), then sign in with /chatgpt login or
+# the macOS connection settings. All subscription profiles share one account.
+# To route chat/analysis here, EDIT their existing [routes] entries above:
+# chat = "subscription"
+# analysis = "subscription"
+# Keep background = "everyday" for API billing; profiles mode never falls back.
+# Set model to an available slug from /chatgpt models and verify capabilities/limits.
+# [profiles.subscription]
+# adapter = "openai_chatgpt"
+# model = "SET_CHATGPT_MODEL_SLUG"
+# capabilities = ["tools", "vision", "structured_output"]
+# context_window_tokens = 128000
+# max_output_tokens = 8192 # LOCAL input reserve only; does not cap provider output.
+# timeout = "120s"
+# Do not set base_url, api_key_env, options or pricing on openai_chatgpt profiles.
+# To use another subscription model for analysis, add a separate profile and
+# route analysis to it. Models are configured in TOML; restart after changes.

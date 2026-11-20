@@ -87,10 +87,38 @@ func FitsContext(ctx context.Context, model string, messages []domain.Message, t
 	return len(raw) <= 64000, err
 }
 
+// EstimateInput measures the serialized Responses request, including opaque
+// reasoning history, tool schemas and image URLs. Counting UTF-8 bytes plus
+// conservative message/tool framing matches the profile router's local estimate;
+// this is deliberately not a provider tokenizer or a model context limit.
+func EstimateInput(model string, messages []domain.Message, tools []domain.Tool) (int, error) {
+	body, err := buildRequest(model, messages, tools)
+	if err != nil {
+		return 0, err
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0, errors.New("invalid ChatGPT request")
+	}
+	return len(data) + len(messages)*64 + len(tools)*128 + 256, nil
+}
+
 func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
-	c.mu.Lock()
-	token, err := c.accessToken(ctx)
+	if err := c.mu.LockContext(ctx); err != nil {
+		return domain.Completion{}, err
+	}
 	model := c.creds.Model
+	c.mu.Unlock()
+	return c.CompleteForModel(ctx, model, messages, tools)
+}
+
+// CompleteForModel uses a request-local model while sharing the connection's
+// serialized token refresh. It never changes the account's saved model choice.
+func (c *Client) CompleteForModel(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	if err := c.mu.LockContext(ctx); err != nil {
+		return domain.Completion{}, err
+	}
+	token, err := c.accessToken(ctx)
 	c.mu.Unlock()
 	if err != nil {
 		return domain.Completion{}, err

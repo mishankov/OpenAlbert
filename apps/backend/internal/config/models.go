@@ -59,7 +59,7 @@ func LoadModelProfiles(path string) (domain.ModelProfiles, error) {
 }
 
 func loadModelProfiles(path string, get func(string) string) (domain.ModelProfiles, error) {
-	return loadModelProfilesForAuth(path, get, "api_key")
+	return loadModelProfilesForAuth(path, get, "profiles")
 }
 
 func loadModelProfilesForAuth(path string, get func(string) string, authMode string) (domain.ModelProfiles, error) {
@@ -95,6 +95,9 @@ func loadModelProfilesForAuth(path string, get func(string) string, authMode str
 	for name, profile := range raw.Profiles {
 		if name == "" || name != strings.TrimSpace(name) || strings.ContainsAny(name, "\r\n\x00") {
 			return empty, errors.New("model profile name must be nonempty without surrounding whitespace or control characters")
+		}
+		if profile.Adapter == "openai_chatgpt" && authMode != "profiles" {
+			return empty, errors.New("openai_chatgpt profiles require OPENAI_AUTH_MODE=profiles")
 		}
 		validated, err := validateModelProfile(profile, get, authMode == "siwc")
 		if err != nil {
@@ -161,22 +164,29 @@ func exactModelConfigKeys(meta toml.MetaData) bool {
 
 func validateModelProfile(raw modelProfileConfig, get func(string) string, allowMissingKey bool) (domain.ModelProfile, error) {
 	var empty domain.ModelProfile
-	if raw.Adapter != "openai_chat_completions" {
+	if raw.Adapter != "openai_chat_completions" && raw.Adapter != "openai_chatgpt" {
 		return empty, errors.New("model profile adapter is unsupported")
-	}
-	u, err := url.Parse(raw.BaseURL)
-	if err != nil || u.Host == "" || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
-		return empty, errors.New("model profile base_url must be an HTTP(S) URL without credentials, query or fragment")
 	}
 	if strings.TrimSpace(raw.Model) == "" || raw.Model != strings.TrimSpace(raw.Model) {
 		return empty, errors.New("model profile model must be a nonempty identifier without surrounding whitespace")
 	}
-	if !environmentName.MatchString(raw.APIKeyEnv) {
-		return empty, errors.New("model profile api_key_env must name an environment variable")
-	}
-	key := get(raw.APIKeyEnv)
-	if strings.TrimSpace(key) == "" && !allowMissingKey {
-		return empty, errors.New("model profile credential environment variable is unset")
+	key := ""
+	if raw.Adapter == "openai_chatgpt" {
+		if raw.BaseURL != "" || raw.APIKeyEnv != "" || raw.Options != (modelOptionsConfig{}) || raw.Pricing != nil {
+			return empty, errors.New("ChatGPT subscription profiles do not accept API endpoints, API keys, provider options or per-token pricing")
+		}
+	} else {
+		u, err := url.Parse(raw.BaseURL)
+		if err != nil || u.Host == "" || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+			return empty, errors.New("model profile base_url must be an HTTP(S) URL without credentials, query or fragment")
+		}
+		if !environmentName.MatchString(raw.APIKeyEnv) {
+			return empty, errors.New("model profile api_key_env must name an environment variable")
+		}
+		key = get(raw.APIKeyEnv)
+		if strings.TrimSpace(key) == "" && !allowMissingKey {
+			return empty, errors.New("model profile credential environment variable is unset")
+		}
 	}
 	if raw.ContextWindowTokens <= 0 || raw.MaxOutputTokens <= 0 || raw.MaxOutputTokens >= raw.ContextWindowTokens {
 		return empty, errors.New("model profile requires positive context/output token limits with output smaller than context")
@@ -207,10 +217,10 @@ func validateModelProfile(raw modelProfileConfig, get func(string) string, allow
 	if o.SessionHeader != "" && o.SessionHeader != "x-opencode-session" {
 		return empty, errors.New("model profile session_header is unsupported")
 	}
-	if o.OutputTokenField == "" {
+	if raw.Adapter == "openai_chat_completions" && o.OutputTokenField == "" {
 		o.OutputTokenField = "max_tokens"
 	}
-	if o.OutputTokenField != "max_tokens" && o.OutputTokenField != "max_completion_tokens" {
+	if o.OutputTokenField != "" && o.OutputTokenField != "max_tokens" && o.OutputTokenField != "max_completion_tokens" {
 		return empty, errors.New("model profile output_token_field is unsupported")
 	}
 	profile := domain.ModelProfile{

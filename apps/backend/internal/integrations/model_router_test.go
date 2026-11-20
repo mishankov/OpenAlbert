@@ -376,3 +376,197 @@ func TestOpenAIHasNoModelOrEndpointHeuristics(t *testing.T) {
 		}
 	}
 }
+
+type subscriptionRouterStub struct {
+	complete func(context.Context, string, []domain.Message, []domain.Tool) (domain.Completion, error)
+}
+
+func (s *subscriptionRouterStub) CompleteForModel(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	return s.complete(ctx, model, messages, tools)
+}
+
+func subscriptionRouterConfig(base string) domain.ModelProfiles {
+	config := routerConfig(base)
+	config.Routes = map[domain.ModelRole]string{domain.RoleChat: "chat-plan", domain.RoleBackground: "arbitrary-main", domain.RoleAnalysis: "analysis-plan"}
+	config.Profiles["chat-plan"] = domain.ModelProfile{Adapter: "openai_chatgpt", Model: "explicit-chat", Capabilities: []string{"tools", "vision"}, ContextWindowTokens: 100000, MaxOutputTokens: 1000, Timeout: time.Second}
+	config.Profiles["analysis-plan"] = domain.ModelProfile{Adapter: "openai_chatgpt", Model: "explicit-analysis", Capabilities: []string{"structured_output"}, ContextWindowTokens: 100000, MaxOutputTokens: 1000, Timeout: time.Second}
+	return config
+}
+
+func TestSubscriptionRouterMixedConcurrentModelsAndUsage(t *testing.T) {
+	var apiCalls, planCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls.Add(1)
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Model != "primary-model" {
+			t.Errorf("wrong API route: %+v %v", body, err)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+	}))
+	defer server.Close()
+	plan := &subscriptionRouterStub{complete: func(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+		planCalls.Add(1)
+		role := domain.ModelRoleFromContext(ctx)
+		want := "explicit-chat"
+		if role == domain.RoleAnalysis {
+			want = "explicit-analysis"
+		}
+		if model != want {
+			t.Errorf("concurrent profile selected %q, want %q", model, want)
+		}
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("profile timeout missing")
+		}
+		return domain.Completion{Model: model, Message: domain.Message{Role: "assistant", Content: "{}"}, InputTokens: 10, OutputTokens: 5, Usage: domain.ModelUsage{Model: "served-" + model, TokenUsageKnown: true, CachedInputTokens: 3}}, nil
+	}}
+	config := subscriptionRouterConfig(server.URL)
+	p := config.Profiles["arbitrary-main"]
+	p.Pricing = &domain.ModelPricing{InputPerMillion: 3, OutputPerMillion: 15}
+	config.Profiles["arbitrary-main"] = p
+	router, err := NewModelRouterWithPlan(config, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	billing := &BillingModel{Mode: "profiles", API: router}
+	var calls sync.WaitGroup
+	for range 10 {
+		for _, role := range []domain.ModelRole{domain.RoleChat, domain.RoleBackground, domain.RoleAnalysis} {
+			calls.Go(func() {
+				out, err := billing.Complete(domain.WithModelRole(context.Background(), role), []domain.Message{{Role: "user", Content: "hi"}}, nil)
+				if err != nil || out.Usage.Role != role || out.Usage.Profile != config.Routes[role] || out.Model != config.Profiles[config.Routes[role]].Model || !out.Usage.TokenUsageKnown || out.InputTokens != 10 || out.OutputTokens != 5 || out.Usage.EstimatedInputTokens <= 0 {
+					t.Errorf("wrong profile usage: %+v %v", out, err)
+				}
+				if (out.Usage.EstimatedCostUSD != nil) != (role == domain.RoleBackground) {
+					t.Errorf("wrong price lane: %+v", out.Usage)
+				}
+			})
+		}
+	}
+	calls.Wait()
+	status := billing.Status()
+	if apiCalls.Load() != 10 || planCalls.Load() != 20 || status.APIRequests != 10 || status.SIWCRequests != 20 || status.ActiveLane != "profiles" || len(status.Profiles) != 3 {
+		t.Fatalf("wrong lane counters: %+v", status)
+	}
+	if status.Profiles[domain.RoleChat] != (ProfileRouteStatus{Profile: "chat-plan", Model: "explicit-chat", AuthMode: "siwc"}) || status.Profiles[domain.RoleBackground].AuthMode != "api_key" {
+		t.Fatalf("wrong profile status: %+v", status.Profiles)
+	}
+	delete(status.Profiles, domain.RoleChat)
+	if len(billing.Status().Profiles) != 3 {
+		t.Fatal("caller mutated router status")
+	}
+}
+
+func TestSubscriptionRouterUsesProfileBudgetAndProtectsCurrentTurn(t *testing.T) {
+	var calls int
+	var received []domain.Message
+	plan := &subscriptionRouterStub{complete: func(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+		calls++
+		received = messages
+		return domain.Completion{Model: model}, nil
+	}}
+	config := subscriptionRouterConfig("http://localhost")
+	p := config.Profiles["chat-plan"]
+	p.ContextWindowTokens, p.MaxOutputTokens = 2200, 1000
+	config.Profiles["chat-plan"] = p
+	router, err := NewModelRouterWithPlan(config, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := domain.WithModelTurn(domain.WithModelRole(context.Background(), domain.RoleChat), "current")
+	input := []domain.Message{{Role: "system", Content: "instructions"}, {Role: "user", Content: strings.Repeat("old", 1000), TurnID: "old"}, {Role: "assistant", Content: "old answer"}, {Role: "user", Content: "current", TurnID: "current"}}
+	out, err := router.Complete(ctx, input, nil)
+	if err != nil || out.Usage.DroppedMessages != 2 || len(received) != 2 || received[1].Content != "current" || out.Usage.EstimatedInputTokens > 1200 {
+		t.Fatalf("bad compaction: %+v %+v %v", out, received, err)
+	}
+	if fits, err := router.FitsContext(ctx, received, nil); !fits || err != nil {
+		t.Fatalf("fit estimate diverged: %v %v", fits, err)
+	}
+	oversized := []domain.Message{{Role: "user", Content: strings.Repeat("я", 1000), TurnID: "current"}}
+	if fits, err := router.FitsContext(ctx, oversized, nil); fits || err != nil {
+		t.Fatalf("output reserve ignored: %v %v", fits, err)
+	}
+	out, err = router.Complete(ctx, oversized, nil)
+	if err == nil || calls != 1 || out.Usage.Role != domain.RoleChat || out.Usage.Profile != "chat-plan" || out.Usage.Model != "explicit-chat" || out.Usage.EstimatedInputTokens <= 1200 {
+		t.Fatalf("required input changed or called provider: %+v %v", out, err)
+	}
+}
+
+func TestSubscriptionRouterCapabilityAndHistoricalImageRules(t *testing.T) {
+	calls := 0
+	plan := &subscriptionRouterStub{complete: func(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+		calls++
+		for _, message := range messages {
+			if len(message.Images) != 0 {
+				t.Error("unsupported image reached provider")
+			}
+		}
+		return domain.Completion{Model: model}, nil
+	}}
+	router, err := NewModelRouterWithPlan(subscriptionRouterConfig("http://localhost"), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := domain.WithModelTurn(domain.WithModelRole(context.Background(), domain.RoleAnalysis), "current")
+	input := []domain.Message{{Role: "system", Content: "instructions"}, {Role: "user", Images: []string{"image"}, TurnID: "old"}, {Role: "assistant", Content: "old answer"}, {Role: "user", Content: "current", TurnID: "current"}}
+	out, err := router.Complete(ctx, input, nil)
+	if err != nil || out.Usage.DroppedMessages != 2 || calls != 1 {
+		t.Fatalf("historical image handling: %+v %v", out, err)
+	}
+	for _, messages := range [][]domain.Message{
+		{{Role: "user", Images: []string{"image"}, TurnID: "current"}},
+		{{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "call", Name: "lookup"}}}},
+		{{Role: "user", ContextOverflow: true}},
+	} {
+		if _, err := router.Complete(ctx, messages, nil); err == nil {
+			t.Fatal("unsupported required input accepted")
+		}
+	}
+	if _, err := router.Complete(ctx, nil, []domain.Tool{{Name: "lookup", Parameters: json.RawMessage(`{}`)}}); err == nil || calls != 1 {
+		t.Fatal("unsupported tools accepted")
+	}
+}
+
+func TestSubscriptionRouterTimeoutAndFailedUsage(t *testing.T) {
+	plan := &subscriptionRouterStub{complete: func(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+		<-ctx.Done()
+		return domain.Completion{Model: model, InputTokens: 7, OutputTokens: 3, Usage: domain.ModelUsage{Model: "served", TokenUsageKnown: true, CachedInputTokens: 4}, Message: domain.Message{Content: "partial"}}, ctx.Err()
+	}}
+	config := subscriptionRouterConfig("http://localhost")
+	p := config.Profiles["chat-plan"]
+	p.Timeout = 20 * time.Millisecond
+	config.Profiles["chat-plan"] = p
+	router, err := NewModelRouterWithPlan(config, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	out, err := router.Complete(domain.WithModelRole(context.Background(), domain.RoleChat), []domain.Message{{Role: "user", Content: "hi"}}, nil)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > time.Second || out.Message.Content != "" || out.Usage.Profile != "chat-plan" || out.Usage.Model != "served" || out.InputTokens != 7 || out.OutputTokens != 3 || !out.Usage.TokenUsageKnown || out.Usage.CachedInputTokens != 4 || out.Usage.EstimatedCostUSD != nil {
+		t.Fatalf("lost timeout or failed usage: %+v %v", out, err)
+	}
+}
+
+func TestSubscriptionRouterRequiresClientAndRejectsAPIOptions(t *testing.T) {
+	config := subscriptionRouterConfig("http://localhost")
+	if _, err := NewModelRouter(config); err == nil {
+		t.Fatal("subscription without client accepted")
+	}
+	plan := &subscriptionRouterStub{}
+	for _, change := range []func(*domain.ModelProfile){
+		func(p *domain.ModelProfile) { p.BaseURL = "https://example.com" },
+		func(p *domain.ModelProfile) { p.APIKey = "secret" },
+		func(p *domain.ModelProfile) { p.APIKeyEnv = "KEY" },
+		func(p *domain.ModelProfile) { p.Options.ReasoningEffort = "high" },
+		func(p *domain.ModelProfile) { p.Pricing = &domain.ModelPricing{InputPerMillion: 1} },
+	} {
+		config := subscriptionRouterConfig("http://localhost")
+		p := config.Profiles["chat-plan"]
+		change(&p)
+		config.Profiles["chat-plan"] = p
+		if _, err := NewModelRouterWithPlan(config, plan); err == nil {
+			t.Fatal("API-only subscription field accepted")
+		}
+	}
+}

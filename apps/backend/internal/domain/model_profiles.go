@@ -24,6 +24,17 @@ type ModelProfiles struct {
 	Profiles map[string]ModelProfile
 }
 
+// HasSubscription reports whether the configuration needs the shared ChatGPT
+// connection. Account credentials stay outside the profile TOML.
+func (m ModelProfiles) HasSubscription() bool {
+	for _, p := range m.Profiles {
+		if p.Adapter == "openai_chatgpt" {
+			return true
+		}
+	}
+	return false
+}
+
 type ModelProfile struct {
 	Adapter             string
 	BaseURL             string

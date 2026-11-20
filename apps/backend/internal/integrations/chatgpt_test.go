@@ -10,17 +10,88 @@ import (
 	"testing"
 
 	"openalbert/apps/backend/internal/domain"
+	"openalbert/apps/backend/internal/integrations/siwc"
 )
 
 type controlStub struct {
 	*billingStub
-	starts int
+	starts, finishes, selections int
 }
 
 func (p *controlStub) Begin() (string, error) {
 	p.starts++
 	return "https://auth.openai.com/api/accounts/authorize?state=synthetic", nil
 }
+func (p *controlStub) Finish(context.Context, string) error {
+	p.finishes++
+	return nil
+}
+func (p *controlStub) Models(context.Context) ([]siwc.Model, error) {
+	return []siwc.Model{{Slug: "catalog-model", DisplayName: "Account catalog model"}}, nil
+}
+func (p *controlStub) SetModel(context.Context, string) error {
+	p.selections++
+	return nil
+}
+
+type controlRoutes struct {
+	*billingStub
+}
+
+func (m *controlRoutes) ProfileRoutes() map[domain.ModelRole]ProfileRouteStatus {
+	return map[domain.ModelRole]ProfileRouteStatus{
+		domain.RoleChat:       {Profile: "subscription_chat", Model: "chat-model", AuthMode: "siwc"},
+		domain.RoleBackground: {Profile: "api_background", Model: "background-model", AuthMode: "api_key"},
+		domain.RoleAnalysis:   {Profile: "subscription_analysis", Model: "analysis-model", AuthMode: "siwc"},
+	}
+}
+
+func TestTelegramProfileControlsKeepModelsInConfiguration(t *testing.T) {
+	plan := &controlStub{billingStub: &billingStub{}}
+	c := &ChatGPTControls{Billing: &BillingModel{Mode: "profiles", Plan: plan, API: &controlRoutes{billingStub: &billingStub{}}}}
+	ctx := context.Background()
+	for _, command := range []string{"/chatgpt model replacement", "/chatgpt model"} {
+		reply := c.reply(ctx, command)
+		if !strings.Contains(reply, "models.toml") || strings.Contains(reply, "saved") || plan.selections != 0 {
+			t.Fatalf("global model mutation was not rejected: %q; selections=%d", reply, plan.selections)
+		}
+	}
+	login := c.reply(ctx, "/chatgpt login")
+	if plan.starts != 1 || !strings.Contains(login, "https://auth.openai.com/") || strings.Contains(login, "fallback") {
+		t.Fatalf("profile sign-in advertises a billing switch or failed: %q", login)
+	}
+	catalog := c.reply(ctx, "/chatgpt models")
+	if !strings.Contains(catalog, "catalog-model") || !strings.Contains(catalog, "models.toml") || strings.Contains(catalog, "/chatgpt model <slug>") {
+		t.Fatalf("catalog does not explain profile model management: %q", catalog)
+	}
+	status := c.reply(ctx, "/chatgpt status")
+	for _, expected := range []string{"active lane: profiles", "analysis → subscription_analysis; model: analysis-model; auth: siwc", "background → api_background; model: background-model; auth: api_key", "chat → subscription_chat; model: chat-model; auth: siwc", "models.toml"} {
+		if !strings.Contains(status, expected) {
+			t.Fatalf("status missing %q: %s", expected, status)
+		}
+	}
+	if strings.Index(status, "analysis →") > strings.Index(status, "background →") || strings.Index(status, "background →") > strings.Index(status, "chat →") || strings.Contains(status, "Model: test") || strings.Contains(status, "/chatgpt model <slug>") {
+		t.Fatalf("status is unsorted or advertises the global account model: %s", status)
+	}
+	callback := c.reply(ctx, "/chatgpt callback http://127.0.0.1:1455/auth/callback?code=secret&state=secret")
+	if plan.finishes != 1 || !strings.Contains(callback, "sign-in saved") || strings.Contains(callback, "code=secret") || strings.Contains(callback, "fallback") {
+		t.Fatalf("profile callback failed or leaked credentials: %q", callback)
+	}
+}
+
+func TestTelegramAPIOnlyProfilesStillShowRoutesAndConnectionInstructions(t *testing.T) {
+	c := &ChatGPTControls{Billing: &BillingModel{Mode: "profiles", API: &controlRoutes{billingStub: &billingStub{}}}}
+	if status := c.reply(context.Background(), "/chatgpt status"); !strings.Contains(status, "background-model") {
+		t.Fatalf("API-only status hidden behind sign-in availability: %q", status)
+	}
+	if reply := c.reply(context.Background(), "/chatgpt login"); !strings.Contains(reply, "openai_chatgpt") || !strings.Contains(reply, "models.toml") {
+		t.Fatalf("disabled connection instructions omit profile setup: %q", reply)
+	}
+	if reply := c.reply(context.Background(), "/chatgpt model replacement"); !strings.Contains(reply, "managed in models.toml") {
+		t.Fatalf("API-only profiles do not explain model management: %q", reply)
+	}
+}
+
 func TestTelegramChatGPTControlsInterceptSecretsAndRequireOwner(t *testing.T) {
 	var sent []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

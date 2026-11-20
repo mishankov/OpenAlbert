@@ -234,3 +234,23 @@ func TestTelegramWidgetsSetting(t *testing.T) {
 		})
 	}
 }
+
+func TestProfileAuthenticationDefaultAndLegacyConflicts(t *testing.T) {
+	for _, mode := range []string{"", "profiles", "api_key", "siwc", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			env := validEnv(t)
+			env["LLM_CONFIG_FILE"] = modelFile(t, mixedSubscriptionModels())
+			env["OPENAI_AUTH_MODE"] = mode
+			cfg, err := load(func(k string) string { return env[k] })
+			if mode != "" && mode != "profiles" {
+				if err == nil {
+					t.Fatal("legacy mode silently replaced profile auth")
+				}
+				return
+			}
+			if err != nil || cfg.OpenAIAuthMode != "profiles" || cfg.OpenAISiWCModel != "chatgpt-chat-model" {
+				t.Fatalf("profile authentication default failed: %v", err)
+			}
+		})
+	}
+}
