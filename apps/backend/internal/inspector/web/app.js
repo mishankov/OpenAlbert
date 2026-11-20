@@ -1,4 +1,5 @@
 import { tokenizeJavaScript } from "./prism-javascript.js";
+import { formatJavaScript } from "./format-javascript.js";
 
 const $ = (s, root = document) => root.querySelector(s);
 const esc = (value) =>
@@ -77,6 +78,7 @@ const state = {
   id: "",
   data: null,
   tab: "timeline",
+  showOtherTools: false,
   busy: false,
   listToken: 0,
   detailToken: 0,
@@ -314,7 +316,7 @@ function messageRow(row) {
       : m.role === "tool"
         ? "Результат без связанного вызова"
         : "Модель");
-  return `<article class="event" id="event-${row.seq}"><div class="event-meta"><time title="${esc(date(row.recorded_at))}">${esc(timeOnly(row.recorded_at))}</time><span class="role role-${esc(m.role)}">${role} <span class="seq">#${row.seq}</span></span></div><div class="event-content"><div class="event-line"><span class="event-name">${esc(name)}</span><span class="row-actions">${trace ? traceButton(trace.id) : ""}${recordButton(row.seq)}</span></div>${m.content ? messageText(m.role === "tool" ? pretty(m.content) : m.content, row.seq) : ""}${m.reasoning ? `<details class="reasoning" data-open-key="reasoning-${row.seq}"><summary>Reasoning · ${m.reasoning.length.toLocaleString("ru-RU")} символов</summary><div class="prose">${esc(m.reasoning)}</div></details>` : ""}${m.images?.length ? `<span class="muted">Изображения: ${m.images.length}</span>` : ""}${!m.content && !m.reasoning && !m.images?.length ? '<span class="muted">Завершение без текста</span>' : ""}</div></article>`;
+  return `<article class="event${m.role === "tool" ? " other-tool" : ""}" id="event-${row.seq}"><div class="event-meta"><time title="${esc(date(row.recorded_at))}">${esc(timeOnly(row.recorded_at))}</time><span class="role role-${esc(m.role)}">${role} <span class="seq">#${row.seq}</span></span></div><div class="event-content"><div class="event-line"><span class="event-name">${esc(name)}</span><span class="row-actions">${trace ? traceButton(trace.id) : ""}${recordButton(row.seq)}</span></div>${m.content ? messageText(m.role === "tool" ? pretty(m.content) : m.content, row.seq) : ""}${m.reasoning ? `<details class="reasoning" data-open-key="reasoning-${row.seq}"><summary>Reasoning · ${m.reasoning.length.toLocaleString("ru-RU")} символов</summary><div class="prose">${esc(m.reasoning)}</div></details>` : ""}${m.images?.length ? `<span class="muted">Изображения: ${m.images.length}</span>` : ""}${!m.content && !m.reasoning && !m.images?.length ? '<span class="muted">Завершение без текста</span>' : ""}</div></article>`;
 }
 function toolRow(row, call) {
   const source =
@@ -346,7 +348,7 @@ function toolRow(row, call) {
     } catch {}
   }
   const model = traceForMessage(row);
-  return `<details class="tool-event tool-call" id="event-call-${row.seq}-${esc(call.id)}" data-open-key="call-${row.seq}-${esc(call.id)}"><summary><span class="event-meta"><time title="${esc(date(row.recorded_at))}">${esc(timeOnly(row.recorded_at))}</time><span class="role role-tool">TOOL <span class="seq">#${row.seq}</span></span></span><span class="tool-summary"><span class="tool-name">${esc(call.name)}</span><span class="argument-preview">${esc(excerpt(argumentPreview, 150))}</span><span class="tool-state">${result ? pill(status) : '<span class="muted">Нет результата</span>'}</span><span class="expand-mark" aria-hidden="true">▸</span></span></summary><div class="tool-expanded"><div class="tool-payloads${source === null ? "" : " codemode-payloads"}"><section>${argumentsMarkup}</section><section><h4>Результат ${result ? `<span class="muted">#${result.seq}</span>` : ""}</h4>${result ? json(result.message.content) : '<p class="muted">Результата нет в загруженной истории.</p>'}</section></div><div class="tool-footer"><span class="mono muted" title="${esc(call.id)}">${esc(call.id)}</span><span class="row-actions">${model ? traceButton(model.id) : ""}${recordButton(row.seq, "Запись вызова")}${result ? recordButton(result.seq, "Запись результата") : ""}${attempts.map((t) => traceButton(t.id, `Попытка ${t.attempt} · ${duration(t)}`)).join("")}</span></div></div></details>`;
+  return `<details class="tool-event tool-call${call.name === "codemode" ? "" : " other-tool"}" id="event-call-${row.seq}-${esc(call.id)}" data-open-key="call-${row.seq}-${esc(call.id)}"><summary><span class="event-meta"><time title="${esc(date(row.recorded_at))}">${esc(timeOnly(row.recorded_at))}</time><span class="role role-tool">TOOL <span class="seq">#${row.seq}</span></span></span><span class="tool-summary"><span class="tool-name">${esc(call.name)}</span><span class="argument-preview">${esc(excerpt(argumentPreview, 150))}</span><span class="tool-state">${result ? pill(status) : '<span class="muted">Нет результата</span>'}</span><span class="expand-mark" aria-hidden="true">▸</span></span></summary><div class="tool-expanded"><div class="tool-payloads${source === null ? "" : " codemode-payloads"}"><section>${argumentsMarkup}</section><section><h4>Результат ${result ? `<span class="muted">#${result.seq}</span>` : ""}</h4>${result ? json(result.message.content) : '<p class="muted">Результата нет в загруженной истории.</p>'}</section></div><div class="tool-footer"><span class="mono muted" title="${esc(call.id)}">${esc(call.id)}</span><span class="row-actions">${model ? traceButton(model.id) : ""}${recordButton(row.seq, "Запись вызова")}${result ? recordButton(result.seq, "Запись результата") : ""}${attempts.map((t) => traceButton(t.id, `Попытка ${t.attempt} · ${duration(t)}`)).join("")}</span></div></div></details>`;
 }
 function timeline(d) {
   const paired = new Set();
@@ -390,7 +392,24 @@ function timeline(d) {
       t.status === "failed" &&
       !d.messages.some((m) => m.message.tool_call_id === t.call_id),
   );
-  return `${unfinished.map((t) => `<div class="activity-line">Нет сохранённого завершения: <strong>${esc(t.name || "модель")}</strong> · ${esc(date(t.started_at))} ${traceButton(t.id, "Подробности")}</div>`).join("")}<div class="timeline">${events + pendingEvents + orphanSpeech || '<div class="empty-panel">Сообщений пока нет.</div>'}${failures.map((t) => `<div class="error">${esc(t.name)}: ${esc(t.error)} ${traceButton(t.id, `Попытка ${t.attempt}`)}</div>`).join("")}</div>${d.next_after ? `<div class="pagination"><span>${d.messages.length} из ${d.session.message_count} записей</span><button id="more-messages" class="button">Загрузить следующие события</button></div>` : ""}`;
+  const filter = `<label class="timeline-filter">
+    <input id="show-other-tools" type="checkbox" aria-keyshortcuts="Space Alt+T"${state.showOtherTools ? " checked" : ""}>
+    <span>Показывать другие вызовы инструментов</span>
+    <kbd aria-hidden="true">${navigator.platform?.includes("Mac") ? "⌥ T" : "Alt T"}</kbd>
+  </label>`;
+  return `${filter}${unfinished.map((t) => `<div class="activity-line${t.kind === "tool" && t.name !== "codemode" ? " other-tool" : ""}">Нет сохранённого завершения: <strong>${esc(t.name || "модель")}</strong> · ${esc(date(t.started_at))} ${traceButton(t.id, "Подробности")}</div>`).join("")}<div class="timeline">${events + pendingEvents + orphanSpeech}${failures.map((t) => `<div class="error${t.name === "codemode" ? "" : " other-tool"}">${esc(t.name)}: ${esc(t.error)} ${traceButton(t.id, `Попытка ${t.attempt}`)}</div>`).join("")}<div id="timeline-empty" class="empty-panel hidden">Сообщений пока нет.</div><div id="filtered-tools-empty" class="empty-panel hidden">Другие вызовы инструментов скрыты.</div></div>${d.next_after ? `<div class="pagination"><span>${d.messages.length} из ${d.session.message_count} записей</span><button id="more-messages" class="button">Загрузить следующие события</button></div>` : ""}`;
+}
+function updateToolVisibility() {
+  const panel = $("#panel");
+  const hide = !state.showOtherTools;
+  if (hide && document.activeElement.closest(".other-tool"))
+    $("#show-other-tools").focus({ preventScroll: true });
+  panel.classList.toggle("hide-other-tools", hide);
+  const entries = [...panel.querySelectorAll(".timeline > :not(.empty-panel), .activity-line")];
+  const filteredOnly = hide && entries.length > 0 &&
+    entries.every((entry) => entry.classList.contains("other-tool"));
+  $("#timeline-empty").classList.toggle("hidden", entries.length > 0);
+  $("#filtered-tools-empty").classList.toggle("hidden", !filteredOnly);
 }
 function models(d) {
   const rows = d.traces.filter(
@@ -453,6 +472,7 @@ function render() {
     const summary = el.querySelector(":scope > summary");
     if (summary && !summary.id) summary.id = "disclosure-" + el.dataset.openKey;
   }
+  if (state.tab === "timeline") updateToolVisibility();
   if (focused) {
     const el = focused.id
       ? document.getElementById(focused.id)
@@ -1011,13 +1031,14 @@ $("#search").addEventListener("input", () => {
 });
 $("#trigger").addEventListener("change", () => loadList());
 $("#status").addEventListener("change", () => loadList());
-main.addEventListener("toggle", (event) => {
+main.addEventListener("toggle", async (event) => {
   const row = event.target;
   if (!row.open) return;
   const code = $(".code-source > code", row);
   if (!code || code.dataset.highlighted) return;
   code.dataset.highlighted = "true";
-  const source = code.textContent;
+  const source = await formatJavaScript(code.textContent);
+  code.textContent = source;
   if (source.length > 32 * 1024) return;
   try {
     code.innerHTML = javascriptToken(tokenizeJavaScript(source));
@@ -1068,7 +1089,10 @@ main.addEventListener("click", (event) => {
 });
 let fileDebounce, memoryDebounce;
 main.addEventListener("change", (event) => {
-  if (event.target.id === "memory-scope") {
+  if (event.target.id === "show-other-tools") {
+    state.showOtherTools = event.target.checked;
+    updateToolVisibility();
+  } else if (event.target.id === "memory-scope") {
     state.memoryScope = event.target.value;
     history.replaceState(null, "", "#/memory?" + new URLSearchParams({ conversation_id: state.memoryScope }));
     scheduleMemory();
@@ -1122,7 +1146,7 @@ document.addEventListener("keydown", (event) => {
   if (event.isComposing || event.keyCode === 229 || event.repeat) {
     if (
       (event.key === "Enter" || event.key === " ") &&
-      event.target.closest("button,summary,#download-file,#nav-logs,#nav-memory")
+      event.target.closest("button,summary,#download-file,#nav-logs,#nav-memory,#show-other-tools")
     )
       event.preventDefault();
     return;
@@ -1197,6 +1221,20 @@ document.addEventListener("keydown", (event) => {
   ) {
     event.preventDefault();
     if (!state.busy && !state.fileBusy && !state.memoryBusy && !state.soulBusy) $("#nav-logs").click();
+  }
+  if (
+    event.altKey &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    event.code === "KeyT" &&
+    !event.target.closest("input:not(#show-other-tools), textarea, select, [contenteditable]")
+  ) {
+    const filter = $("#show-other-tools");
+    if (filter) {
+      event.preventDefault();
+      filter.click();
+    }
   }
   if (
     event.altKey &&

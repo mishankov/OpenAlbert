@@ -1,0 +1,2 @@
+# Keep the upstream distribution and notices byte for byte.
+* linguist-vendored -whitespace

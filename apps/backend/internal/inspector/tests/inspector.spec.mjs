@@ -145,6 +145,75 @@ async function openSession(page) {
   await expect(page.locator("#event-1")).toBeVisible();
 }
 
+const showOtherTools = (page) =>
+  page.getByRole("checkbox", { name: "Показывать другие вызовы инструментов" });
+
+test("хронология скрывает другие вызовы и показывает их по выбору", async ({ page }) => {
+  const orphan = {
+    seq: 5,
+    key: "turn/tool/2/orphan",
+    message: { role: "tool", tool_call_id: "orphan", content: "Результат без вызова" },
+  };
+  await fixture(page, {
+    ...detail,
+    messages: [...detail.messages, orphan],
+    traces: [
+      ...detail.traces,
+      { ...toolTrace, id: "running-tool", call_id: "running", name: "running_tool", status: "running" },
+      { ...toolTrace, id: "failed-tool", call_id: "failed", name: "failed_tool", status: "failed" },
+    ],
+  });
+  await openSession(page);
+
+  const filter = showOtherTools(page);
+  const call = page.locator("#event-call-2-c1");
+  const hiddenEntries = [
+    call,
+    page.locator("#event-5"),
+    page.locator('[data-trace="running-tool"]'),
+    page.locator('[data-trace="failed-tool"]'),
+  ];
+  await expect(filter).not.toBeChecked();
+  for (const entry of hiddenEntries) await expect(entry).toBeHidden();
+  await expect(page.getByText("Проверю задачи.")).toBeVisible();
+
+  await expect(filter).toHaveAttribute("aria-keyshortcuts", "Space Alt+T");
+  await page.getByRole("tab", { name: /^Хронология/ }).press("Tab");
+  await expect(filter).toBeFocused();
+  await page.keyboard.down("Space");
+  await page.keyboard.down("Space");
+  await page.keyboard.up("Space");
+  await expect(filter).toBeChecked();
+  await expect(filter).toBeFocused();
+  for (const entry of hiddenEntries) await expect(entry).toBeVisible();
+
+  await call.locator("summary").press("Enter");
+  await call.getByRole("button", { name: "Запись вызова" }).press("Enter");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Alt+t");
+  await page.keyboard.press("Escape");
+  await expect(filter).toBeChecked();
+
+  for (const extra of [{ repeat: true }, { isComposing: true }]) {
+    await page.locator("body").dispatchEvent("keydown", {
+      code: "KeyT", key: "е", altKey: true, bubbles: true, ...extra,
+    });
+  }
+  await expect(filter).toBeChecked();
+  await page.locator("body").dispatchEvent("keydown", {
+    code: "KeyT", key: "е", altKey: true, bubbles: true,
+  });
+  await expect(filter).not.toBeChecked();
+  await expect(filter).toBeFocused();
+  for (const entry of hiddenEntries) await expect(entry).toBeHidden();
+
+  await page.getByText("Показывать другие вызовы инструментов", { exact: true }).click();
+  await expect(call).toBeVisible();
+  await page.reload();
+  await expect(filter).not.toBeChecked();
+  await expect(call).toBeHidden();
+});
+
 test("ссылка из лога открывает нужный вызов, Escape закрывает и сохраняет навигацию", async ({ page }) => {
   await fixture(page);
   await page.goto("/inspect/#/session/test-session?trace=trace-tool");
@@ -171,12 +240,41 @@ test("ссылка из лога открывает нужный вызов, Esc
   await expect(page.locator(".session-link")).toBeVisible();
 });
 
-test("Codemode подсвечивает исходный код и открывает вложенный вызов с клавиатуры", async ({ page }) => {
-  const code = [
-    '  const query = "Лейкерс";',
-    '  const html = \'<img id="codemode-fixture-html">\';',
-    "  const tasks = await tools.task_find({ query });",
-    "  return { count: tasks.length };",
+test("хронология различает пустую историю и скрытые вызовы", async ({ page }) => {
+  const [call, result] = detail.messages.slice(1, 3);
+  const current = { ...detail, messages: [], traces: [] };
+  await fixture(page, current);
+  await page.locator(".session-link").first().click();
+  const hidden = page.getByText("Другие вызовы инструментов скрыты.");
+  const empty = page.getByText("Сообщений пока нет.");
+  await expect(empty).toBeVisible();
+  await expect(hidden).toBeHidden();
+
+  current.traces = [{ ...toolTrace, status: "running" }];
+  await page.keyboard.press("Alt+r");
+  await expect(hidden).toBeVisible();
+  await expect(empty).toBeHidden();
+  await showOtherTools(page).check();
+  await expect(hidden).toBeHidden();
+  await expect(page.locator(".activity-line")).toContainText("task_find");
+
+  await showOtherTools(page).uncheck();
+  current.traces = [];
+  current.messages = [{ ...call, message: { role: "assistant", tool_calls: call.message.tool_calls } }, result];
+  await page.keyboard.press("Alt+r");
+  await expect(hidden).toBeVisible();
+  await showOtherTools(page).check();
+  await expect(hidden).toBeHidden();
+  await expect(page.locator(".tool-call")).toBeVisible();
+});
+
+test("Codemode форматирует код, сохраняет оригинал и открывает вложенный вызов с клавиатуры", async ({ page }) => {
+  const code = `const query="Лейкерс";const html='<img id="codemode-fixture-html">';const tasks=await tools.task_find({query});return {count:tasks.length};`;
+  const formatted = [
+    'const query = "Лейкерс";',
+    'const html = \'<img id="codemode-fixture-html">\';',
+    "const tasks = await tools.task_find({ query });",
+    "return { count: tasks.length };",
   ].join("\n");
   const child = {
     ...detail.messages[1],
@@ -219,18 +317,21 @@ test("Codemode подсвечивает исходный код и открыв�
   await script.locator("summary").press("Enter");
   await expect(script.getByRole("heading", { name: "JavaScript" })).toBeVisible();
   const source = script.locator("pre.code-source > code.language-javascript");
-  await expect.poll(() => source.textContent()).toBe(code);
+  await expect.poll(() => source.textContent()).toBe(formatted);
   await expect(source.locator("span.token.keyword").first()).toHaveText("const");
   await expect(source.locator("span.token.string").last()).toHaveText("'<img id=\"codemode-fixture-html\">'");
   await expect(page.locator("#codemode-fixture-html")).toHaveCount(0);
   await expect(script.locator(".tool-payloads")).toContainText('"count": 0');
   const rawCall = script.getByRole("button", { name: "Запись вызова" });
   await rawCall.press("Enter");
-  await expect(page.getByRole("dialog")).toContainText('"code"');
+  await expect(page.getByRole("dialog")).toContainText(JSON.stringify(code));
   await page.keyboard.press("Escape");
   await expect(rawCall).toBeFocused();
 
   const event = page.locator("#event-call-3-c1");
+  await expect(event).toBeHidden();
+  await showOtherTools(page).check();
+  await expect(script).toHaveAttribute("open", "");
   await event.locator("summary").press("Enter");
   await expect(event.locator(".tool-payloads")).toContainText('"query"');
   await expect(event.locator(".tool-payloads")).toContainText('"tasks"');
@@ -340,7 +441,16 @@ test("хронология: голосовое сообщение и отдел�
   await expect(voice).not.toContainText("artifact_id=");await expect(voice).not.toContainText("automatically recognized");
   await expect(voice.locator("time")).toHaveAttribute("title", /Получено в Telegram/);
   const player = voice.locator("audio");await player.focus();await page.keyboard.press("Space");
-  await expect.poll(() => player.evaluate((a) => a.paused)).toBe(false);await page.keyboard.press("Space");
+  await expect.poll(() => player.evaluate((a) => a.currentTime)).toBeGreaterThan(0);
+  const playbackPosition = await player.evaluate((a) => a.currentTime);
+  const call = page.locator("#event-call-2-c1");
+  await page.keyboard.press("Alt+t");
+  await expect(call).toBeVisible();
+  await page.keyboard.press("Alt+t");
+  await expect(call).toBeHidden();
+  await expect(player).toBeFocused();
+  await expect.poll(() => player.evaluate((a) => a.currentTime)).toBeGreaterThan(playbackPosition);
+  await page.keyboard.press("Space");
   await expect.poll(() => player.evaluate((a) => a.paused)).toBe(true);
   const summary = speech.locator(":scope > summary");await summary.focus();await page.keyboard.press("Enter");
   await expect(speech).toHaveAttribute("open", "");
@@ -447,6 +557,7 @@ test("история, аргументы и результат инструме�
   page.on("pageerror", (e) => errors.push(e.message));
   await fixture(page);
   await openSession(page);
+  await showOtherTools(page).check();
   await page.locator(".tool-call summary").click();
   await expect(page.locator(".tool-call")).toContainText("Лейкерс");
   await expect(page.locator(".tool-call")).toContainText("tasks");
@@ -623,6 +734,7 @@ test("вызов и результат тула объединены, исход
   await fixture(page);
   await openSession(page);
   await expect(page.locator("#event-3")).toHaveCount(0);
+  await showOtherTools(page).check();
   await page.locator(".tool-call > summary").click();
   await page
     .getByRole("button", { name: "Запись результата", exact: true })
@@ -662,6 +774,7 @@ test("обновление сохраняет раскрытый тул и фо�
 }) => {
   await fixture(page);
   await openSession(page);
+  await showOtherTools(page).check();
   const summary = page.locator(".tool-call > summary");
   await summary.focus();
   await page.keyboard.press("Enter");
