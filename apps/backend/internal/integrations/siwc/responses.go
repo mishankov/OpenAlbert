@@ -71,6 +71,22 @@ func buildRequest(model string, messages []domain.Message, tools []domain.Tool) 
 	}
 	return r, nil
 }
+
+// FitsContext applies a conservative local request-size guard, independent of
+// API profile budgets. It is not a claimed context limit for the selected model.
+// Structured callers remove whole records until the serialized request fits.
+func FitsContext(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	body, err := buildRequest(model, messages, tools)
+	if err != nil {
+		return false, err
+	}
+	raw, err := json.Marshal(body)
+	return len(raw) <= 64000, err
+}
+
 func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
 	c.mu.Lock()
 	token, err := c.accessToken(ctx)
@@ -136,8 +152,8 @@ type responseEvent struct {
 		} `json:"error"`
 		Output []json.RawMessage `json:"output"`
 		Usage  struct {
-			Input  int `json:"input_tokens"`
-			Output int `json:"output_tokens"`
+			Input  *int `json:"input_tokens"`
+			Output *int `json:"output_tokens"`
 		} `json:"usage"`
 	} `json:"response"`
 }
@@ -175,7 +191,14 @@ func readStream(reader io.Reader) (domain.Completion, error) {
 			if event.Response.Status != "completed" {
 				return domain.Completion{}, false, errors.New("invalid ChatGPT completion status")
 			}
-			result := domain.Completion{Message: domain.Message{Role: "assistant"}, InputTokens: event.Response.Usage.Input, OutputTokens: event.Response.Usage.Output}
+			usage := event.Response.Usage
+			result := domain.Completion{Message: domain.Message{Role: "assistant"}, Usage: domain.ModelUsage{TokenUsageKnown: usage.Input != nil && usage.Output != nil}}
+			if usage.Input != nil {
+				result.InputTokens = *usage.Input
+			}
+			if usage.Output != nil {
+				result.OutputTokens = *usage.Output
+			}
 			for _, rawItem := range event.Response.Output {
 				var item responseOutput
 				if json.Unmarshal(rawItem, &item) != nil {

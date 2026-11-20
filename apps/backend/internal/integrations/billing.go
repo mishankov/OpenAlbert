@@ -143,9 +143,12 @@ func (b *BillingModel) Reconnected() {
 	b.lastErr = nil
 }
 
-// Preserve API profile sizing when billing is the application's outer model.
-// The configured API budget also keeps an auto-lane fallback request bounded.
+// Keep auto-lane requests within the API fallback budget. Pure plan mode uses
+// an independent local payload bound because it never calls the API profile.
 func (b *BillingModel) FitsContext(ctx context.Context, messages []domain.Message, tools []domain.Tool) (bool, error) {
+	if b.Mode == "siwc" {
+		return siwc.FitsContext(ctx, b.Plan.Status().Model, messages, tools)
+	}
 	if sizer, ok := b.API.(domain.ModelContext); ok {
 		return sizer.FitsContext(ctx, messages, tools)
 	}

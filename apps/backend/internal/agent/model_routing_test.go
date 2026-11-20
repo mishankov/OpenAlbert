@@ -15,6 +15,7 @@ import (
 	"github.com/mishankov/OpenAlbert/shared/backup"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/integrations"
+	"openalbert/apps/backend/internal/integrations/siwc"
 	"openalbert/apps/backend/internal/telemetry"
 )
 
@@ -347,5 +348,41 @@ func TestAnalysisFitsCompleteNewestRecordsAndKeepsFullDeletionCheck(t *testing.T
 	memories, err := k.Search(context.Background(), conv.ID, "")
 	if err != nil || len(memories) != 0 {
 		t.Fatalf("deletion outside retained transcript was ignored: %+v %v", memories, err)
+	}
+}
+
+type analysisPlanModel struct{ *siwc.Client }
+
+func (*analysisPlanModel) Status() siwc.Status { return siwc.Status{Model: "plan-model"} }
+
+func TestPlanOnlyAnalysisFitsWholeRecordsIndependentlyOfAPIProfile(t *testing.T) {
+	api := httpRoutingModel(t, "http://127.0.0.1:1", 5000, false)
+	newest := domain.Message{Role: "user", Content: "newest " + strings.Repeat("record ", 2000)}
+	transcript := []domain.Message{}
+	for range 8 {
+		transcript = append(transcript, domain.Message{Role: "user", Content: strings.Repeat("older ", 2000)})
+	}
+	transcript = append(transcript, newest)
+	for _, mode := range []string{"siwc", "api_key", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			a := &Activities{Model: &integrations.BillingModel{Mode: mode, API: api, Plan: &analysisPlanModel{}}}
+			messages, fitted, err := a.fitAnalysisContext(context.Background(), "Analyze this session", analysisContext{Transcript: transcript})
+			if mode != "siwc" {
+				if err == nil {
+					t.Fatal("API lane accepted a newest record larger than its budget")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fitted.Transcript) < 1 || len(fitted.Transcript) >= len(transcript) || fitted.Transcript[len(fitted.Transcript)-1].Content != newest.Content {
+				t.Fatalf("lost newest record or failed to bound plan payload: %d records", len(fitted.Transcript))
+			}
+			var decoded analysisContext
+			if err := json.Unmarshal([]byte(messages[1].Content), &decoded); err != nil || len(decoded.Transcript) != len(fitted.Transcript) {
+				t.Fatalf("partial records in plan request: %v", err)
+			}
+		})
 	}
 }

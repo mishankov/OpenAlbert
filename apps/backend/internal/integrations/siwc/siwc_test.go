@@ -386,7 +386,7 @@ func TestStreamTerminalEventsAndDiagnostics(t *testing.T) {
 	}
 	event := `{"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","namespace":"openalbert","call_id":"c1","name":"lookup","arguments":"{}"}],"usage":{"input_tokens":2,"output_tokens":3}}}`
 	result, err := readStream(strings.NewReader("event: response.completed\r\ndata: " + event + "\r\n\r\n"))
-	if err != nil || len(result.Message.ToolCalls) != 1 || result.OutputTokens != 3 {
+	if err != nil || len(result.Message.ToolCalls) != 1 || result.OutputTokens != 3 || !result.Usage.TokenUsageKnown {
 		t.Fatalf("tool completion %+v %v", result, err)
 	}
 	resp := &http.Response{StatusCode: 403, Header: http.Header{"X-Request-Id": []string{"req-test"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"subscription_sharing_route_not_supported","param":"model","message":"secret"}}`))}
@@ -433,5 +433,28 @@ func TestExplicitMissingPermissionRetryRequestsConsent(t *testing.T) {
 	u, _ = url.Parse(link)
 	if u.Query().Get("prompt") != "" {
 		t.Fatal("ordinary sign-in forced consent")
+	}
+}
+
+func TestStreamUsagePresence(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage   string
+		known         bool
+		input, output int
+	}{
+		{"counts", `{"input_tokens":7,"output_tokens":3}`, true, 7, 3},
+		{"zeroes", `{"input_tokens":0,"output_tokens":0}`, true, 0, 0},
+		{"missing", `{}`, false, 0, 0},
+		{"input-only", `{"input_tokens":7}`, false, 7, 0},
+		{"output-only", `{"output_tokens":3}`, false, 0, 3},
+		{"null", `{"input_tokens":null,"output_tokens":0}`, false, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := `{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":` + tc.usage + `}}`
+			got, err := readStream(strings.NewReader("data: " + event + "\n\n"))
+			if err != nil || got.Usage.TokenUsageKnown != tc.known || got.InputTokens != tc.input || got.OutputTokens != tc.output {
+				t.Fatalf("usage presence lost: %+v %v", got, err)
+			}
+		})
 	}
 }
