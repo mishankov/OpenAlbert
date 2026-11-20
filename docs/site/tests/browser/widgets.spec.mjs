@@ -5,7 +5,7 @@ const html = await readFile(new URL('../../../../apps/backend/internal/widgets/s
 const customHTML = await readFile(new URL('../../../../apps/backend/internal/widgets/testdata/custom-summary.html', import.meta.url), 'utf8');
 
 async function mount(page, state, source = html) {
-  await page.goto('/');
+  await page.goto('about:blank');
   await page.evaluate((state) => {
     window.requests = [];
     window.events = {};
