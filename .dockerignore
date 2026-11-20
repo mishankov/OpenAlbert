@@ -17,7 +17,6 @@ coverage*
 
 /apps/backend/internal/inspector/test-results/
 
-apps/macos
 
 # Private deployment model configuration.
 models.toml

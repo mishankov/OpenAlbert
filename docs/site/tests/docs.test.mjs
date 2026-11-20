@@ -13,11 +13,15 @@ test('сборка сохраняет все документы, ссылки и
   t.after(() => rm(output, { recursive: true, force: true }));
   const pages = await build(output);
   assert.equal(pages.length, navigation.length);
-  assert.ok(pages.find((page) => page.id === 'desktop-api')?.html.includes('/api/v1/messages'));
-  assert.ok(pages.find((page) => page.id === 'desktop')?.html.includes('DESKTOP_API_TOKEN'));
+  assert.ok(pages.find((page) => page.id === 'client-api-contract')?.html.includes('/api/v1/messages'));
+  assert.ok(pages.find((page) => page.id === 'client-api')?.html.includes('DESKTOP_API_TOKEN'));
   assert.ok(pages.find((page) => page.id === 'deployment')?.html.includes('compose.yaml'));
   assert.ok(pages.find((page) => page.id === 'speech')?.html.includes('STT_BASE_URL'));
   const ids = new Set(pages.map((page) => page.id));
+  for (const removed of ['desktop', 'desktop-api', 'desktop-voice', 'macos-development-vm', 'macos-updates']) {
+    assert.ok(!ids.has(removed));
+    await assert.rejects(access(join(output, `docs/${removed}.md`)), { code: 'ENOENT' });
+  }
   const diagrams = new Set();
   for (const page of pages) {
     assert.ok(page.html.includes('<h1'));

@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -20,11 +19,11 @@ class LocalRunTests(unittest.TestCase):
     def test_test_environment_excludes_live_and_signing_settings(self):
         with mock.patch.dict(os.environ, {"LLM_API_KEY": "private", "LLM_CONFIG_FILE": "/private/models.toml",
                                         "LLM_CONFIG_HOST_FILE": "/private/models.toml", "OPENALBERT_LIVE_RETRIEVAL_EVAL": "1",
-                                        "SPARKLE_PRIVATE_KEY": "private", "ALBERT_DESKTOP_BACKEND": "host", "CI": "true",
+                                        "SIGNING_PRIVATE_KEY": "private", "APPLICATION_TOKEN": "private", "CI": "true",
                                         "OPENALBERT_TEST_BACKUP_MINIO_IMAGE": "local/minio:test"}):
             env = local.test_environment()
             self.assertEqual(env["OPENALBERT_TEST_BACKUP_MINIO_IMAGE"], "local/minio:test")
-        for name in ("LLM_API_KEY", "LLM_CONFIG_FILE", "LLM_CONFIG_HOST_FILE", "OPENALBERT_LIVE_RETRIEVAL_EVAL", "SPARKLE_PRIVATE_KEY", "ALBERT_DESKTOP_BACKEND", "CI"):
+        for name in ("LLM_API_KEY", "LLM_CONFIG_FILE", "LLM_CONFIG_HOST_FILE", "OPENALBERT_LIVE_RETRIEVAL_EVAL", "SIGNING_PRIVATE_KEY", "APPLICATION_TOKEN", "CI"):
             self.assertNotIn(name, env)
 
     def test_failed_command_keeps_output_and_failure_in_report(self):
@@ -114,12 +113,12 @@ class LocalRunTests(unittest.TestCase):
             self.assertIn(run.repository + ":computer-test", calls[-1][1])
             self.assertNotIn("computer-ssh", [name for name, _ in calls])
             with mock.patch.object(run, "go"), mock.patch.object(run, "backup"), \
-                    mock.patch.object(run, "web"), mock.patch.object(run, "macos"), \
+                    mock.patch.object(run, "web"), \
                     mock.patch.object(run, "computer") as computer:
                 run.tests()
                 computer.assert_not_called()
 
-    def test_image_publication_excludes_macos_and_keeps_server_checks(self):
+    def test_image_publication_runs_server_checks_before_upload(self):
         with tempfile.TemporaryDirectory() as directory:
             run = self.make_run(directory, "publish")
             calls = []
@@ -135,21 +134,25 @@ class LocalRunTests(unittest.TestCase):
                     mock.patch.object(run, "go", side_effect=lambda: calls.append("go")), \
                     mock.patch.object(run, "backup", side_effect=lambda: calls.append("backup")), \
                     mock.patch.object(run, "web", side_effect=lambda: calls.append("web")), \
-                    mock.patch.object(run, "macos") as macos, \
                     mock.patch.object(run, "images", side_effect=images), \
                     mock.patch.object(run, "command", side_effect=lambda *a, **kw: calls.append("upload")):
                 run.publish()
-                macos.assert_not_called()
             self.assertEqual(calls[:5], ["go", "backup", "web", "images-amd64", "images-arm64"])
             self.assertEqual(calls[5:], ["upload"] * 5)
 
-    def test_full_test_suite_keeps_macos_verification(self):
+    def test_full_test_suite_runs_only_go_backup_and_web(self):
         with tempfile.TemporaryDirectory() as directory:
             run = self.make_run(directory, "test")
-            with mock.patch.object(run, "go"), mock.patch.object(run, "backup"), \
-                    mock.patch.object(run, "web"), mock.patch.object(run, "macos") as macos:
+            stages = mock.Mock()
+            with mock.patch.object(run, "go", stages.go), \
+                    mock.patch.object(run, "backup", stages.backup), \
+                    mock.patch.object(run, "web", stages.web), \
+                    mock.patch.object(run, "command") as command, \
+                    mock.patch.object(local.subprocess, "Popen") as process:
                 run.tests()
-                macos.assert_called_once_with()
+                self.assertEqual(stages.mock_calls, [mock.call.go(), mock.call.backup(), mock.call.web()])
+                command.assert_not_called()
+                process.assert_not_called()
 
     def test_publication_rechecks_sources_before_first_upload(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -161,31 +164,6 @@ class LocalRunTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "sources changed"):
                     run.publish()
                 command.assert_not_called()
-
-
-spec = importlib.util.spec_from_file_location("macos_release", Path(__file__).with_name("macos_release.py"))
-macos_release = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(macos_release)
-
-
-class MacReleaseTests(unittest.TestCase):
-    def test_pagination_handles_adjacent_json_arrays(self):
-        with mock.patch.object(macos_release, "gh", return_value=b' [ {"id": 1} ]\n [ {"id": 2} ]\n'):
-            self.assertEqual(macos_release.pages("endpoint"), [{"id": 1}, {"id": 2}])
-
-    def test_existing_tag_is_rejected_without_downloading_or_uploading(self):
-        with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.object(macos_release, "pages", side_effect=[[{"name": "macos-v1.0.0"}], []]), \
-                mock.patch.object(macos_release, "gh") as gh:
-            with self.assertRaisesRegex(macos_release.ReleaseError, "already exists"):
-                macos_release.history({"repository": "example/app", "tag": "macos-v1.0.0"}, Path(directory))
-            gh.assert_not_called()
-
-    def test_ambiguous_previous_release_metadata_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.object(macos_release, "pages", side_effect=[[], [{"tag_name": "macos-v0.1.0", "assets": []}]]):
-            with self.assertRaisesRegex(macos_release.ReleaseError, "ambiguous"):
-                macos_release.history({"repository": "example/app", "tag": "macos-v1.0.0"}, Path(directory))
 
 
 if __name__ == "__main__":

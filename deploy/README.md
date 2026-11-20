@@ -7,7 +7,7 @@
 - `compose.test.yaml` — одноразовая среда Go integration-тестов.
 - `models.example.toml` — пример профилей LLM и привязок ролей.
 - `docker-bake.hcl` — общий каталог сборок образов.
-- `networking/` — примеры WireGuard и Caddy для Desktop API.
+- `networking/` — примеры WireGuard и Caddy для клиентского HTTP API.
 
 Из корня репозитория:
 

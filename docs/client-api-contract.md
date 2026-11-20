@@ -1,6 +1,6 @@
-# Desktop API v1
+# HTTP API v1
 
-This is the shared implementation contract for the first native macOS client.
+This is the implementation contract for authenticated HTTP clients of OpenAlbert.
 It exposes the owner's single `personal:<owner id>` conversation, shared with
 Telegram. Session IDs, model messages, reasoning, tool calls, and group history
 are never part of this API. All dates are RFC 3339 UTC. JSON uses snake_case.
@@ -11,9 +11,8 @@ Every `/api/v1/` request, including downloads, requires
 `Authorization: Bearer <token>`. `DESKTOP_API_TOKEN` enables the API; unset means
 disabled. Use a randomly generated token of at least 32 bytes. The first version
 has one owner token; device enrollment and separate revocation are future work.
-The client stores the token in macOS Keychain. The application accepts HTTP and
-HTTPS server URLs. Every transport still requires the Bearer token. Never put
-tokens in URLs, logs, or preferences.
+Clients must store the token securely. Every transport requires the Bearer token;
+use HTTPS outside a trusted network. Never put tokens in URLs, logs, or preferences.
 
 Errors: `{"error":{"code":"unauthorized","message":"…"}}`.
 Codes include `unauthorized`, `invalid_request`, `not_found`, `conflict`,
@@ -40,10 +39,9 @@ the owner's conversation and does not infer work from scheduled tasks marked
 ### GET /api/v1/messages?limit=100&before=<opaque cursor>
 
 Newest page by default, returned in chronological order. `limit` is 1–100.
-`before` loads an older page. The client refreshes the newest page every two
-seconds while active and merges by message ID, preserving loaded older pages.
-After reconnect, it pages backwards until reaching known history, so receiving
-more than 100 messages while offline does not leave a gap.
+`before` loads an older page. Clients can poll the newest page and merge by message ID, preserving older pages.
+After reconnect, page backwards until reaching known history so receiving more
+than 100 messages while offline does not leave a gap.
 This version uses polling; there is no SSE endpoint or token-bearing image URL.
 
 `{"messages":[Message],"has_more":false,"next_before":null}`
@@ -66,10 +64,10 @@ Roles: `user`, `assistant`. Formats: `plain`, `markdown`.
 Delivery: `accepted`, `pending`, `sent`, `failed`, `unknown`.
 Incoming messages come from the durable inbox; public assistant messages come
 from the outbox, never from raw model history. Telegram replies are shown only
-after successful delivery (or explicit unknown delivery), desktop replies are
+after successful delivery (or explicit unknown delivery), API replies are
 visible once durably queued. Stable IDs deduplicate reloads. No arbitrary
 conversation parameter is accepted. Legacy Telegram formatting may fall back to
-plain text; newly generated desktop output retains Markdown.
+plain text; newly generated API output retains Markdown.
 
 ### POST /api/v1/messages
 
@@ -82,8 +80,8 @@ the client before sending; ambiguous network failure must retry the same ID.
 Text is at most 32,000 UTF-8 bytes; text or an attachment is required. At most
 10 attachments. Attachments and optional task must belong to the owner scope.
 Task context is supplied to the agent without adding boilerplate to visible text.
-The existing durable dispatcher wakes the agent. Replies to desktop input go
-to the desktop outbox, without an extra Telegram notification. Telegram input
+The existing durable dispatcher wakes the agent. Replies to API input go
+to the API outbox, without an extra Telegram notification. Telegram input
 and background tasks retain their existing delivery behavior.
 
 ### POST /api/v1/stop
@@ -123,7 +121,7 @@ returns `invalid_request`. Uploaded audio reaches the existing STT workflow
 without a Telegram download. The STT decoder enforces the real five-minute
 limit. Voice upload/POST retries preserve the same message UUID and uploaded ID.
 Public history contains attachment metadata, with audio bytes available only
-through authenticated content downloads. See [voice behavior](desktop-voice.md).
+through authenticated content downloads. See [speech processing](speech.md).
 
 Attachment:
 `{"id":"…","name":"lake.jpg","mime":"image/jpeg","size_bytes":12345}`.
@@ -136,22 +134,11 @@ escaped. Images are downloaded by the client and decoded locally.
 
 ## Client behavior
 
-Native macOS app, one window/conversation, neutral light/dark system colors,
-sidebar hidden initially. Conversation, tasks, memory, files. No chat list or
-new-chat command. Preserve draft and task context while navigating; failed sends
-retain their retry ID. Network failures show a quiet actionable error and never
-insert fabricated assistant replies. Read pages remain usable offline.
-
-Render Markdown safely, including headings, lists, quotes, code, links, and
-inline emphasis; no remote HTML/scripts. Images retain aspect ratio and open
-larger. Do not fetch arbitrary remote images silently with the owner's token.
-
-Shortcuts: conversation ⌘1, tasks ⌘2, memory ⌘3, files ⌘4, sections ⌘\\,
-send Enter (⌘Return is an alias), newline Shift+Enter, discuss ⌘Return, stop ⌘., attach ⌘O, settings ⌘,.
-Older messages use ⌃⌘↑; the editor's standard ⌘↑ binding is preserved.
-Escape dismisses the foremost presentation/context. Buttons/menus expose
-shortcuts and share actions, disabled/busy rules, and focus behavior. Sending
-must handle IME composition, repeat, non-English layouts, and preserve drafts.
+Preserve draft and task context while navigating; retain the UUID for failed
+sends. Network failures must not insert fabricated assistant replies. Render
+Markdown safely without remote HTML or scripts. Do not fetch arbitrary remote
+images with the owner's token. Authenticated downloads must preserve the token's
+server scope.
 
 ## Deployment
 

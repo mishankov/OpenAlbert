@@ -22,8 +22,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports/local"
 COMPONENTS = ("openalbert", "stt", "log-gateway", "minio", "minio-init", "backup")
-COMMANDS = ("check", "test", "test:go", "test:computer", "test:backup", "test:web", "test:macos", "images", "verify", "publish",
-            "release:macos", "release:macos:draft", "screenshots", "reports")
+COMMANDS = ("check", "test", "test:go", "test:computer", "test:backup", "test:web", "images", "verify", "publish", "reports")
 
 
 class GoEvents:
@@ -66,19 +65,18 @@ def output(args, env=None):
 
 def test_environment():
     # Do not inherit optional live-eval settings, application tokens or signing keys.
-    names = {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "DEVELOPER_DIR", "SDKROOT",
+    names = {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL",
              "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH",
              "GOPATH", "GOMODCACHE", "GOCACHE", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB",
              "PLAYWRIGHT_BROWSERS_PATH", "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
-             "OPENALBERT_TEST_BACKUP_MINIO_IMAGE",
-             "ALBERT_TART", "ALBERT_VM_NAME", "ALBERT_VM_STATE", "ALBERT_VM_IMAGE", "TART_HOME"}
+             "OPENALBERT_TEST_BACKUP_MINIO_IMAGE"}
     return {key: value for key, value in os.environ.items() if key in names}
 
 
 def stop(process):
     if process.poll() is not None:
         return
-    # Let nested runners execute their own cleanup (including the shared VM lease).
+    # Let nested runners execute their own cleanup.
     for signum, grace in ((signal.SIGINT, 30), (signal.SIGTERM, 10), (signal.SIGKILL, 5)):
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signum)
@@ -120,8 +118,6 @@ class Run:
             rows += ["", f"Images ({arch}):", "", *[f"- `{image}`" for image in images.values()]]
         artifacts = [path for path in ("go-tests.jsonl", "docs/html/index.html", "inspector/html/index.html",
                                       "docs/junit.xml", "inspector/junit.xml") if (self.directory / path).exists()]
-        artifacts += [str(path.relative_to(self.directory)) for path in sorted((self.directory / "macos").glob("*/result.json"))]
-        artifacts += [str(path.relative_to(self.directory)) for path in sorted((self.directory / "release").glob("*"))]
         if artifacts:
             rows += ["", "Artifacts:", "", *[f"- [{path}]({path})" for path in artifacts]]
         (self.directory / "summary.md").write_text("\n".join(rows) + "\n")
@@ -226,21 +222,6 @@ class Run:
             self.command(suite + "-browser", ["./docs/node_modules/.bin/playwright", "test", "-c", config,
                                              "--reporter=list,html,junit", "--output", self.directory / suite / "results"], env=env)
 
-    def macos(self):
-        if sys.platform != "darwin":
-            raise RuntimeError("macOS verification requires a Mac with the managed Tart VM; no stage is skipped")
-        # Signature/tamper tests require Sparkle's pinned signing tools. Resolve
-        # them before Python discovery so a fresh checkout cannot skip that suite.
-        self.command("macos-resolve", ["swift", "package", "--package-path", "apps/macos", "resolve"])
-        self.command("macos-tooling", [sys.executable, "-m", "unittest", "discover", "-s", "apps/macos", "-p", "test_*.py", "-v"])
-        self.command("go-swift-contract", [sys.executable, "tools/checks/check-contract.py"])
-        self.vm("test")
-        self.vm("smoke", "--configuration", "release")
-
-    def vm(self, mode, *args):
-        self.command("macos-" + mode, [sys.executable, "apps/macos/desktop_vm.py", mode,
-                                     "--output", self.directory / "macos", *args], timeout=2400)
-
     def images(self, arch, deployment=False):
         env = dict(self.env, LOCAL_REPOSITORY=self.repository, ARCH=arch, REVISION=self.data["revision"],
                    DOCKER_DEFAULT_PLATFORM="linux/" + arch)
@@ -274,12 +255,10 @@ class Run:
         if output(["git", "rev-parse", "HEAD"], self.env) != self.data["revision"]:
             raise RuntimeError("HEAD changed during verification")
 
-    def tests(self, *, include_macos=True):
+    def tests(self):
         self.go()
         self.backup()
         self.web()
-        if include_macos:
-            self.macos()
 
     def publish(self):
         prefix = os.environ.get("OPENALBERT_IMAGE_PREFIX", "")
@@ -287,8 +266,7 @@ class Run:
             raise RuntimeError("Set OPENALBERT_IMAGE_PREFIX to a lowercase registry/owner/repository")
         self.clean_checkout(master=True)
         self.check()
-        # The early macOS client is verified separately from container releases.
-        self.tests(include_macos=False)
+        self.tests()
         for arch in ("amd64", "arm64"):
             self.images(arch, deployment=True)
         self.clean_checkout(master=True)
@@ -304,26 +282,6 @@ class Run:
                 variants.append(remote)
             self.command("manifest-" + component, ["docker", "buildx", "imagetools", "create", "--tag", image + ":" + sha,
                                                   "--tag", image + ":master", *variants])
-
-    def release_macos(self, draft=False):
-        self.clean_checkout()
-        # Signing secrets are passed only to the existing isolated signing helper.
-        env = dict(self.env)
-        names = ("ALBERT_UPDATE_FEED_URL", "SPARKLE_PUBLIC_KEY", "ALBERT_SIGNING_CERT_SHA1", "RELEASE_REPOSITORY", "RELEASE_TAG")
-        env.update({name: os.environ[name] for name in names if name in os.environ})
-        self.command("release-config", [sys.executable, "apps/macos/release.py", "check-config"], env=env)
-        self.command("release-history", [sys.executable, "tools/macos_release.py", "history", "--output", self.directory / "release-history"], env=env)
-        self.macos()
-        signing = dict(env)
-        signing.update({name: os.environ[name] for name in ("ALBERT_SIGNING_P12", "ALBERT_SIGNING_PASSWORD", "SPARKLE_PRIVATE_KEY") if name in os.environ})
-        self.command("release-signing", [sys.executable, "apps/macos/release-signing.py"], env=signing, timeout=1800)
-        self.vm("smoke", "--app", ROOT / "apps/macos/build/Альберт.app")
-        import shutil
-        shutil.copytree(ROOT / "apps/macos/build/release", self.directory / "release")
-        self.clean_checkout()
-        if draft:
-            self.command("release-draft", [sys.executable, "tools/macos_release.py", "draft", "--artifacts", self.directory / "release"], env=env)
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -354,10 +312,9 @@ def main():
     run = Run(args.command)
     code = 0
     try:
-        actions = {"check": run.check, "test": run.tests, "test:go": run.go, "test:computer": run.computer, "test:backup": run.backup, "test:web": run.web, "test:macos": run.macos,
+        actions = {"check": run.check, "test": run.tests, "test:go": run.go, "test:computer": run.computer, "test:backup": run.backup, "test:web": run.web,
                    "images": lambda: run.images(run.native_arch()), "verify": lambda: (run.check(), run.tests(), run.images(run.native_arch(), deployment=True)),
-                   "publish": run.publish, "release:macos": run.release_macos, "release:macos:draft": lambda: run.release_macos(draft=True),
-                   "screenshots": lambda: run.vm("screenshots")}
+                   "publish": run.publish}
         actions[args.command]()
         run.data["status"] = "passed"
     except KeyboardInterrupt as error:
@@ -374,7 +331,6 @@ def main():
         temporary.replace(REPORTS / "latest.txt")
         print(f"\n{run.data['status']}: {run.data['command']} — {run.data['seconds']} s\nReport: {run.directory / 'summary.md'}")
     return code
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -2,7 +2,7 @@
 
 [К содержанию](README.md)
 
-OpenAlbert выбирает роль по операции приложения. `chat` — интерактивный агентский цикл Telegram и macOS, включая группы; `background` — запланированные задачи и инициатива; `analysis` — итоговый разбор закрытой сессии, краткое содержание и извлечение памяти без tools. Задача «проанализировать логи» остаётся `background`: ключевые слова не меняют роль.
+OpenAlbert выбирает роль по операции приложения. `chat` — интерактивный агентский цикл Telegram, включая группы, и личного HTTP API; `background` — запланированные задачи и инициатива; `analysis` — итоговый разбор закрытой сессии, краткое содержание и извлечение памяти без tools. Задача «проанализировать логи» остаётся `background`: ключевые слова не меняют роль.
 
 ## TOML
 
@@ -88,13 +88,13 @@ output_token_field = "max_tokens"
 
 `max_output_tokens` подписочного профиля — только локальный резерв для проверки входного контекста, а не ограничение выходного ответа OpenAI: [preview-контракт](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations) запрещает отправлять это поле. И API, и подписочные профили проверяют контекст по своему `context_window_tokens` с этим резервом; оба соблюдают `timeout` профиля.
 
-[Вход в ChatGPT](chatgpt-plan-usage.md) через macOS или `/chatgpt login` подключает общий аккаунт. `/chatgpt models` и Desktop API каталог остаются доступны, чтобы узнать slug. Меняй модель в TOML и пересоздавай приложение: `/chatgpt model` и `PUT /api/v1/chatgpt/model` в `profiles` отклоняются с объяснением, HTTP возвращает `409 config_managed`. `/chatgpt status` и Desktop API статус показывают для каждой роли профиль, модель и `auth_mode`; активная полоса — `profiles`.
+[Вход в ChatGPT](chatgpt-plan-usage.md) через `/chatgpt login` в Telegram подключает общий аккаунт. `/chatgpt models` и HTTP API каталог остаются доступны, чтобы узнать slug. Меняй модель в TOML и пересоздавай приложение: `/chatgpt model` и `PUT /api/v1/chatgpt/model` в `profiles` отклоняются с объяснением, HTTP возвращает `409 config_managed`. `/chatgpt status` и HTTP API статус показывают для каждой роли профиль, модель и `auth_mode`; активная полоса — `profiles`.
 
 ### Совместимость старых глобальных режимов
 
 `api_key`, `siwc` и `auto` поддерживаются только с TOML, содержащим исключительно `openai_chat_completions`. `api_key` использует API-профили ролей; `siwc` отправляет все роли в общий ChatGPT plan; `auto` сначала использует план, затем API-профиль при предусмотренных ошибках доступности/лимита. Для `api_key` и `auto` нужны ключи API-профилей. Добавление `openai_chatgpt` требует перехода на `profiles`.
 
-Только в старых `siwc`/`auto` `OPENAI_SIWC_MODEL` задаёт начальную общую модель (по умолчанию model ID профиля `chat`); `/chatgpt model` или настройки macOS меняют и сохраняют её для всех ролей. Глобальный `auto` не является fallback между TOML-профилями.
+Только в старых `siwc`/`auto` `OPENAI_SIWC_MODEL` задаёт начальную общую модель (по умолчанию model ID профиля `chat`); `/chatgpt model` меняет и сохраняет её для всех ролей. Глобальный `auto` не является fallback между TOML-профилями.
 
 ## Исполнение и ошибки
 
