@@ -313,7 +313,7 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 	for i := currentStart; i < len(out.Messages); i++ {
 		out.Messages[i].TurnID = in.Key
 	}
-	out.Messages = CompactContext(out.Messages)
+	out.Messages = CompactContext(out.Messages, in.Key)
 	return out, nil
 }
 func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOutput, err error) {

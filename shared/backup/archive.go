@@ -264,7 +264,7 @@ func Restore(ctx context.Context, encryptedPath, identityPath, destination strin
 		}
 		// A configured absolute host path belongs to the original installation.
 		// Override only this bind so recovery is portable to a new directory.
-		services["openalbert"]["volumes"] = []map[string]any{{"type": "bind", "source": "./" + filepath.ToSlash(m.ModelConfigFile), "target": "/etc/openalbert/models.toml", "read_only": true, "bind": map[string]bool{"create_host_path": false}}}
+		services["openalbert"]["volumes"] = []map[string]any{{"type": "bind", "source": "./" + strings.ReplaceAll(filepath.ToSlash(m.ModelConfigFile), "$", "$$"), "target": "/etc/openalbert/models.toml", "read_only": true, "bind": map[string]bool{"create_host_path": false}}}
 	}
 	if len(services) == 0 {
 		return errors.New("restore manifest has no image digests")

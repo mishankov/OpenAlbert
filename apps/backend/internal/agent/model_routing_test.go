@@ -238,7 +238,7 @@ func TestTemporalAndProfileCompactionRemoveWholeHistoricalTurns(t *testing.T) {
 	messages = append(messages, domain.Message{Role: "user", Content: "Old artifact view"}, domain.Message{Role: "user", TurnID: "later-old", Content: "Another old turn"}, domain.Message{Role: "assistant", Content: strings.Repeat("y", 20000)})
 	current := []domain.Message{{Role: "user", TurnID: "current", Content: "Current request"}, {Role: "user", TurnID: "current", Content: "Current batch part"}, {Role: "user", Content: "Current artifact view"}}
 	messages = append(messages, current...)
-	compact := CompactContext(messages)
+	compact := CompactContext(messages, "current")
 	if len(compact) != 6 || compact[1].TurnID != "later-old" {
 		t.Fatalf("Temporal pass split a historical turn: %d messages", len(compact))
 	}
@@ -384,5 +384,53 @@ func TestPlanOnlyAnalysisFitsWholeRecordsIndependentlyOfAPIProfile(t *testing.T)
 				t.Fatalf("partial records in plan request: %v", err)
 			}
 		})
+	}
+}
+
+func TestTransportDropsWholeHistoricalImageTurnsBeforeTextOnlyRouting(t *testing.T) {
+	priorText := strings.Repeat("earlier text ", 3500)
+	var sent []domain.Message
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []domain.Message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		sent = body.Messages
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	messages := []domain.Message{{Role: "system", Content: "Rules"}, {Role: "user", TurnID: "text-A", Content: priorText}, {Role: "assistant", Content: "Earlier reply"}}
+	for i := range 3 {
+		messages = append(messages, domain.Message{Role: "user", TurnID: fmt.Sprintf("image-%d", i), Content: "Historical image question", Images: []string{strings.Repeat("a", 250000)}}, domain.Message{Role: "assistant", Content: "Historical image answer"})
+	}
+	messages = append(messages, domain.Message{Role: "user", TurnID: "current", Content: "Text C"})
+	compact := CompactContext(messages, "current")
+	if len(compact) != 6 || compact[1].Content != priorText || len(compact[3].Images) != 1 {
+		t.Fatalf("transport clipped text or retained partial image turns: %d messages", len(compact))
+	}
+	model := httpRoutingModel(t, server.URL, 128000, false)
+	ctx := domain.WithModelTurn(domain.WithModelRole(context.Background(), domain.RoleChat), "current")
+	if _, err := model.Complete(ctx, compact, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 4 || sent[1].Content != priorText || sent[2].Content != "Earlier reply" || sent[3].Content != "Text C" {
+		t.Fatalf("image question/reply leaked as text, or earlier text lost: %d messages", len(sent))
+	}
+}
+
+func TestAnalysisRefillsTranscriptAfterTrimmingMemorySnapshot(t *testing.T) {
+	a := &Activities{Model: httpRoutingModel(t, "http://127.0.0.1:1", 6000, false)}
+	latest := domain.Message{Role: "user", Content: "Remember that I prefer morning meetings."}
+	_, fitted, err := a.fitAnalysisContext(context.Background(), "Summarize", analysisContext{
+		Existing:   []domain.MemoryEntry{{Content: strings.Repeat("large old memory ", 1000)}},
+		Transcript: []domain.Message{latest, {Role: "assistant"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fitted.Existing) != 0 || len(fitted.Transcript) != 2 || fitted.Transcript[0].Content != latest.Content {
+		t.Fatalf("analysis discarded useful transcript after freeing memory budget: %+v", fitted)
 	}
 }

@@ -105,7 +105,7 @@ func (f *oauthFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		model, _ := json.Marshal(request.Model)
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, `data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}],"usage":{"input_tokens":7,"output_tokens":1}}}`+"\n\n", model)
+		fmt.Fprintf(w, `data: {"type":"response.completed","response":{"status":"completed","model":"served-model-version","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}],"usage":{"input_tokens":7,"output_tokens":1,"input_tokens_details":{"cached_tokens":4}}}}`+"\n\n", model)
 	default:
 		http.NotFound(w, r)
 	}
@@ -168,7 +168,7 @@ func TestOAuthInferenceAndRestart(t *testing.T) {
 		t.Fatal("second process can rotate same store")
 	}
 	result, err := f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "Hello"}}, nil)
-	if err != nil || result.Message.Content != "test-model" || result.Model != "test-model" || result.InputTokens != 7 {
+	if err != nil || result.Message.Content != "test-model" || result.Model != "test-model" || result.InputTokens != 7 || result.Usage.Model != "served-model-version" || result.Usage.CachedInputTokens != 4 || !result.Usage.TokenUsageKnown {
 		t.Fatalf("inference: %+v %v", result, err)
 	}
 	models, err := f.c.Models(context.Background())

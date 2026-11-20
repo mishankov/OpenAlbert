@@ -329,7 +329,7 @@ func runTurn(ctx workflow.Context, in agent.RunInput, maxSteps int, steer ...tur
 		in.StartedAt = workflow.Now(ctx)
 	}
 	defer func() {
-		out.Messages = agent.CompactContext(out.Messages)
+		out.Messages = agent.CompactContext(out.Messages, out.Input.Key)
 		if out.Stats.FinishReason == "" {
 			out.Stats.FinishReason = "no_reply"
 			if out.Sent {
@@ -380,7 +380,7 @@ steps:
 				return turn, nil
 			}
 		}
-		turn.Messages = agent.CompactContext(turn.Messages)
+		turn.Messages = agent.CompactContext(turn.Messages, turn.Input.Key)
 		var result agent.ModelOutput
 		turn.Stats.ModelCalls++
 		if err := workflow.ExecuteActivity(ctx, "ModelCall", agent.ModelInput{Turn: turn, Step: step, Codemode: codemodeTurn}).Get(ctx, &result); err != nil {
@@ -516,7 +516,7 @@ func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, codemodeTur
 		instruction += " Send the remaining parts in one codemode script using await tools.send_message(...) or await tools.send_rich_message(...)."
 	}
 	turn.Messages = append(turn.Messages, domain.Message{Role: "user", Content: instruction})
-	turn.Messages = agent.CompactContext(turn.Messages)
+	turn.Messages = agent.CompactContext(turn.Messages, turn.Input.Key)
 	var result agent.ModelOutput
 	turn.Stats.ModelCalls++
 	if err := workflow.ExecuteActivity(ctx, "ModelCall", agent.ModelInput{Turn: turn, Step: step, Finalize: true, Codemode: codemodeTurn}).Get(ctx, &result); err != nil {

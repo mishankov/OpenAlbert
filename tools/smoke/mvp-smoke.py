@@ -31,6 +31,22 @@ def run(args, env, **kwargs):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs).stdout.strip()
 
 
+def running_environment(compose, env, service, keys):
+    """Read only required settings from the running service selected by Compose."""
+    containers = run(compose + ["ps", "-q", service], env).splitlines()
+    if len(containers) != 1:
+        raise SystemExit(f"Expected one running {service} container in the selected Compose project.")
+    values = json.loads(run(["docker", "inspect", "--format", "{{json .Config.Env}}", containers[0]], env))
+    selected = {}
+    for entry in values:
+        key, separator, value = entry.partition("=")
+        if separator and key in keys:
+            selected[key] = value
+    if any(not selected.get(key) for key in keys):
+        raise SystemExit(f"Running {service} container is missing required infrastructure settings.")
+    return selected
+
+
 def model_config(base_url):
     """Synthetic profile shared by deployment smokes; no application config is read."""
     return f'''[routes]
@@ -266,7 +282,7 @@ def main():
 def smoke(args, settings_directory):
     env = {key: value for key, value in os.environ.items() if key in {
         "PATH", "HOME", "DOCKER_CONFIG", "DOCKER_HOST", "DOCKER_CONTEXT",
-        "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_DEFAULT_PLATFORM"}}
+        "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_DEFAULT_PLATFORM", "COMPOSE_PROJECT_NAME"}}
     env.setdefault("POSTGRES_PORT", "15432")
     # A service env_file bypasses --env-file, so redirect it before rendering.
     # All other paths keep ROOT as their Compose project directory.
@@ -274,12 +290,24 @@ def smoke(args, settings_directory):
     copied_compose = settings_directory / "compose.yaml"
     copied_compose.write_text(source.replace("path: ./models.env", "path: /dev/null"))
     compose = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", str(ROOT / ".env.example"), "-f", str(copied_compose)]
-    settings = json.loads(run(compose + ["config", "--format", "json"], env))
-    postgres = settings["services"]["postgres"]["environment"]
-    postgres_user = postgres["POSTGRES_USER"]
-    postgres_password = postgres["POSTGRES_PASSWORD"]
     if run(compose + ["ps", "-q", "openalbert"], env):
         raise SystemExit("Stop your OpenAlbert container before running isolated smoke; it will not be replaced.")
+    postgres = running_environment(compose, env, "postgres", {"POSTGRES_USER", "POSTGRES_PASSWORD"})
+    minio = running_environment(compose, env, "minio", {"MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"})
+    temporal = running_environment(compose, env, "temporal", {"DEFAULT_NAMESPACE", "TEMPORAL_ADDRESS"})
+    postgres_user = postgres["POSTGRES_USER"]
+    postgres_password = postgres["POSTGRES_PASSWORD"]
+    s3 = {"S3_ACCESS_KEY": minio["MINIO_ROOT_USER"], "S3_SECRET_KEY": minio["MINIO_ROOT_PASSWORD"]}
+    # Compose interpolates override values too; retain literal dollars in credentials.
+    s3 = {key: value.replace("$", "$$") for key, value in s3.items()}
+    infrastructure = {"services": {
+        "minio-init": {"environment": s3},
+        "openalbert": {"environment": {**s3,
+            "TEMPORAL_NAMESPACE": temporal["DEFAULT_NAMESPACE"].replace("$", "$$"),
+            "TEMPORAL_ADDRESS": temporal["TEMPORAL_ADDRESS"].replace("$", "$$")}}}}
+    infrastructure_path = settings_directory / "infrastructure.json"
+    infrastructure_path.write_text(json.dumps(infrastructure))
+    compose += ["-f", str(infrastructure_path)]
     marker = "mvp-smoke-" + uuid.uuid4().hex[:12]
     db = marker.replace("-", "_")
     volume = "openalbert_" + db

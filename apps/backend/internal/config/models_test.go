@@ -88,6 +88,10 @@ func TestModelRolesCanSelectDifferentConfiguredProfiles(t *testing.T) {
 
 func TestModelProfilesRejectInvalidConfigurationWithoutEchoingValues(t *testing.T) {
 	cases := map[string]string{
+		"conflicting model case": strings.Replace(validModels, `model = "configured-model"`, "model = \"configured-model\"\nMODEL = \"different-model\"", 1),
+		"uppercase table":        strings.Replace(validModels, "[profiles.", "[PROFILES.", 1),
+		"mixed option case":      validModels + "[profiles.chosen-name.options]\nReasoning_Effort = \"high\"\n",
+
 		"syntax":                   validModels + "private-model-token = [\n",
 		"unknown field":            validModels + "private-model-token = true\n",
 		"unknown option":           validModels + "[profiles.chosen-name.options]\nprivate-model-token = true\n",

@@ -124,6 +124,9 @@ func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools 
 	}
 	if err == nil {
 		result.Model = body.Model
+		if result.Usage.Model == "" {
+			result.Usage.Model = body.Model
+		}
 	}
 	return result, err
 }
@@ -146,14 +149,18 @@ type responseEvent struct {
 	Param    string `json:"param"`
 	Response struct {
 		Status string `json:"status"`
+		Model  string `json:"model"`
 		Error  *struct {
 			Code  string `json:"code"`
 			Param string `json:"param"`
 		} `json:"error"`
 		Output []json.RawMessage `json:"output"`
 		Usage  struct {
-			Input  *int `json:"input_tokens"`
-			Output *int `json:"output_tokens"`
+			Input        *int `json:"input_tokens"`
+			Output       *int `json:"output_tokens"`
+			InputDetails struct {
+				Cached int `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	} `json:"response"`
 }
@@ -192,13 +199,17 @@ func readStream(reader io.Reader) (domain.Completion, error) {
 				return domain.Completion{}, false, errors.New("invalid ChatGPT completion status")
 			}
 			usage := event.Response.Usage
-			result := domain.Completion{Message: domain.Message{Role: "assistant"}, Usage: domain.ModelUsage{TokenUsageKnown: usage.Input != nil && usage.Output != nil}}
+			result := domain.Completion{Message: domain.Message{Role: "assistant"}, Usage: domain.ModelUsage{Model: event.Response.Model, TokenUsageKnown: usage.Input != nil && usage.Output != nil}}
 			if usage.Input != nil {
 				result.InputTokens = *usage.Input
 			}
 			if usage.Output != nil {
 				result.OutputTokens = *usage.Output
 			}
+			if result.InputTokens < 0 || result.OutputTokens < 0 {
+				return domain.Completion{}, false, errors.New("ChatGPT returned invalid token usage")
+			}
+			result.Usage.CachedInputTokens = max(0, min(usage.InputDetails.Cached, result.InputTokens))
 			for _, rawItem := range event.Response.Output {
 				var item responseOutput
 				if json.Unmarshal(rawItem, &item) != nil {

@@ -23,7 +23,7 @@ func TestCompactContextBoundsPayloadAndPreservesWholeToolExchanges(t *testing.T)
 		original = append(original, domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: first, Name: "web_read", Arguments: json.RawMessage(`{"url":"https://example.com/a"}`)}, {ID: second, Name: "web_read", Arguments: json.RawMessage(`{"url":"https://example.com/b"}`)}}}, domain.Message{Role: "tool", ToolCallID: first, Content: strings.Repeat("A", 35000)}, domain.Message{Role: "tool", ToolCallID: second, Content: strings.Repeat("B", 35000)})
 	}
 	original = append(original, domain.Message{Role: "user", TurnID: "current", Content: "Latest user request must remain"})
-	compact := CompactContext(original)
+	compact := CompactContext(original, "current")
 	raw, err := json.Marshal(compact)
 	if err != nil {
 		t.Fatal(err)
@@ -64,8 +64,8 @@ func TestCompactContextRetainsNewestUserRequest(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		messages = append(messages, domain.Message{Role: "user", Content: fmt.Sprintf("Old request%d", i)}, domain.Message{Role: "assistant", Content: strings.Repeat("old", 12000)})
 	}
-	messages = append(messages, domain.Message{Role: "user", Content: "Newest actual user request"})
-	compact := CompactContext(messages)
+	messages = append(messages, domain.Message{Role: "user", TurnID: "current", Content: "Newest actual user request"})
+	compact := CompactContext(messages, "current")
 	if compact[len(compact)-1].Content != "Newest actual user request" {
 		t.Fatal("latest user request dropped")
 	}
@@ -87,7 +87,7 @@ func TestCompactContextProtectsCurrentRequestAndEvidenceAfterImageView(t *testin
 		{Role: "user", Content: "Image artifact, not a new request", Images: []string{"data:image/jpeg;base64," + strings.Repeat("a", 10000)}},
 	}
 	messages = append(messages, current...)
-	compact := CompactContext(messages)
+	compact := CompactContext(messages, "current")
 	if len(compact) >= len(messages) {
 		t.Fatal("old history was not trimmed")
 	}
@@ -106,7 +106,7 @@ func TestOversizedMarkedTurnFailsBeforeProviderWithoutExceedingTemporalPayload(t
 		{{Role: "system", Content: "Rules"}, {Role: "user", TurnID: "large", Content: "Inspect my images", Images: []string{strings.Repeat("a", 3_000_000)}}},
 		{{Role: "system", Content: "Rules"}, {Role: "user", TurnID: "large", Content: "Original request"}, {Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "read", Name: "web_read"}}}, {Role: "tool", ToolCallID: "read", Content: strings.Repeat("evidence", 400000)}},
 	} {
-		compact := CompactContext(messages)
+		compact := CompactContext(messages, "large")
 		raw, err := json.Marshal(ModelInput{Turn: Turn{Input: RunInput{Key: "large", ConversationID: conv.ID}, Conversation: conv, Messages: compact}})
 		if err != nil || len(raw) > 750000 || len(compact) != 1 || !compact[0].ContextOverflow {
 			t.Fatalf("oversized turn escaped the transport guard: %d bytes, %v", len(raw), err)
@@ -122,7 +122,7 @@ func TestOversizedMarkedTurnFailsBeforeProviderWithoutExceedingTemporalPayload(t
 }
 func TestCompactContextBoundsSingleOversizedImageRequest(t *testing.T) {
 	messages := []domain.Message{{Role: "system", Content: "Rules"}, {Role: "user", Content: "Explain my image", Images: []string{"data:image/jpeg;base64," + strings.Repeat("a", 800000)}}}
-	compact := CompactContext(messages)
+	compact := CompactContext(messages, "current")
 	raw, _ := json.Marshal(compact)
 	if len(raw) > 750000 {
 		t.Fatalf("single user image bypasses context budget:%d", len(raw))
@@ -133,7 +133,7 @@ func TestCompactContextBoundsSingleOversizedImageRequest(t *testing.T) {
 }
 func TestContextSanitizationDropsIncompleteChainBeforeNewUser(t *testing.T) {
 	messages := []domain.Message{{Role: "system", Content: "rules"}, {Role: "user", Content: "Old request"}, {Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "first", Name: "web_read"}, {ID: "missing", Name: "web_read"}}}, {Role: "tool", ToolCallID: "first", Content: "Partial result"}, {Role: "user", Content: "Request after interruption"}}
-	out := CompactContext(validHistory(messages))
+	out := CompactContext(validHistory(messages), "current")
 	if len(out) != 3 || out[2].Content != "Request after interruption" {
 		t.Fatalf("interrupted history not repaired:%+v", out)
 	}

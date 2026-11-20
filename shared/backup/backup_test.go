@@ -43,12 +43,19 @@ func fixture(t *testing.T) (Config, *age.X25519Identity) {
 
 func TestArchiveEncryptedRestoreAndAuthentication(t *testing.T) {
 	c, key := fixture(t)
+	modelConfigFile := filepath.Join("config", "provider$BACKUP_MODEL.toml")
+	if err := os.MkdirAll(filepath.Join(c.Root, "config"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(c.Root, "models.toml"), filepath.Join(c.Root, modelConfigFile)); err != nil {
+		t.Fatal(err)
+	}
 	credentials := []byte("ANALYSIS_LLM_API_KEY=synthetic-analysis-secret\n")
 	if err := os.WriteFile(filepath.Join(c.Root, "models.env"), credentials, 0600); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "archive.age")
-	m := Manifest{Version: 1, CreatedAt: time.Now(), ComposeFile: c.ComposeFile, ModelConfigFile: "models.toml", ModelCredentialsFile: "models.env", Images: map[string]string{"openalbert": "registry/app@sha256:abc"}}
+	m := Manifest{Version: 1, CreatedAt: time.Now(), ComposeFile: c.ComposeFile, ModelConfigFile: modelConfigFile, ModelCredentialsFile: "models.env", Images: map[string]string{"openalbert": "registry/app@sha256:abc"}}
 	if err := archive(context.Background(), c, path, m); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +69,7 @@ func TestArchiveEncryptedRestoreAndAuthentication(t *testing.T) {
 	if err := Restore(context.Background(), path, identity, destination); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{".env", "models.toml", "models.env", "compose.yaml", "container_data/postgres/PG_VERSION", "container_data/minio/bucket/object", "container_data/knowledge/SOUL.md"} {
+	for _, name := range []string{".env", modelConfigFile, "models.env", "compose.yaml", "container_data/postgres/PG_VERSION", "container_data/minio/bucket/object", "container_data/knowledge/SOUL.md"} {
 		want, _ := os.ReadFile(filepath.Join(c.Root, name))
 		got, err := os.ReadFile(filepath.Join(destination, name))
 		if err != nil || !bytes.Equal(want, got) {
@@ -90,7 +97,7 @@ func TestArchiveEncryptedRestoreAndAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	volumes := overrides.Services["openalbert"].Volumes
-	if len(volumes) != 1 || volumes[0].Source != "./models.toml" || volumes[0].Target != "/etc/openalbert/models.toml" || !volumes[0].ReadOnly {
+	if len(volumes) != 1 || volumes[0].Source != "./config/provider$$BACKUP_MODEL.toml" || volumes[0].Target != "/etc/openalbert/models.toml" || !volumes[0].ReadOnly {
 		t.Fatalf("model configuration bind was not relocated for portable restore: %+v", volumes)
 	}
 	if err := Restore(context.Background(), path, identity, destination); err == nil {

@@ -9,34 +9,47 @@ import (
 
 const MaxContextMessageRunes = 32000
 
-// CompactContext bounds Temporal Activity payloads while retaining the latest user
-// request and complete tool exchanges. Older details remain in persisted history.
-func CompactContext(messages []domain.Message) []domain.Message {
+// CompactContext bounds Temporal payloads by removing complete historical turns.
+// The caller supplies the current turn key; old prepared payloads without that
+// marker are ambiguous and must remain intact or fail with an overflow marker.
+func CompactContext(messages []domain.Message, turnID string) []domain.Message {
 	out := append([]domain.Message(nil), messages...)
-	// Artifact views are user messages too. Use the explicit turn marker rather
-	// than the last user role to retain the original request and all its evidence.
-	var turnID string
-	for i := len(out) - 1; i >= 0; i-- {
-		if out[i].TurnID != "" {
-			turnID = out[i].TurnID
+	protected := 0
+	if turnID != "" {
+		protected = domain.ModelTurnStart(out, turnID)
+	}
+	// Drop over-budget historical image turns, including their text and replies,
+	// before general eviction. Stripping just their images would misrepresent the
+	// evidence and hide them from a text-only profile's compatibility check.
+	imageBudget := 400000
+	for _, m := range out[protected:] {
+		for _, image := range m.Images {
+			imageBudget -= len(image)
+		}
+	}
+	type span struct{ start, end int }
+	var turns []span
+	for offset := 0; offset < protected; {
+		start, end := domain.OldestModelTurn(out[offset:], protected-offset)
+		if start == end {
 			break
 		}
+		turns = append(turns, span{offset + start, offset + end})
+		offset += end
 	}
-	protected := domain.ModelTurnStart(out, turnID)
-	imageBudget := 400000
-	for i := len(out) - 1; i >= 0; i-- {
-		kept := []string{}
-		for _, image := range out[i].Images {
-			if i >= protected || len(image) <= imageBudget {
-				kept = append(kept, image)
-				imageBudget -= len(image)
+	for i := len(turns) - 1; i >= 0; i-- {
+		turn := turns[i]
+		size := 0
+		for _, m := range out[turn.start:turn.end] {
+			for _, image := range m.Images {
+				size += len(image)
 			}
 		}
-		out[i].Images = kept
-	}
-	for i := range out {
-		if i < protected && out[i].Role != "system" {
-			out[i].Content = clip(out[i].Content, MaxContextMessageRunes)
+		if size > 0 && size > imageBudget {
+			out = append(out[:turn.start], out[turn.end:]...)
+			protected -= turn.end - turn.start
+		} else {
+			imageBudget -= size
 		}
 	}
 	for len(out) > 2 {
@@ -52,9 +65,6 @@ func CompactContext(messages []domain.Message) []domain.Message {
 		protected -= end - start
 	}
 	if raw, _ := json.Marshal(out); len(raw) > 750000 {
-		// Full messages remain in persisted history. Carry a small explicit
-		// failure across Temporal instead of exceeding its transport limit or
-		// silently discarding evidence from the current agent turn.
 		return []domain.Message{{TurnID: turnID, ContextOverflow: true}}
 	}
 	return out
@@ -69,6 +79,8 @@ func (a *Activities) fitAnalysisContext(ctx context.Context, instructions string
 	ctx = domain.WithModelRole(ctx, domain.RoleAnalysis)
 	messages := []domain.Message{{Role: "system", Content: instructions}, {Role: "user"}}
 	sizer, profileAware := a.Model.(domain.ModelContext)
+	transcript := payload.Transcript
+	start := 0
 	for {
 		raw, err := json.Marshal(payload)
 		if err != nil {
@@ -83,12 +95,33 @@ func (a *Activities) fitAnalysisContext(ctx context.Context, instructions string
 			return nil, payload, err
 		}
 		if fits {
+			// A reduced memory snapshot may leave room for transcript records
+			// discarded earlier. Restore the largest complete newest suffix.
+			for start > 0 {
+				candidate := payload
+				candidate.Transcript = transcript[start-1:]
+				raw, err := json.Marshal(candidate)
+				if err != nil {
+					return nil, payload, err
+				}
+				probe := []domain.Message{messages[0], {Role: "user", Content: string(raw)}}
+				fits, err := sizer.FitsContext(ctx, probe, nil)
+				if err != nil {
+					return nil, payload, err
+				}
+				if !fits {
+					break
+				}
+				start--
+				payload, messages = candidate, probe
+			}
 			return messages, payload, nil
 		}
 		// Retain a suffix of complete transcript records; never clip through JSON
 		// or discard the newest entry. Deletion checks use the original transcript.
 		if len(payload.Transcript) > 1 {
-			payload.Transcript = payload.Transcript[1:]
+			start++
+			payload.Transcript = transcript[start:]
 		} else if len(payload.Existing) > 0 {
 			payload.Existing = payload.Existing[:len(payload.Existing)-1]
 		} else {

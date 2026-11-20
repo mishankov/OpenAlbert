@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -84,7 +85,7 @@ func loadModelProfilesForAuth(path string, get func(string) string, authMode str
 	if err != nil {
 		return empty, errors.New("LLM_CONFIG_FILE contains invalid TOML")
 	}
-	if len(meta.Undecoded()) > 0 {
+	if len(meta.Undecoded()) > 0 || !exactModelConfigKeys(meta) {
 		return empty, errors.New("LLM_CONFIG_FILE contains unsupported fields")
 	}
 	out := domain.ModelProfiles{Routes: map[domain.ModelRole]string{}, Profiles: map[string]domain.ModelProfile{}}
@@ -123,6 +124,39 @@ func loadModelProfilesForAuth(path string, get func(string) string, authMode str
 		return empty, errors.New("model routes must explicitly define chat, background and analysis")
 	}
 	return out, nil
+}
+
+// TOML struct decoding accepts case-insensitive aliases. Require exact schema
+// tags so distinct TOML keys cannot compete to populate the same Go field.
+// Map keys (profile names and routes) keep their own validation below.
+func exactModelConfigKeys(meta toml.MetaData) bool {
+	for _, key := range meta.Keys() {
+		typ := reflect.TypeOf(modelFileConfig{})
+		for _, part := range key {
+			if typ.Kind() == reflect.Pointer {
+				typ = typ.Elem()
+			}
+			switch typ.Kind() {
+			case reflect.Map:
+				typ = typ.Elem()
+			case reflect.Struct:
+				var field reflect.Type
+				for i := 0; i < typ.NumField(); i++ {
+					if f := typ.Field(i); f.Tag.Get("toml") == part {
+						field = f.Type
+						break
+					}
+				}
+				if field == nil {
+					return false
+				}
+				typ = field
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validateModelProfile(raw modelProfileConfig, get func(string) string, allowMissingKey bool) (domain.ModelProfile, error) {
