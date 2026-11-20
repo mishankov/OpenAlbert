@@ -35,9 +35,20 @@ func (m ModelProfiles) HasSubscription() bool {
 	return false
 }
 
+// SubscriptionCatalogProfile selects the transport for the shared account catalog.
+func (m ModelProfiles) SubscriptionCatalogProfile() ModelProfile {
+	for _, role := range []ModelRole{RoleChat, RoleBackground, RoleAnalysis} {
+		if p := m.Profiles[m.Routes[role]]; p.Adapter == "openai_chatgpt" {
+			return p
+		}
+	}
+	return ModelProfile{}
+}
+
 type ModelProfile struct {
 	Adapter             string
 	BaseURL             string
+	Headers             map[string]string `json:"-"`
 	Model               string
 	APIKeyEnv           string
 	APIKey              string `json:"-"`

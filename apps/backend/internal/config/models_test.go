@@ -213,11 +213,82 @@ func TestMixedSubscriptionAndAPIProfiles(t *testing.T) {
 	}
 }
 
+func TestModelProfilesResolveHeadersForBothAdapters(t *testing.T) {
+	content := mixedSubscriptionModels()
+	content = strings.Replace(content, "[profiles.subscription]\nadapter", `[profiles.chosen-name.headers_env]
+"x-proxy-key" = "API_PROXY_KEY"
+
+[profiles.subscription]
+base_url = "https://proxy.example.invalid/v1/"
+adapter`, 1)
+	content = strings.Replace(content, "[profiles.analysis-plan]", `[profiles.subscription.headers_env]
+"X-Proxy-Key" = "PLAN_PROXY_KEY"
+
+[profiles.analysis-plan]`, 1)
+	get := func(key string) string {
+		switch key {
+		case "API_PROXY_KEY":
+			return "private-api-proxy-key"
+		case "PLAN_PROXY_KEY":
+			return "private-plan-proxy-key"
+		default:
+			return modelEnv(key)
+		}
+	}
+	models, err := loadModelProfiles(modelFile(t, content), get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := models.SubscriptionCatalogProfile()
+	if plan.Model != "chatgpt-chat-model" || plan.BaseURL != "https://proxy.example.invalid/v1" || plan.Headers["X-Proxy-Key"] != "private-plan-proxy-key" {
+		t.Fatal("wrong subscription catalog transport")
+	}
+	if models.Profiles["chosen-name"].Headers["X-Proxy-Key"] != "private-api-proxy-key" || len(models.Profiles["analysis-plan"].Headers) != 0 {
+		t.Fatal("headers not isolated to their profiles")
+	}
+	models.Routes[domain.RoleChat] = "chosen-name"
+	if profile := models.SubscriptionCatalogProfile(); profile.Model != "chatgpt-analysis-model" {
+		t.Fatal("catalog did not select the analysis subscription when chat uses the API")
+	}
+	encoded, err := json.Marshal(models)
+	if err != nil || strings.Contains(string(encoded), "private-api-proxy-key") || strings.Contains(string(encoded), "private-plan-proxy-key") {
+		t.Fatal("custom header values must not serialize")
+	}
+}
+
+func TestModelProfilesRejectInvalidHeadersWithoutEchoingValues(t *testing.T) {
+	const apiHeaders = "\n[profiles.chosen-name.headers_env]\n"
+	cases := map[string]string{
+		"invalid name":    validModels + apiHeaders + `"private model token" = "MAIN_MODEL_KEY"`,
+		"literal value":   validModels + apiHeaders + `"X-Proxy-Key" = "private-model-token"`,
+		"missing env":     validModels + apiHeaders + `"X-Proxy-Key" = "UNSET_KEY"`,
+		"invalid value":   validModels + apiHeaders + `"X-Proxy-Key" = "INVALID_HEADER"`,
+		"duplicate name":  validModels + apiHeaders + "\"X-Proxy-Key\" = \"MAIN_MODEL_KEY\"\n\"x-proxy-key\" = \"MAIN_MODEL_KEY\"",
+		"authentication":  validModels + apiHeaders + `"authorization" = "MAIN_MODEL_KEY"`,
+		"request framing": validModels + apiHeaders + `"transfer-encoding" = "MAIN_MODEL_KEY"`,
+		"session header":  validModels + "\n[profiles.chosen-name.options]\nsession_header = \"x-opencode-session\"\n" + apiHeaders + `"X-OpenCode-Session" = "MAIN_MODEL_KEY"`,
+		"implicit URL":    validModels + subscriptionProfile + "\n[profiles.subscription.headers_env]\n" + `"X-Proxy-Key" = "MAIN_MODEL_KEY"`,
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadModelProfiles(modelFile(t, content), func(ref string) string {
+				if ref == "INVALID_HEADER" {
+					return "private-model-token\r\n"
+				}
+				return modelEnv(ref)
+			})
+			if err == nil || strings.Contains(err.Error(), "private-model-token") {
+				t.Fatal("invalid header configuration accepted or echoed")
+			}
+		})
+	}
+}
+
 func TestSubscriptionProfilesRejectIncompatibleSettings(t *testing.T) {
 	for name, extra := range map[string]string{
-		"endpoint":             `base_url = "https://private-sentinel.invalid"`,
+		"invalid endpoint":     `base_url = "https://private-sentinel.invalid/v1?token=PRIVATE_SENTINEL"`,
+		"empty fragment":       `base_url = "https://private-sentinel.invalid/v1#"`,
 		"API credential":       `api_key_env = "PRIVATE_SENTINEL"`,
-		"empty endpoint":       `base_url = ""`,
 		"empty API credential": `api_key_env = ""`,
 		"empty API options":    "[profiles.subscription.options]",
 		"false API option":     "[profiles.subscription.options]\ninclude_reasoning_content = false",

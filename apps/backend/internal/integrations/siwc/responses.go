@@ -109,20 +109,20 @@ func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools 
 	}
 	model := c.creds.Model
 	c.mu.Unlock()
-	return c.completeForModel(ctx, model, messages, tools, c.http)
+	return c.completeForModel(ctx, domain.ModelProfile{Model: model}, messages, tools, c.http)
 }
 
-// CompleteForModel uses a request-local model while sharing the connection's
-// serialized token refresh. It never changes the account's saved model choice.
-func (c *Client) CompleteForModel(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+// CompleteForProfile uses the profile's model and endpoint while sharing the
+// connection's serialized token refresh and saved account settings.
+func (c *Client) CompleteForProfile(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
 	// Profiled Responses use the router's deadline. Keep the shared client's
 	// timeout for legacy completions, token refresh and account management.
 	client := *c.http
 	client.Timeout = 0
-	return c.completeForModel(ctx, model, messages, tools, &client)
+	return c.completeForModel(ctx, profile, messages, tools, &client)
 }
 
-func (c *Client) completeForModel(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool, client *http.Client) (domain.Completion, error) {
+func (c *Client) completeForModel(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool, client *http.Client) (domain.Completion, error) {
 	if err := c.mu.LockContext(ctx); err != nil {
 		return domain.Completion{}, err
 	}
@@ -131,7 +131,7 @@ func (c *Client) completeForModel(ctx context.Context, model string, messages []
 	if err != nil {
 		return domain.Completion{}, err
 	}
-	body, err := buildRequest(model, messages, tools)
+	body, err := buildRequest(profile.Model, messages, tools)
 	if err != nil {
 		return domain.Completion{}, err
 	}
@@ -139,17 +139,17 @@ func (c *Client) completeForModel(ctx context.Context, model string, messages []
 	if err != nil {
 		return domain.Completion{}, errors.New("invalid ChatGPT request")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL+"/responses", bytes.NewReader(data))
+	endpoint := apiEndpoint{baseURL: profile.BaseURL, headers: profile.Headers}
+	req, err := c.apiRequest(ctx, endpoint, http.MethodPost, "/responses", token, bytes.NewReader(data))
 	if err != nil {
-		return domain.Completion{}, errors.New("invalid ChatGPT request")
+		return domain.Completion{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("User-Agent", "OpenAlbert/0.1")
 	resp, err := do(client, req)
 	if err != nil {
-		return domain.Completion{Model: body.Model}, err
+		return domain.Completion{Model: body.Model}, endpoint.sanitizeError(err, token)
 	}
 	defer resp.Body.Close()
 	result, err := readStream(resp.Body)
@@ -159,10 +159,11 @@ func (c *Client) completeForModel(ctx context.Context, model string, messages []
 		api.Status = resp.StatusCode
 	}
 	result.Model = body.Model
+	result.Usage.Model = endpoint.safeDiagnostic(result.Usage.Model, token)
 	if result.Usage.Model == "" {
 		result.Usage.Model = body.Model
 	}
-	return result, err
+	return result, endpoint.sanitizeError(err, token)
 }
 
 type responseOutput struct {

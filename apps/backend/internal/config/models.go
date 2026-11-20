@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"net/http"
 	"net/url"
 	"os"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"golang.org/x/net/http/httpguts"
 	"openalbert/apps/backend/internal/domain"
 )
 
@@ -27,6 +29,7 @@ type modelFileConfig struct {
 type modelProfileConfig struct {
 	Adapter             string             `toml:"adapter"`
 	BaseURL             string             `toml:"base_url"`
+	HeadersEnv          map[string]string  `toml:"headers_env"`
 	Model               string             `toml:"model"`
 	APIKeyEnv           string             `toml:"api_key_env"`
 	Capabilities        []string           `toml:"capabilities"`
@@ -100,9 +103,9 @@ func loadModelProfilesForAuth(path string, get func(string) string, authMode str
 			return empty, errors.New("openai_chatgpt profiles require OPENAI_AUTH_MODE=profiles")
 		}
 		if profile.Adapter == "openai_chatgpt" {
-			for _, field := range []string{"base_url", "api_key_env", "options", "pricing"} {
+			for _, field := range []string{"api_key_env", "options", "pricing"} {
 				if meta.IsDefined("profiles", name, field) {
-					return empty, errors.New("ChatGPT subscription profiles do not accept API endpoints, API keys, provider options or per-token pricing")
+					return empty, errors.New("ChatGPT subscription profiles do not accept API keys, provider options or per-token pricing")
 				}
 			}
 		}
@@ -177,12 +180,21 @@ func validateModelProfile(raw modelProfileConfig, get func(string) string, allow
 	if strings.TrimSpace(raw.Model) == "" || raw.Model != strings.TrimSpace(raw.Model) {
 		return empty, errors.New("model profile model must be a nonempty identifier without surrounding whitespace")
 	}
-	key := ""
-	if raw.Adapter == "openai_chat_completions" {
+	if raw.BaseURL != "" || raw.Adapter == "openai_chat_completions" {
 		u, err := url.Parse(raw.BaseURL)
-		if err != nil || u.Host == "" || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		if err != nil || u.Host == "" || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(raw.BaseURL, "#") {
 			return empty, errors.New("model profile base_url must be an HTTP(S) URL without credentials, query or fragment")
 		}
+	}
+	if len(raw.HeadersEnv) > 0 && raw.BaseURL == "" {
+		return empty, errors.New("model profile headers_env requires an explicit base_url")
+	}
+	headers, err := resolveModelHeaders(raw.HeadersEnv, raw.Options.SessionHeader, get)
+	if err != nil {
+		return empty, err
+	}
+	key := ""
+	if raw.Adapter == "openai_chat_completions" {
 		if !environmentName.MatchString(raw.APIKeyEnv) {
 			return empty, errors.New("model profile api_key_env must name an environment variable")
 		}
@@ -227,7 +239,7 @@ func validateModelProfile(raw modelProfileConfig, get func(string) string, allow
 		return empty, errors.New("model profile output_token_field is unsupported")
 	}
 	profile := domain.ModelProfile{
-		Adapter: raw.Adapter, BaseURL: strings.TrimRight(raw.BaseURL, "/"), Model: raw.Model,
+		Adapter: raw.Adapter, BaseURL: strings.TrimRight(raw.BaseURL, "/"), Headers: headers, Model: raw.Model,
 		APIKeyEnv: raw.APIKeyEnv, APIKey: key, Capabilities: append([]string(nil), raw.Capabilities...),
 		ContextWindowTokens: raw.ContextWindowTokens, MaxOutputTokens: raw.MaxOutputTokens, Timeout: timeout,
 		Options: domain.ModelOptions{ReasoningEffort: o.ReasoningEffort, Thinking: o.Thinking,
@@ -243,6 +255,37 @@ func validateModelProfile(raw modelProfileConfig, get func(string) string, allow
 		profile.Pricing = &domain.ModelPricing{InputPerMillion: *p.InputPerMillion, CachedInputPerMillion: *p.CachedInputPerMillion, OutputPerMillion: *p.OutputPerMillion}
 	}
 	return profile, nil
+}
+
+func resolveModelHeaders(refs map[string]string, sessionHeader string, get func(string) string) (map[string]string, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	headers := make(map[string]string, len(refs))
+	for name, ref := range refs {
+		if !httpguts.ValidHeaderFieldName(name) || !environmentName.MatchString(ref) {
+			return nil, errors.New("model profile headers_env must map HTTP header names to environment variable names")
+		}
+		name = http.CanonicalHeaderKey(name)
+		switch name {
+		case "Authorization", "Host", "Content-Length", "Content-Type", "Accept", "Accept-Encoding", "User-Agent",
+			"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Proxy-Connection",
+			"Te", "Trailer", "Transfer-Encoding", "Upgrade":
+			return nil, errors.New("model profile headers_env cannot set managed HTTP headers")
+		}
+		if strings.EqualFold(name, sessionHeader) {
+			return nil, errors.New("model profile headers_env cannot override options.session_header")
+		}
+		if _, exists := headers[name]; exists {
+			return nil, errors.New("model profile headers_env cannot contain duplicate HTTP headers")
+		}
+		value := get(ref)
+		if !httpguts.ValidHeaderFieldValue(value) || strings.TrimSpace(value) == "" {
+			return nil, errors.New("model profile headers_env references an unset or invalid HTTP header value")
+		}
+		headers[name] = strings.Trim(value, " \t")
+	}
+	return headers, nil
 }
 
 func hasCapability(capabilities []string, required string) bool {

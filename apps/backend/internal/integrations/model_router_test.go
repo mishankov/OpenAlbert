@@ -378,11 +378,11 @@ func TestOpenAIHasNoModelOrEndpointHeuristics(t *testing.T) {
 }
 
 type subscriptionRouterStub struct {
-	complete func(context.Context, string, []domain.Message, []domain.Tool) (domain.Completion, error)
+	complete func(context.Context, domain.ModelProfile, []domain.Message, []domain.Tool) (domain.Completion, error)
 }
 
-func (s *subscriptionRouterStub) CompleteForModel(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
-	return s.complete(ctx, model, messages, tools)
+func (s *subscriptionRouterStub) CompleteForProfile(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	return s.complete(ctx, profile, messages, tools)
 }
 
 func subscriptionRouterConfig(base string) domain.ModelProfiles {
@@ -397,6 +397,9 @@ func TestSubscriptionRouterMixedConcurrentModelsAndUsage(t *testing.T) {
 	var apiCalls, planCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalls.Add(1)
+		if r.Header.Get("X-Proxy-Key") != "api-proxy" {
+			t.Error("API profile did not send its proxy header")
+		}
 		var body struct {
 			Model string `json:"model"`
 		}
@@ -406,25 +409,26 @@ func TestSubscriptionRouterMixedConcurrentModelsAndUsage(t *testing.T) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
 	}))
 	defer server.Close()
-	plan := &subscriptionRouterStub{complete: func(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	config := subscriptionRouterConfig(server.URL)
+	apiProfile := config.Profiles["arbitrary-main"]
+	apiProfile.Pricing = &domain.ModelPricing{InputPerMillion: 3, OutputPerMillion: 15}
+	apiProfile.Headers = map[string]string{"X-Proxy-Key": "api-proxy"}
+	config.Profiles["arbitrary-main"] = apiProfile
+	chatProfile := config.Profiles["chat-plan"]
+	chatProfile.BaseURL = "https://chat-proxy.example.invalid/v1"
+	chatProfile.Headers = map[string]string{"X-Proxy-Key": "chat-proxy"}
+	config.Profiles["chat-plan"] = chatProfile
+	plan := &subscriptionRouterStub{complete: func(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
 		planCalls.Add(1)
-		role := domain.ModelRoleFromContext(ctx)
-		want := "explicit-chat"
-		if role == domain.RoleAnalysis {
-			want = "explicit-analysis"
-		}
-		if model != want {
-			t.Errorf("concurrent profile selected %q, want %q", model, want)
+		want := config.Profiles[config.Routes[domain.ModelRoleFromContext(ctx)]]
+		if profile.Model != want.Model || profile.BaseURL != want.BaseURL || profile.Headers["X-Proxy-Key"] != want.Headers["X-Proxy-Key"] {
+			t.Error("concurrent subscription request used the wrong profile transport")
 		}
 		if _, ok := ctx.Deadline(); !ok {
 			t.Error("profile timeout missing")
 		}
-		return domain.Completion{Model: model, Message: domain.Message{Role: "assistant", Content: "{}"}, InputTokens: 10, OutputTokens: 5, Usage: domain.ModelUsage{Model: "served-" + model, TokenUsageKnown: true, CachedInputTokens: 3}}, nil
+		return domain.Completion{Model: profile.Model, Message: domain.Message{Role: "assistant", Content: "{}"}, InputTokens: 10, OutputTokens: 5, Usage: domain.ModelUsage{Model: "served-" + profile.Model, TokenUsageKnown: true, CachedInputTokens: 3}}, nil
 	}}
-	config := subscriptionRouterConfig(server.URL)
-	p := config.Profiles["arbitrary-main"]
-	p.Pricing = &domain.ModelPricing{InputPerMillion: 3, OutputPerMillion: 15}
-	config.Profiles["arbitrary-main"] = p
 	router, err := NewModelRouterWithPlan(config, plan)
 	if err != nil {
 		t.Fatal(err)
@@ -461,10 +465,10 @@ func TestSubscriptionRouterMixedConcurrentModelsAndUsage(t *testing.T) {
 func TestSubscriptionRouterUsesProfileBudgetAndProtectsCurrentTurn(t *testing.T) {
 	var calls int
 	var received []domain.Message
-	plan := &subscriptionRouterStub{complete: func(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	plan := &subscriptionRouterStub{complete: func(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
 		calls++
 		received = messages
-		return domain.Completion{Model: model}, nil
+		return domain.Completion{Model: profile.Model}, nil
 	}}
 	config := subscriptionRouterConfig("http://localhost")
 	p := config.Profiles["chat-plan"]
@@ -495,14 +499,14 @@ func TestSubscriptionRouterUsesProfileBudgetAndProtectsCurrentTurn(t *testing.T)
 
 func TestSubscriptionRouterCapabilityAndHistoricalImageRules(t *testing.T) {
 	calls := 0
-	plan := &subscriptionRouterStub{complete: func(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	plan := &subscriptionRouterStub{complete: func(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
 		calls++
 		for _, message := range messages {
 			if len(message.Images) != 0 {
 				t.Error("unsupported image reached provider")
 			}
 		}
-		return domain.Completion{Model: model}, nil
+		return domain.Completion{Model: profile.Model}, nil
 	}}
 	router, err := NewModelRouterWithPlan(subscriptionRouterConfig("http://localhost"), plan)
 	if err != nil {
@@ -529,9 +533,9 @@ func TestSubscriptionRouterCapabilityAndHistoricalImageRules(t *testing.T) {
 }
 
 func TestSubscriptionRouterTimeoutAndFailedUsage(t *testing.T) {
-	plan := &subscriptionRouterStub{complete: func(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	plan := &subscriptionRouterStub{complete: func(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
 		<-ctx.Done()
-		return domain.Completion{Model: model, InputTokens: 7, OutputTokens: 3, Usage: domain.ModelUsage{Model: "served", TokenUsageKnown: true, CachedInputTokens: 4}, Message: domain.Message{Content: "partial"}}, ctx.Err()
+		return domain.Completion{Model: profile.Model, InputTokens: 7, OutputTokens: 3, Usage: domain.ModelUsage{Model: "served", TokenUsageKnown: true, CachedInputTokens: 4}, Message: domain.Message{Content: "partial"}}, ctx.Err()
 	}}
 	config := subscriptionRouterConfig("http://localhost")
 	p := config.Profiles["chat-plan"]
@@ -555,7 +559,6 @@ func TestSubscriptionRouterRequiresClientAndRejectsAPIOptions(t *testing.T) {
 	}
 	plan := &subscriptionRouterStub{}
 	for _, change := range []func(*domain.ModelProfile){
-		func(p *domain.ModelProfile) { p.BaseURL = "https://example.com" },
 		func(p *domain.ModelProfile) { p.APIKey = "secret" },
 		func(p *domain.ModelProfile) { p.APIKeyEnv = "KEY" },
 		func(p *domain.ModelProfile) { p.Options.ReasoningEffort = "high" },

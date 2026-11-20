@@ -83,7 +83,7 @@ func run() error {
 	}
 	var plan *siwc.Client
 	if c.OpenAIAuthMode == "siwc" || c.OpenAIAuthMode == "auto" || (c.OpenAIAuthMode == "profiles" && c.Models.HasSubscription()) {
-		plan, err = siwc.New(c.OpenAITokenStore, c.OpenAISiWCModel)
+		plan, err = siwc.NewWithCatalogProfile(c.OpenAITokenStore, c.OpenAISiWCModel, c.Models.SubscriptionCatalogProfile())
 		if err != nil {
 			return err
 		}

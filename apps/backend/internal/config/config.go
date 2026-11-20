@@ -86,11 +86,8 @@ func load(get func(string) string) (Config, error) {
 	if c.OpenAISiWCModel == "" {
 		c.OpenAISiWCModel = c.Models.Profiles[c.Models.Routes[domain.RoleChat]].Model
 		if c.OpenAIAuthMode == "profiles" {
-			for _, role := range []domain.ModelRole{domain.RoleChat, domain.RoleBackground, domain.RoleAnalysis} {
-				if p := c.Models.Profiles[c.Models.Routes[role]]; p.Adapter == "openai_chatgpt" {
-					c.OpenAISiWCModel = p.Model
-					break
-				}
+			if p := c.Models.SubscriptionCatalogProfile(); p.Model != "" {
+				c.OpenAISiWCModel = p.Model
 			}
 		}
 	}

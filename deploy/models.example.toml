@@ -16,6 +16,11 @@ context_window_tokens = 128000
 max_output_tokens = 8192
 timeout = "120s"
 
+# To use LLM Proxy, change the base_url above to "https://proxy.example.com/v1"
+# and put the proxy client key in OPENALBERT_PROXY_KEY in models.env.
+# [profiles.everyday.headers_env]
+# "X-LLM-Proxy-Key" = "OPENALBERT_PROXY_KEY"
+
 # Optional provider settings. Enable only options supported by your endpoint.
 # [profiles.everyday.options]
 # reasoning_effort = "high"
@@ -40,11 +45,16 @@ timeout = "120s"
 # Set model to an available slug from /chatgpt models and verify capabilities/limits.
 # [profiles.subscription]
 # adapter = "openai_chatgpt"
+# base_url = "https://proxy.example.com/v1" # Optional. Default: https://api.openai.com/v1.
 # model = "SET_CHATGPT_MODEL_SLUG"
 # capabilities = ["tools", "vision", "structured_output"]
 # context_window_tokens = 128000
 # max_output_tokens = 8192 # LOCAL input reserve only; does not cap provider output.
 # timeout = "120s"
-# Do not set base_url, api_key_env, options or pricing on openai_chatgpt profiles.
 # To use another subscription model for analysis, add a separate profile and
 # route analysis to it. Models are configured in TOML; restart after changes.
+
+# To use LLM Proxy, enable base_url above and put the proxy client key in
+# OPENALBERT_PROXY_KEY in models.env.
+# [profiles.subscription.headers_env]
+# "X-LLM-Proxy-Key" = "OPENALBERT_PROXY_KEY"
