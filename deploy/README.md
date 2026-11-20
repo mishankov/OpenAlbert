@@ -5,12 +5,15 @@
 - `compose.local.yaml` — сборка и запуск из checkout.
 - `compose.yaml` — запуск готовых образов без исходников.
 - `compose.test.yaml` — одноразовая среда Go integration-тестов.
+- `models.example.toml` — пример профилей LLM и привязок ролей.
 - `docker-bake.hcl` — общий каталог сборок образов.
-- `networking/` — примеры WireGuard и Caddy для Desktop API.
+- `networking/` — примеры WireGuard и Caddy для клиентского HTTP API.
 
 Из корня репозитория:
 
 ```sh
+cp deploy/models.example.toml models.toml
+# Задай модель и возможности в models.toml, ключ в .env.
 docker compose --project-directory . -f deploy/compose.local.yaml up -d --build
 ```
 
@@ -19,7 +22,8 @@ docker compose --project-directory . -f deploy/compose.local.yaml up -d --build
 параметр автоматически для тестового Compose.
 
 При установке без исходников скачай `compose.yaml` из этого каталога в каталог
-установки рядом с `.env`. После этого работают обычные `docker compose up -d`
+установки рядом с `.env` и настроенным `models.toml`. Дополнительные ключи
+профилей задаются в необязательном `models.env`, который также резервируется. После этого работают обычные `docker compose up -d`
 и другие команды без дополнительных параметров.
 
 Исходники, Dockerfiles и конфигурация отдельных компонентов находятся

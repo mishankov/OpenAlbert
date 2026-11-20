@@ -21,3 +21,7 @@ __pycache__/
 # Local verification logs, reports and artifacts.
 /reports/
 /.task/
+
+# Private deployment model configuration.
+/models.toml
+/models.env

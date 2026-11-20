@@ -78,7 +78,7 @@ func TestDeepSeekReplaysReasoningAcrossToolsAndUserTurns(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": message, "finish_reason": finish}}})
 				}))
 				defer s.Close()
-				model, err := NewOpenAI(OpenAIConfig{BaseURL: s.URL, Model: modelID})
+				model, err := NewOpenAI(OpenAIConfig{BaseURL: s.URL, Model: modelID, Options: domain.ModelOptions{IncludeReasoningContent: true}})
 				if err != nil {
 					t.Fatal(err)
 				}

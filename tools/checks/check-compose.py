@@ -18,8 +18,6 @@ TEST_ENV = {
     "S3_SECRET_KEY": "ci-only-secret",
     "TELEGRAM_BOT_TOKEN": "123:ci-only-token",
     "TELEGRAM_ALLOWED_USER_IDS": "123",
-    "LLM_API_KEY": "ci-only-key",
-    "LLM_MODEL": "ci-model",
 }
 INLINE_CONFIGS = {
     "postgres": ("postgres-init", "services/postgres/init.sql", "/docker-entrypoint-initdb.d/01-databases.sql"),
@@ -27,19 +25,28 @@ INLINE_CONFIGS = {
 }
 
 
-def render(filename=None, overrides=None, env_file=".env.example", cwd=ROOT):
-    # Use only the example and deterministic overrides, not developer credentials.
+def render(filename=None, overrides=None, env_file=".env.example", cwd=ROOT, model_env_file="/dev/null"):
+    # Neither Compose's interpolation env nor service env_file may read private files.
     env = {key: value for key, value in os.environ.items() if key in {"PATH", "HOME", "DOCKER_CONFIG"}}
     env.update(TEST_ENV)
     env.update(overrides or {})
-    command = ["docker", "compose", "--project-directory", str(cwd), "--env-file", env_file]
-    if filename is not None:
-        for path in filename if isinstance(filename, list) else [filename]:
-            command += ["-f", path]
-    return subprocess.run(
-        command + ["config", "--format", "json"],
-        cwd=cwd, env=env, capture_output=True, text=True, check=False,
-    )
+    with tempfile.TemporaryDirectory(prefix="openalbert-compose-settings-") as directory:
+        command = ["docker", "compose", "--project-directory", str(cwd), "--env-file", env_file]
+        files = filename if isinstance(filename, list) else [filename or "compose.yaml"]
+        for index, original in enumerate(files):
+            path = Path(original)
+            if not path.is_absolute():
+                path = cwd / path
+            source = path.read_text()
+            if "path: ./models.env" in source:
+                copied = Path(directory) / f"compose-{index}.yaml"
+                copied.write_text(source.replace("path: ./models.env", "path: " + json.dumps(model_env_file)))
+                path = copied
+            command += ["-f", str(path)]
+        return subprocess.run(
+            command + ["config", "--format", "json"],
+            cwd=cwd, env=env, capture_output=True, text=True, check=False,
+        )
 
 
 def config(filename=None, **kwargs):
@@ -78,6 +85,11 @@ def check_pair(overrides):
         for volume in actual.get("volumes", []):
             if name == "backup":
                 assert volume["type"] == "bind", "backup: requires explicit host binds"
+                continue
+            if name == "openalbert" and volume["target"] == "/etc/openalbert/models.toml":
+                assert volume["type"] == "bind" and volume["read_only"]
+                assert not volume.get("bind", {}).get("create_host_path", False)
+                assert Path(volume["source"]).name == "models.toml"
                 continue
             assert volume["type"] == "bind" and "/container_data/" in volume["source"], f"{name}: release requires checkout files"
             assert Path(volume["source"]).is_relative_to(ROOT / "container_data"), f"{name}: persistent data moved away from the repository root"
@@ -165,13 +177,22 @@ def main():
     plan = check_pair({"OPENAI_AUTH_MODE":"siwc", "LLM_API_KEY":""})
     assert plan["services"]["openalbert"]["environment"]["OPENAI_AUTH_MODE"] == "siwc"
     assert plan["services"]["openalbert"]["environment"]["LLM_API_KEY"] == ""
-    # LLM_API_KEY is conditional; backend config validates api_key and auto modes.
-    # This is the advertised deployment contract: compose + .env, no source tree.
+    app = current["services"]["openalbert"]["environment"]
+    assert app["LLM_CONFIG_FILE"] == "/etc/openalbert/models.toml"
+    assert "LLM_MODEL" not in app and "LLM_BASE_URL" not in app
+    assert app["LLM_API_KEY"] == "", "Custom credential names must not require the example key"
+    # Standalone deployment requires compose + .env + model config, no source tree.
     with tempfile.TemporaryDirectory(prefix="openalbert-compose-") as directory:
         destination = Path(directory)
         (destination / "compose.yaml").write_text((ROOT / "deploy/compose.yaml").read_text())
         (destination / ".env").write_text((ROOT / ".env.release.example").read_text())
-        config(env_file=".env", cwd=destination)
+        (destination / "models.toml").write_text((ROOT / "deploy/models.example.toml").read_text())
+        credentials = destination / "models.env"
+        credentials.write_text("ANALYSIS_LLM_API_KEY=synthetic-analysis-secret\n")
+        standalone = config(env_file=".env", cwd=destination, model_env_file=str(credentials))
+        assert standalone["services"]["openalbert"]["environment"]["ANALYSIS_LLM_API_KEY"] == "synthetic-analysis-secret"
+        credentials.unlink()
+        config(env_file=".env", cwd=destination, model_env_file=str(credentials))
     print("Development/release Compose parity, required settings and standalone deployment: OK")
 
 

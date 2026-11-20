@@ -89,7 +89,7 @@ Activities дополнительно содержат `workflow_id`, `workflow_
 анализе сессии, приёме и доставке сообщения. Отдельная запись на каждый запрос
 не создаётся. Инициализация базы имеет событие `database.initialize`.
 
-HTTP API приложения, включая инспектор и desktop API, формирует одно событие
+HTTP API приложения, включая инспектор и клиентский HTTP API, формирует одно событие
 `http.request` с `request_id`, `http_method`, `http_route`, `http_status` и SQL.
 `http_route` — зарегистрированный шаблон маршрута, например
 `GET /api/inspect/sessions/{id}`. Реальный URL, query-параметры, заголовки и тела

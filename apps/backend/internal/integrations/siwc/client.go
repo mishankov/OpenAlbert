@@ -53,7 +53,7 @@ type Status struct {
 	Model       string `json:"model"`
 }
 type Client struct {
-	mu                        sync.Mutex // Covers authorization, refresh rotation, persistence and catalog invalidation.
+	mu                        credentialLock // Covers authorization, refresh rotation, persistence and catalog invalidation.
 	path                      string
 	lock                      *os.File // One process per store; prevents refresh reuse across backend processes.
 	creds                     credentials
@@ -64,6 +64,28 @@ type Client struct {
 	catalog                   []Model
 	catalogUntil              time.Time
 }
+
+// credentialLock keeps authorization/refresh serialized while allowing a model
+// request's deadline to expire while another request is refreshing credentials.
+type credentialLock struct {
+	once sync.Once
+	held chan struct{}
+}
+
+func (m *credentialLock) LockContext(ctx context.Context) error {
+	m.once.Do(func() { m.held = make(chan struct{}, 1) })
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case m.held <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (m *credentialLock) Lock()   { _ = m.LockContext(context.Background()) }
+func (m *credentialLock) Unlock() { <-m.held }
 
 func New(path, model string) (*Client, error) {
 	if path == "" {
@@ -188,7 +210,11 @@ func responseError(resp *http.Response) *APIError {
 	return e
 }
 func (c *Client) do(req *http.Request) (*http.Response, error) {
-	resp, err := c.http.Do(req)
+	return do(c.http, req)
+}
+
+func do(client *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		if req.Context().Err() != nil {
 			return nil, req.Context().Err()

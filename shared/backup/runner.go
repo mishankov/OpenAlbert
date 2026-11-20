@@ -134,6 +134,15 @@ func (r *Runner) preflight(ctx context.Context) ([]string, Manifest, error) {
 			return nil, m, errors.New("backup inputs are missing or symlinked")
 		}
 	}
+	modelCredentials := ""
+	if info, err := os.Lstat(filepath.Join(c.Root, "models.env")); err == nil {
+		if !info.Mode().IsRegular() {
+			return nil, m, errors.New("model credentials must be a regular file without symlinks")
+		}
+		modelCredentials = "models.env"
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, m, errors.New("cannot inspect model credentials")
+	}
 	if err := os.MkdirAll(c.WorkDir, 0700); err != nil {
 		return nil, m, err
 	}
@@ -164,6 +173,7 @@ func (r *Runner) preflight(ctx context.Context) ([]string, Manifest, error) {
 	if err = json.Unmarshal(raw, &config); err != nil {
 		return nil, m, errors.New("cannot read Compose configuration")
 	}
+	modelConfig := ""
 	type dataMount struct{ path, target string }
 	expected := map[string][]dataMount{"postgres": {{"postgres", "/var/lib/postgresql/data"}}, "minio": {{"minio", "/data"}}, "openalbert": {{"knowledge", "/data/knowledge"}}}
 	if _, ok := config.Services["computer"]; ok && !c.ExcludeComputer {
@@ -226,7 +236,7 @@ func (r *Runner) preflight(ctx context.Context) ([]string, Manifest, error) {
 			return nil, m, errors.New("all four core services must be running before backup")
 		}
 	}
-	m = Manifest{Version: 1, CreatedAt: time.Now().UTC(), ComposeFile: c.ComposeFile, Images: map[string]string{}}
+	m = Manifest{Version: 1, CreatedAt: time.Now().UTC(), ComposeFile: c.ComposeFile, ModelCredentialsFile: modelCredentials, Images: map[string]string{}}
 	command := r.Command
 	if command == nil {
 		command = RunCommand
@@ -253,6 +263,31 @@ func (r *Runner) preflight(ctx context.Context) ([]string, Manifest, error) {
 				var mounts []mount
 				if json.Unmarshal(mountJSON, &mounts) != nil {
 					return nil, m, errors.New("cannot inspect running data mounts")
+				}
+				if name == "openalbert" {
+					for _, volume := range mounts {
+						if volume.Destination != "/etc/openalbert/models.toml" {
+							continue
+						}
+						root := c.Root
+						if r.HostRoot != "" {
+							root = r.HostRoot
+						}
+						relative, e := filepath.Rel(root, filepath.Clean(volume.Source))
+						if e != nil || volume.Type != "bind" || !validModelConfigPath(relative) || modelConfig != "" {
+							return nil, m, errors.New("backup requires one TOML model configuration inside the installation")
+						}
+						for path := filepath.Join(c.Root, relative); path != c.Root; path = filepath.Dir(path) {
+							info, e := os.Lstat(path)
+							if e != nil || info.Mode()&os.ModeSymlink != 0 || (path == filepath.Join(c.Root, relative) && !info.Mode().IsRegular()) {
+								return nil, m, errors.New("model configuration is missing, symlinked or not a regular file")
+							}
+						}
+						modelConfig = relative
+					}
+					if modelConfig == "" {
+						return nil, m, errors.New("backup requires the application's TOML model configuration bind")
+					}
 				}
 				hostRoot := r.HostRoot
 				if hostRoot == "" {
@@ -288,6 +323,7 @@ func (r *Runner) preflight(ctx context.Context) ([]string, Manifest, error) {
 		}
 		m.Images[name] = digests[0]
 	}
+	m.ModelConfigFile = modelConfig
 	return running, m, nil
 }
 

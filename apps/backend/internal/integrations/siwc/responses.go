@@ -71,10 +71,62 @@ func buildRequest(model string, messages []domain.Message, tools []domain.Tool) 
 	}
 	return r, nil
 }
+
+// FitsContext applies a conservative local request-size guard, independent of
+// API profile budgets. It is not a claimed context limit for the selected model.
+// Structured callers remove whole records until the serialized request fits.
+func FitsContext(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	body, err := buildRequest(model, messages, tools)
+	if err != nil {
+		return false, err
+	}
+	raw, err := json.Marshal(body)
+	return len(raw) <= 64000, err
+}
+
+// EstimateInput measures the serialized Responses request, including opaque
+// reasoning history, tool schemas and image URLs. Counting UTF-8 bytes plus
+// conservative message/tool framing matches the profile router's local estimate;
+// this is deliberately not a provider tokenizer or a model context limit.
+func EstimateInput(model string, messages []domain.Message, tools []domain.Tool) (int, error) {
+	body, err := buildRequest(model, messages, tools)
+	if err != nil {
+		return 0, err
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0, errors.New("invalid ChatGPT request")
+	}
+	return len(data) + len(messages)*64 + len(tools)*128 + 256, nil
+}
+
 func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
-	c.mu.Lock()
-	token, err := c.accessToken(ctx)
+	if err := c.mu.LockContext(ctx); err != nil {
+		return domain.Completion{}, err
+	}
 	model := c.creds.Model
+	c.mu.Unlock()
+	return c.completeForModel(ctx, model, messages, tools, c.http)
+}
+
+// CompleteForModel uses a request-local model while sharing the connection's
+// serialized token refresh. It never changes the account's saved model choice.
+func (c *Client) CompleteForModel(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	// Profiled Responses use the router's deadline. Keep the shared client's
+	// timeout for legacy completions, token refresh and account management.
+	client := *c.http
+	client.Timeout = 0
+	return c.completeForModel(ctx, model, messages, tools, &client)
+}
+
+func (c *Client) completeForModel(ctx context.Context, model string, messages []domain.Message, tools []domain.Tool, client *http.Client) (domain.Completion, error) {
+	if err := c.mu.LockContext(ctx); err != nil {
+		return domain.Completion{}, err
+	}
+	token, err := c.accessToken(ctx)
 	c.mu.Unlock()
 	if err != nil {
 		return domain.Completion{}, err
@@ -95,9 +147,9 @@ func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("User-Agent", "OpenAlbert/0.1")
-	resp, err := c.do(req)
+	resp, err := do(client, req)
 	if err != nil {
-		return domain.Completion{}, err
+		return domain.Completion{Model: body.Model}, err
 	}
 	defer resp.Body.Close()
 	result, err := readStream(resp.Body)
@@ -106,8 +158,9 @@ func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools 
 		api.RequestID = resp.Header.Get("x-request-id")
 		api.Status = resp.StatusCode
 	}
-	if err == nil {
-		result.Model = body.Model
+	result.Model = body.Model
+	if result.Usage.Model == "" {
+		result.Usage.Model = body.Model
 	}
 	return result, err
 }
@@ -130,16 +183,39 @@ type responseEvent struct {
 	Param    string `json:"param"`
 	Response struct {
 		Status string `json:"status"`
+		Model  string `json:"model"`
 		Error  *struct {
 			Code  string `json:"code"`
 			Param string `json:"param"`
 		} `json:"error"`
 		Output []json.RawMessage `json:"output"`
 		Usage  struct {
-			Input  int `json:"input_tokens"`
-			Output int `json:"output_tokens"`
+			Input        *int `json:"input_tokens"`
+			Output       *int `json:"output_tokens"`
+			InputDetails struct {
+				Cached int `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	} `json:"response"`
+}
+
+// Usage belongs to the request even when its output is incomplete or invalid.
+// Keep it separate so no partially decoded message can escape on an error.
+func (event responseEvent) completionUsage() (domain.Completion, error) {
+	result := domain.Completion{Usage: domain.ModelUsage{Model: event.Response.Model}}
+	usage := event.Response.Usage
+	if (usage.Input != nil && *usage.Input < 0) || (usage.Output != nil && *usage.Output < 0) {
+		return result, errors.New("ChatGPT returned invalid token usage")
+	}
+	result.Usage.TokenUsageKnown = usage.Input != nil && usage.Output != nil
+	if usage.Input != nil {
+		result.InputTokens = *usage.Input
+	}
+	if usage.Output != nil {
+		result.OutputTokens = *usage.Output
+	}
+	result.Usage.CachedInputTokens = max(0, min(usage.InputDetails.Cached, result.InputTokens))
+	return result, nil
 }
 
 // Partial deltas are never executed or returned. The authoritative completed
@@ -163,45 +239,52 @@ func readStream(reader io.Reader) (domain.Completion, error) {
 		}
 		switch event.Type {
 		case "response.failed", "error":
+			result, _ := event.completionUsage()
 			e := &APIError{Body: append([]byte{}, raw...), Code: event.Code, Param: event.Param}
 			if event.Response.Error != nil {
 				e.Code = event.Response.Error.Code
 				e.Param = event.Response.Error.Param
 			}
-			return domain.Completion{}, false, e
+			return result, false, e
 		case "response.incomplete":
-			return domain.Completion{}, false, errors.New("ChatGPT response incomplete")
+			result, _ := event.completionUsage()
+			return result, false, errors.New("ChatGPT response incomplete")
 		case "response.completed":
-			if event.Response.Status != "completed" {
-				return domain.Completion{}, false, errors.New("invalid ChatGPT completion status")
+			result, err := event.completionUsage()
+			if err != nil {
+				return result, false, err
 			}
-			result := domain.Completion{Message: domain.Message{Role: "assistant"}, InputTokens: event.Response.Usage.Input, OutputTokens: event.Response.Usage.Output}
+			if event.Response.Status != "completed" {
+				return result, false, errors.New("invalid ChatGPT completion status")
+			}
+			message := domain.Message{Role: "assistant"}
 			for _, rawItem := range event.Response.Output {
 				var item responseOutput
 				if json.Unmarshal(rawItem, &item) != nil {
-					return domain.Completion{}, false, errors.New("invalid ChatGPT output item")
+					return result, false, errors.New("invalid ChatGPT output item")
 				}
-				result.Message.ResponsesItems = append(result.Message.ResponsesItems, rawItem)
+				message.ResponsesItems = append(message.ResponsesItems, rawItem)
 				switch item.Type {
 				case "message":
 					for _, part := range item.Content {
 						if part.Type == "output_text" {
-							result.Message.Content += part.Text
+							message.Content += part.Text
 						}
 						if part.Type == "refusal" {
-							result.Message.Content += part.Refusal
+							message.Content += part.Refusal
 						}
 					}
 				case "function_call":
 					if item.CallID == "" || item.Name == "" || !json.Valid([]byte(item.Arguments)) || (item.Namespace != "" && item.Namespace != "openalbert") {
-						return domain.Completion{}, false, errors.New("ChatGPT returned an invalid tool call")
+						return result, false, errors.New("ChatGPT returned an invalid tool call")
 					}
-					result.Message.ToolCalls = append(result.Message.ToolCalls, domain.ToolCall{ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(item.Arguments)})
+					message.ToolCalls = append(message.ToolCalls, domain.ToolCall{ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(item.Arguments)})
 				}
 			}
-			if result.Message.Content == "" && len(result.Message.ToolCalls) == 0 {
-				return domain.Completion{}, false, errors.New("ChatGPT returned an empty response")
+			if message.Content == "" && len(message.ToolCalls) == 0 {
+				return result, false, errors.New("ChatGPT returned an empty response")
 			}
+			result.Message = message
 			return result, true, nil
 		}
 		return domain.Completion{}, false, nil

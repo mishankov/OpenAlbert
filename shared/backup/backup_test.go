@@ -26,7 +26,7 @@ func fixture(t *testing.T) (Config, *age.X25519Identity) {
 		t.Fatal(err)
 	}
 	c := Config{Root: filepath.Join(t.TempDir(), "installation"), WorkDir: t.TempDir(), ComposeFile: "compose.yaml", Enabled: true, Time: "03:00", Timezone: "Europe/Moscow", KeepDays: 2, Endpoint: "backup.example:9000", Bucket: "backups", Prefix: "instance/", Recipient: key.Recipient().String()}
-	for name, value := range map[string]string{".env": "TOKEN=never-publish-this-secret", "compose.yaml": "services: {}", "container_data/postgres/PG_VERSION": "17", "container_data/minio/bucket/object": "artifact body", "container_data/knowledge/SOUL.md": "I am Albert", "container_data/stt/weights": "excluded", "container_data/victorialogs/log": "excluded", "container_data/backup-state/old": "excluded"} {
+	for name, value := range map[string]string{".env": "TOKEN=never-publish-this-secret", "compose.yaml": "services: {}", "models.toml": "# synthetic model configuration", "container_data/postgres/PG_VERSION": "17", "container_data/minio/bucket/object": "artifact body", "container_data/knowledge/SOUL.md": "I am Albert", "container_data/stt/weights": "excluded", "container_data/victorialogs/log": "excluded", "container_data/backup-state/old": "excluded"} {
 		path := filepath.Join(c.Root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			t.Fatal(err)
@@ -43,13 +43,24 @@ func fixture(t *testing.T) (Config, *age.X25519Identity) {
 
 func TestArchiveEncryptedRestoreAndAuthentication(t *testing.T) {
 	c, key := fixture(t)
+	modelConfigFile := filepath.Join("config", "provider$BACKUP_MODEL.toml")
+	if err := os.MkdirAll(filepath.Join(c.Root, "config"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(c.Root, "models.toml"), filepath.Join(c.Root, modelConfigFile)); err != nil {
+		t.Fatal(err)
+	}
+	credentials := []byte("ANALYSIS_LLM_API_KEY=synthetic-analysis-secret\n")
+	if err := os.WriteFile(filepath.Join(c.Root, "models.env"), credentials, 0600); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(t.TempDir(), "archive.age")
-	m := Manifest{Version: 1, CreatedAt: time.Now(), ComposeFile: c.ComposeFile, Images: map[string]string{"openalbert": "registry/app@sha256:abc"}}
+	m := Manifest{Version: 1, CreatedAt: time.Now(), ComposeFile: c.ComposeFile, ModelConfigFile: modelConfigFile, ModelCredentialsFile: "models.env", Images: map[string]string{"openalbert": "registry/app@sha256:abc"}}
 	if err := archive(context.Background(), c, path, m); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)
-	if bytes.Contains(data, []byte("never-publish")) || !bytes.HasPrefix(data, []byte("age-encryption.org/v1")) {
+	if bytes.Contains(data, []byte("never-publish")) || bytes.Contains(data, []byte("synthetic-analysis-secret")) || !bytes.HasPrefix(data, []byte("age-encryption.org/v1")) {
 		t.Fatal("archive not encrypted")
 	}
 	identity := filepath.Join(t.TempDir(), "identity")
@@ -58,17 +69,36 @@ func TestArchiveEncryptedRestoreAndAuthentication(t *testing.T) {
 	if err := Restore(context.Background(), path, identity, destination); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{".env", "compose.yaml", "container_data/postgres/PG_VERSION", "container_data/minio/bucket/object", "container_data/knowledge/SOUL.md"} {
+	for _, name := range []string{".env", modelConfigFile, "models.env", "compose.yaml", "container_data/postgres/PG_VERSION", "container_data/minio/bucket/object", "container_data/knowledge/SOUL.md"} {
 		want, _ := os.ReadFile(filepath.Join(c.Root, name))
 		got, err := os.ReadFile(filepath.Join(destination, name))
 		if err != nil || !bytes.Equal(want, got) {
 			t.Fatalf("restore %s: %v", name, err)
 		}
 	}
+	if info, err := os.Stat(filepath.Join(destination, "models.env")); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("model credential permissions were not retained: %v", err)
+	}
 	for _, name := range []string{"stt", "victorialogs", "backup-state"} {
 		if _, err := os.Stat(filepath.Join(destination, "container_data", name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("restored excluded %s", name)
 		}
+	}
+	var overrides struct {
+		Services map[string]struct {
+			Volumes []struct {
+				Source   string `json:"source"`
+				Target   string `json:"target"`
+				ReadOnly bool   `json:"read_only"`
+			} `json:"volumes"`
+		} `json:"services"`
+	}
+	if err := readJSON(filepath.Join(destination, "compose.backup-images.json"), &overrides); err != nil {
+		t.Fatal(err)
+	}
+	volumes := overrides.Services["openalbert"].Volumes
+	if len(volumes) != 1 || volumes[0].Source != "./config/provider$$BACKUP_MODEL.toml" || volumes[0].Target != "/etc/openalbert/models.toml" || !volumes[0].ReadOnly {
+		t.Fatalf("model configuration bind was not relocated for portable restore: %+v", volumes)
 	}
 	if err := Restore(context.Background(), path, identity, destination); err == nil {
 		t.Fatal("overwrote existing restore")
@@ -84,6 +114,113 @@ func TestArchiveEncryptedRestoreAndAuthentication(t *testing.T) {
 		if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("failed restore left partially usable data")
 		}
+	}
+}
+
+func TestPreflightOptionalModelCredentials(t *testing.T) {
+	for _, scenario := range []string{"absent", "present", "symlink", "directory"} {
+		t.Run(scenario, func(t *testing.T) {
+			c, _ := fixture(t)
+			path := filepath.Join(c.Root, "models.env")
+			switch scenario {
+			case "present":
+				if err := os.WriteFile(path, []byte("ANALYSIS_LLM_API_KEY=synthetic-analysis-secret\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink(filepath.Join(c.Root, ".env"), path); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var steps []string
+			_, manifest, err := (&Runner{Config: c, Command: fakeCommands(t, c, &steps, false, nil)}).preflight(context.Background())
+			if scenario == "absent" || scenario == "present" {
+				want := ""
+				if scenario == "present" {
+					want = "models.env"
+				}
+				if err != nil || manifest.ModelCredentialsFile != want {
+					t.Fatalf("optional model credentials: %q %v", manifest.ModelCredentialsFile, err)
+				}
+			} else if err == nil {
+				t.Fatal("nonregular model credentials accepted")
+			}
+		})
+	}
+}
+
+func TestPreflightModelConfigurationInsideInstallation(t *testing.T) {
+	for _, scenario := range []string{"nested", "host-root", "controller-root", "missing", "external", "symlink"} {
+		t.Run(scenario, func(t *testing.T) {
+			c, _ := fixture(t)
+			source := filepath.Join(c.Root, "config", "provider.toml")
+			if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(source, []byte("# synthetic TOML"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "missing":
+				if err := os.Remove(source); err != nil {
+					t.Fatal(err)
+				}
+			case "external":
+				source = filepath.Join(t.TempDir(), "outside.toml")
+			case "symlink":
+				if err := os.Remove(source); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(c.Root, "models.toml"), source); err != nil {
+					t.Fatal(err)
+				}
+			}
+			hostRoot := ""
+			if scenario == "host-root" || scenario == "controller-root" {
+				hostRoot = "/host/openalbert-installation"
+				if scenario == "host-root" {
+					source = filepath.Join(hostRoot, "config", "provider.toml")
+				}
+			}
+			var steps []string
+			base := fakeCommands(t, c, &steps, false, nil)
+			command := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				raw, err := base(ctx, name, args...)
+				if err != nil || args[0] != "inspect" || args[len(args)-1] != "{{json .Mounts}}" {
+					return raw, err
+				}
+				if hostRoot != "" {
+					raw = []byte(strings.ReplaceAll(string(raw), c.Root, hostRoot))
+				}
+				if args[1] != "id-openalbert" {
+					return raw, nil
+				}
+				var mounts []mount
+				if err := json.Unmarshal(raw, &mounts); err != nil {
+					t.Fatal(err)
+				}
+				for i := range mounts {
+					if mounts[i].Destination == "/etc/openalbert/models.toml" {
+						mounts[i].Source = source
+					}
+				}
+				// The Compose render still points at the existing default models.toml.
+				// Only the running container knows the shell override used at startup.
+				return json.Marshal(mounts)
+			}
+			_, manifest, err := (&Runner{Config: c, Command: command, HostRoot: hostRoot}).preflight(context.Background())
+			if scenario == "nested" || scenario == "host-root" {
+				if err != nil || manifest.ModelConfigFile != filepath.Join("config", "provider.toml") {
+					t.Fatalf("nested model configuration: %+v %v", manifest, err)
+				}
+			} else if err == nil {
+				t.Fatal("unsafe or missing model configuration accepted")
+			}
+		})
 	}
 }
 
@@ -112,7 +249,7 @@ func TestCheckoutArchiveRestoresComputerAndComposePaths(t *testing.T) {
 		}
 	}
 	path := filepath.Join(t.TempDir(), "archive.age")
-	m := Manifest{Version: 1, CreatedAt: time.Now(), ComposeFile: c.ComposeFile, Images: map[string]string{"computer": "registry/computer@sha256:abc"}}
+	m := Manifest{Version: 1, CreatedAt: time.Now(), ComposeFile: c.ComposeFile, ModelConfigFile: "models.toml", Images: map[string]string{"computer": "registry/computer@sha256:abc", "openalbert": "registry/app@sha256:abc"}}
 	if err := archive(context.Background(), c, path, m); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +379,7 @@ func TestExcludeComputerCreateAndRestore(t *testing.T) {
 	if _, exists := manifest.Images["computer"]; exists {
 		t.Fatal("excluded local computer image present in restore manifest")
 	}
-	for _, name := range []string{".env", c.ComposeFile, "container_data/postgres/PG_VERSION", "container_data/minio/bucket/object", "container_data/knowledge/SOUL.md"} {
+	for _, name := range []string{".env", "models.toml", c.ComposeFile, "container_data/postgres/PG_VERSION", "container_data/minio/bucket/object", "container_data/knowledge/SOUL.md"} {
 		want, err := os.ReadFile(filepath.Join(c.Root, name))
 		if err != nil {
 			t.Fatal(err)
@@ -323,7 +460,11 @@ func fakeCommands(t *testing.T, c Config, steps *[]string, failStop bool, failAr
 			service := strings.TrimPrefix(args[1], "id-")
 			paths := map[string][]string{"postgres": {"postgres", "/var/lib/postgresql/data"}, "minio": {"minio", "/data"}, "openalbert": {"knowledge", "/data/knowledge"}}
 			if p, ok := paths[service]; ok {
-				return json.Marshal([]mount{{Type: "bind", Source: filepath.Join(c.Root, "container_data", p[0]), Destination: p[1]}})
+				mounts := []mount{{Type: "bind", Source: filepath.Join(c.Root, "container_data", p[0]), Destination: p[1]}}
+				if service == "openalbert" {
+					mounts = append(mounts, mount{Type: "bind", Source: filepath.Join(c.Root, "models.toml"), Destination: "/etc/openalbert/models.toml"})
+				}
+				return json.Marshal(mounts)
 			}
 			return []byte(`[]`), nil
 		}
@@ -334,6 +475,9 @@ func fakeCommands(t *testing.T, c Config, steps *[]string, failStop bool, failAr
 				s := map[string]any{"image": "registry/test:stable"}
 				if v != nil {
 					s["volumes"] = []map[string]string{{"Type": "bind", "Source": filepath.Join(c.Root, "container_data", v[0]), "Target": v[1]}}
+				}
+				if name == "openalbert" {
+					s["volumes"] = append(s["volumes"].([]map[string]string), map[string]string{"Type": "bind", "Source": filepath.Join(c.Root, "models.toml"), "Target": "/etc/openalbert/models.toml"})
 				}
 				services[name] = s
 			}

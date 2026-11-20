@@ -47,7 +47,7 @@ AGPL и credits клиента включены в соответствующи�
 
 ## Локальная сборка и публикация
 
-Все проверки и сборки выполняются локально через Task, Docker Buildx Bake и Tart.
+Все проверки и сборки выполняются локально через Task и Docker Buildx Bake.
 Полный каталог команд, установка инструментов и отчёты описаны в
 [локальных проверках](local-checks.md).
 
@@ -57,7 +57,7 @@ task verify
 
 Команда проверяет форматирование, Go analysis, Compose, Go race-тесты с временными
 PostgreSQL/VictoriaLogs и настоящими Chromium/FFmpeg, документацию, браузерные
-сценарии и нативные macOS-тесты в Tart. Затем собирает шесть образов для архитектуры
+сценарии. Затем собирает шесть образов для архитектуры
 Docker engine, запускает smoke каждого образа и чистое развёртывание с перезапуском.
 Telegram/LLM заменены синтетическими API, рабочий `.env` не читается, веса STT не скачиваются.
 MinIO проверяется реальным S3-контрактом и повторной инициализацией бакета.
@@ -98,17 +98,18 @@ ghcr.io/<owner>/<repository>/minio-init:sha-<полный SHA>
 
 ## Установка без исходников
 
-Нужны Docker Engine, Docker Compose **2.23.1 или новее**, Linux AMD64 или ARM64,
-свободные порты и постоянный диск. Inline configs требуют указанной версии Compose.
+Нужны Docker Engine, Docker Compose **2.24.0 или новее**, Linux AMD64 или ARM64,
+свободные порты и постоянный диск. Указанная версия Compose поддерживает inline configs и необязательный `models.env`.
 Для Raspberry Pi выбирай 64-битную ОС и SSD для данных; скорость полного стека,
 включая STT и параллельные браузеры, на Pi пока не проверена.
 
 Скачай `deploy/compose.yaml` из выбранного коммита как `compose.yaml`
-в каталог установки и положи рядом `.env.release.example` из корня репозитория.
+в каталог установки и положи рядом `.env.release.example` из корня репозитория и `deploy/models.example.toml` как `models.example.toml`.
 Дальнейшие команды этого раздела выполняются в каталоге установки без исходников:
 
 ```sh
 cp .env.release.example .env
+cp models.example.toml models.toml
 mkdir -p container_data/knowledge container_data/chatgpt
 sudo chown 10001:10001 container_data/knowledge container_data/chatgpt
 sudo chmod 700 container_data/chatgpt
@@ -116,7 +117,7 @@ sudo chmod 700 container_data/chatgpt
 
 В `.env` укажи `OPENALBERT_IMAGE_PREFIX=ghcr.io/<owner>/<repository>` в нижнем регистре
 и `OPENALBERT_IMAGE_TAG=sha-<полный SHA коммита>` либо `master`. Заполни Telegram token,
-разрешённые ID, настройки LLM и собственные PostgreSQL/S3 credentials.
+разрешённые ID, ключ модели и собственные PostgreSQL/S3 credentials. В `models.toml` задай фактический model ID, endpoint, возможности и лимиты; [маршруты ролей](model-routing.md) выбираются только в этом файле. Compose подключает его только для чтения. Дополнительные ключи профилей помести в `models.env` рядом с `.env` (`chmod 600 models.env`); файл необязателен и включается в зашифрованный backup. Отсутствующий файл запрещает запуск, а не создаёт каталог.
 `POSTGRES_PASSWORD` должен быть URL-safe: он подставляется в URL подключения.
 Например, случайный пароль в hex не требует дополнительного URL-кодирования.
 Пустые обязательные значения Compose отвергает до создания контейнеров.
@@ -201,7 +202,7 @@ docker compose up -d
 - `knowledge`: память, `SOUL.md`, `USER.md` и skills;
 - для прежних установок со встроенным `computer`, если не задано `exclude_computer: true`, — его SSH-ключи, домашний каталог
   и рабочие файлы; отдельный пользовательский компьютер резервируется независимо;
-- `.env`, выбранный Compose и манифест точных digest образов.
+- `.env`, выбранный Compose, TOML модели из bind-монтирования приложения, необязательный `models.env` с дополнительными ключами и манифест точных digest образов. TOML должен находиться внутри каталога установки без символических ссылок; при восстановлении bind автоматически указывает на восстановленный файл.
 
 Логи VictoriaLogs, скачиваемые веса STT, временные архивы, состояние бэкапов
 и отдельный каталог `backup-config` не архивируются. Внешний компьютер, его системный
@@ -439,9 +440,11 @@ Smoke запускает настоящий образ `backup`, проверя�
 
 ```sh
 docker compose stop
-sudo tar --numeric-owner -czf "../openalbert-backup-$(date +%Y%m%d-%H%M%S).tar.gz" .env compose.yaml container_data
+sudo tar --numeric-owner -czf "../openalbert-backup-$(date +%Y%m%d-%H%M%S).tar.gz" .env models.toml compose.yaml container_data
 docker compose up -d
 ```
+
+Если используется `models.env`, добавь его в список файлов команды `tar` выше; при другом пути TOML укажи фактический файл вместо `models.toml`.
 
 Перед восстановлением останови прежнюю установку. Распакуй архив в пустой каталог
 на Linux, сохраняя владельцев файлов, затем запусти ту же версию образов:
@@ -471,7 +474,7 @@ task reports
 
 Каждый прогон сохраняет отдельный каталог `reports/local/<run-id>/` с
 `summary.md`, `result.json`, логами этапов, HTML/JUnit-отчётами Playwright и
-диагностикой VM. Подробнее — [локальные проверки](local-checks.md).
+диагностикой проверок. Подробнее — [локальные проверки](local-checks.md).
 
 Для сквозного теста уже собранных образов можно вызвать `python3 tools/smoke/release-smoke.py`
 с `--image компонент=тег` для каждого из пяти компонентов (без STT).

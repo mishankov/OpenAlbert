@@ -444,7 +444,11 @@ func TestOpenCodeGoUsesStableConversationHeaderAndOwnUserAgent(t *testing.T) {
 	for _, base := range []string{"https://opencode.ai/inference/go/openai/v1", "https://opencode.ai/zen/go/v1", "https://api.openai.com/v1"} {
 		t.Run(base, func(t *testing.T) {
 			requests := 0
-			model, err := NewOpenAI(OpenAIConfig{BaseURL: base, APIKey: "secret", Model: "test", HTTPClient: &http.Client{Transport: transportFunc(func(req *http.Request) (*http.Response, error) {
+			options := domain.ModelOptions{}
+			if strings.Contains(base, "opencode.ai") {
+				options.SessionHeader = "x-opencode-session"
+			}
+			model, err := NewOpenAI(OpenAIConfig{Options: options, BaseURL: base, APIKey: "secret", Model: "test", HTTPClient: &http.Client{Transport: transportFunc(func(req *http.Request) (*http.Response, error) {
 				requests++
 				if req.Header.Get("User-Agent") != "OpenAlbert/0.1" {
 					t.Error("client identity missing")

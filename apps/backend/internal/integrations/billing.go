@@ -12,17 +12,18 @@ import (
 )
 
 type BillingStatus struct {
-	PlanIneligible bool        `json:"plan_ineligible"`
-	Mode           string      `json:"mode"`
-	ActiveLane     string      `json:"active_lane"`
-	SIWC           siwc.Status `json:"siwc"`
-	SIWCRequests   uint64      `json:"siwc_requests"`
-	APIRequests    uint64      `json:"api_key_requests"`
-	RetryAt        *time.Time  `json:"retry_at,omitempty"` // Local cooldown, never a claimed plan reset time.
-	Last429        *time.Time  `json:"last_429,omitempty"`
-	LastErrorCode  string      `json:"last_error_code,omitempty"`
-	LastRequestID  string      `json:"last_request_id,omitempty"`
-	LastHTTPStatus int         `json:"last_http_status,omitempty"`
+	Profiles       map[domain.ModelRole]ProfileRouteStatus `json:"profiles,omitempty"`
+	PlanIneligible bool                                    `json:"plan_ineligible"`
+	Mode           string                                  `json:"mode"`
+	ActiveLane     string                                  `json:"active_lane"`
+	SIWC           siwc.Status                             `json:"siwc"`
+	SIWCRequests   uint64                                  `json:"siwc_requests"`
+	APIRequests    uint64                                  `json:"api_key_requests"`
+	RetryAt        *time.Time                              `json:"retry_at,omitempty"` // Local cooldown, never a claimed plan reset time.
+	Last429        *time.Time                              `json:"last_429,omitempty"`
+	LastErrorCode  string                                  `json:"last_error_code,omitempty"`
+	LastRequestID  string                                  `json:"last_request_id,omitempty"`
+	LastHTTPStatus int                                     `json:"last_http_status,omitempty"`
 }
 type PlanClient interface {
 	domain.Model
@@ -50,20 +51,32 @@ type BillingModel struct {
 
 func (b *BillingModel) Status() BillingStatus {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	s := BillingStatus{PlanIneligible: b.ineligible, Mode: b.Mode, ActiveLane: "api_key", SIWCRequests: b.siwcRequests, APIRequests: b.apiRequests, Last429: b.last429, LastErrorCode: b.lastCode, LastRequestID: b.lastRequestID, LastHTTPStatus: b.lastStatus}
-	if b.Plan != nil {
-		s.SIWC = b.Plan.Status()
-	}
-	if b.Mode == "siwc" || (b.Mode == "auto" && s.SIWC.PlanEnabled && !b.ineligible && !time.Now().Before(b.retryAt)) {
-		s.ActiveLane = "siwc"
-	}
+	planReady := !b.ineligible && !time.Now().Before(b.retryAt)
 	if !b.ineligible && time.Now().Before(b.retryAt) {
 		t := b.retryAt
 		s.RetryAt = &t
 	}
+	b.mu.Unlock()
+	// Reading account status may wait for token refresh. Do not hold the billing
+	// lock: API profiles must keep running independently of that connection.
+	if b.Plan != nil {
+		s.SIWC = b.Plan.Status()
+	}
+	if s.Mode == "profiles" {
+		s.ActiveLane = "profiles"
+		if router, ok := b.API.(interface {
+			ProfileRoutes() map[domain.ModelRole]ProfileRouteStatus
+		}); ok {
+			s.Profiles = router.ProfileRoutes()
+		}
+	}
+	if s.Mode == "siwc" || (s.Mode == "auto" && s.SIWC.PlanEnabled && planReady) {
+		s.ActiveLane = "siwc"
+	}
 	return s
 }
+
 func fallback(err error) bool {
 	if errors.Is(err, siwc.ErrDisconnected) || errors.Is(err, siwc.ErrPermission) {
 		return true
@@ -81,6 +94,28 @@ func fallback(err error) bool {
 	return false // Configuration/unsupported capability errors require a fix, not a billing switch.
 }
 func (b *BillingModel) Complete(ctx context.Context, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	if b.Mode == "profiles" {
+		lane := ""
+		if router, ok := b.API.(interface{ Lane(context.Context) string }); ok {
+			lane = router.Lane(ctx)
+		}
+		b.mu.Lock()
+		switch lane {
+		case "siwc":
+			b.siwcRequests++
+		case "api_key":
+			b.apiRequests++
+		}
+		b.mu.Unlock()
+		result, err := b.API.Complete(ctx, messages, tools)
+		if err != nil && lane == "siwc" {
+			b.mu.Lock()
+			b.recordPlanError(ctx, err)
+			b.mu.Unlock()
+			result.Message = domain.Message{}
+		}
+		return result, err
+	}
 	b.mu.Lock()
 	if b.Mode == "siwc" && (b.ineligible || time.Now().Before(b.retryAt)) {
 		err := b.lastErr
@@ -98,17 +133,7 @@ func (b *BillingModel) Complete(ctx context.Context, messages []domain.Message, 
 			return result, nil
 		}
 		b.mu.Lock()
-		var api *siwc.APIError
-		if errors.As(err, &api) {
-			b.lastCode = api.Code
-			b.lastRequestID = api.RequestID
-			b.lastStatus = api.Status
-			if api.Status == 429 || api.Code == "subscription_sharing_usage_limit_exceeded" {
-				t := time.Now().UTC()
-				b.last429 = &t
-			}
-			slog.WarnContext(ctx, "ChatGPT plan request failed", "http_status", api.Status, "error_code", api.Code, "error_param", api.Param, "request_id", api.RequestID)
-		}
+		api := b.recordPlanError(ctx, err)
 		canFallback := b.Mode == "auto" && fallback(err) && ctx.Err() == nil
 		if fallback(err) && ctx.Err() == nil {
 			b.lastErr = err
@@ -123,7 +148,8 @@ func (b *BillingModel) Complete(ctx context.Context, messages []domain.Message, 
 		}
 		b.mu.Unlock()
 		if !canFallback {
-			return domain.Completion{}, err
+			result.Message = domain.Message{}
+			return result, err
 		}
 	}
 	b.mu.Lock()
@@ -141,4 +167,34 @@ func (b *BillingModel) Reconnected() {
 	b.retryAt = time.Time{}
 	b.ineligible = false
 	b.lastErr = nil
+}
+
+// Keep auto-lane requests within the API fallback budget. Pure plan mode uses
+// an independent local payload bound because it never calls the API profile.
+func (b *BillingModel) FitsContext(ctx context.Context, messages []domain.Message, tools []domain.Tool) (bool, error) {
+	if b.Mode == "siwc" {
+		return siwc.FitsContext(ctx, b.Plan.Status().Model, messages, tools)
+	}
+	if sizer, ok := b.API.(domain.ModelContext); ok {
+		return sizer.FitsContext(ctx, messages, tools)
+	}
+	return true, ctx.Err()
+}
+
+// recordPlanError records shared account diagnostics without changing routing.
+// The caller holds b.mu. Only legacy modes apply cooldown or eligibility gates.
+func (b *BillingModel) recordPlanError(ctx context.Context, err error) *siwc.APIError {
+	var api *siwc.APIError
+	if !errors.As(err, &api) {
+		return nil
+	}
+	b.lastCode = api.Code
+	b.lastRequestID = api.RequestID
+	b.lastStatus = api.Status
+	if api.Status == 429 || api.Code == "subscription_sharing_usage_limit_exceeded" {
+		t := time.Now().UTC()
+		b.last429 = &t
+	}
+	slog.WarnContext(ctx, "ChatGPT plan request failed", "http_status", api.Status, "error_code", api.Code, "error_param", api.Param, "request_id", api.RequestID)
+	return api
 }

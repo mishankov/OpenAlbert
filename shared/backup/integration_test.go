@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,6 +54,8 @@ func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 		t.Fatal("OPENALBERT_TEST_BACKUP_MINIO_IMAGE is required; run task test:backup to build MinIO from pinned source")
 	}
 	sleepImage := "node:24-alpine"
+	modelConfigFile := filepath.Join("config", "provider$BACKUP_MODEL.toml")
+	const modelConfig = "# synthetic config preserved by cold restore\n"
 	volume := func(source, target string) map[string]any {
 		return map[string]any{"type": "bind", "source": filepath.Join(root, "container_data", source), "target": target}
 	}
@@ -60,7 +63,7 @@ func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 		"postgres":   map[string]any{"image": pgImage, "environment": map[string]string{"POSTGRES_USER": "openalbert", "POSTGRES_PASSWORD": "test-only-password", "POSTGRES_DB": "openalbert"}, "volumes": []any{volume("postgres", "/var/lib/postgresql/data")}, "healthcheck": map[string]any{"test": []string{"CMD-SHELL", "pg_isready -h 127.0.0.1 -U openalbert"}, "interval": "1s", "timeout": "2s", "retries": 60}},
 		"minio":      map[string]any{"image": minioImage, "command": []string{"server", "/data"}, "environment": map[string]string{"MINIO_ROOT_USER": "test-access", "MINIO_ROOT_PASSWORD": "test-only-secret"}, "volumes": []any{volume("minio", "/data")}},
 		"temporal":   map[string]any{"image": sleepImage, "init": true, "entrypoint": []string{"sleep", "infinity"}},
-		"openalbert": map[string]any{"image": sleepImage, "init": true, "entrypoint": []string{"sleep", "infinity"}, "volumes": []any{volume("knowledge", "/data/knowledge"), volume("computer/client", "/data/computer")}},
+		"openalbert": map[string]any{"image": sleepImage, "init": true, "entrypoint": []string{"sleep", "infinity"}, "volumes": []any{volume("knowledge", "/data/knowledge"), volume("computer/client", "/data/computer"), map[string]any{"type": "bind", "source": strings.ReplaceAll(filepath.Join(root, modelConfigFile), "$", "$$"), "target": "/etc/openalbert/models.toml", "read_only": true}}},
 		"computer":   map[string]any{"image": sleepImage, "init": true, "entrypoint": []string{"sleep", "infinity"}, "volumes": []any{volume("computer/server", "/etc/openalbert-ssh"), volume("computer/home", "/home/albert"), volume("computer/workspace", "/workspace")}},
 	}
 	controllerImage := os.Getenv("OPENALBERT_TEST_BACKUP_CONTROLLER_IMAGE")
@@ -73,6 +76,17 @@ func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 	services[ControllerService] = map[string]any{"image": controllerImage, "profiles": []string{"backup"}, "init": true, "read_only": true, "tmpfs": []string{"/tmp"}, "environment": map[string]string{"BACKUP_CONTAINER": "true"}, "stop_grace_period": "5m", "volumes": []any{
 		bind(root, "/installation", true), bind(filepath.Join(root, "backup-config"), "/etc/openalbert-backup", true), bind(filepath.Join(root, "container_data/backup-state"), "/installation/container_data/backup-state", false), bind(filepath.Join(root, "container_data/backup-work"), "/var/lib/openalbert-backup", false), bind("/var/run/docker.sock", "/var/run/docker.sock", false),
 	}}
+	if err = os.MkdirAll(filepath.Join(root, "config"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, modelConfigFile), []byte(modelConfig), 0644); err != nil {
+		t.Fatal(err)
+	}
+	const modelCredentials = "ANALYSIS_LLM_API_KEY=synthetic-analysis-key\n"
+	if err = os.WriteFile(filepath.Join(root, "models.env"), []byte(modelCredentials), 0600); err != nil {
+		t.Fatal(err)
+	}
+	services["openalbert"].(map[string]any)["env_file"] = []map[string]any{{"path": "./models.env", "required": false}}
 	model := map[string]any{"name": project, "services": services}
 	if err = AtomicJSON(filepath.Join(root, "compose.yaml"), model); err != nil {
 		t.Fatal(err)
@@ -84,7 +98,19 @@ func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 	if err = c.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	r := &Runner{Config: c}
+	// Only synthetic fixtures are used here. Retain Docker stderr for failed
+	// smoke operations without weakening production's credential-safe errors.
+	testCommand := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		command := exec.CommandContext(ctx, name, args...)
+		var stderr strings.Builder
+		command.Stderr = &stderr
+		out, err := command.Output()
+		if err != nil {
+			t.Logf("isolated Docker operation failed: %s", stderr.String())
+		}
+		return out, err
+	}
+	r := &Runner{Config: c, Command: testCommand}
 	if _, err = r.compose(ctx, "up", "-d", "--wait", "--wait-timeout", "90"); err != nil {
 		t.Fatal(err)
 	}
@@ -302,6 +328,9 @@ func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 	if err = Restore(ctx, archive, identity, destination); err != nil {
 		t.Fatal(err)
 	}
+	if got, e := os.ReadFile(filepath.Join(destination, "models.env")); e != nil || string(got) != modelCredentials {
+		t.Fatal("model credentials did not survive encrypted restore", e)
+	}
 	if excludeComputer {
 		if _, err = os.Lstat(filepath.Join(destination, "container_data/computer")); !os.IsNotExist(err) {
 			t.Fatalf("computer tree survived exclusion: %v", err)
@@ -316,15 +345,18 @@ func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 			t.Fatal("excluded computer image present in restore overrides")
 		}
 	}
-	// Start the restored data under a different Compose project. No original
-	// container or volume is reused, and no real provider is contacted.
+	// Rebase the synthetic data binds for the new project, but leave the model
+	// bind at its existing original path. The restore override must replace it.
+	if err = os.WriteFile(filepath.Join(root, modelConfigFile), []byte("# changed after backup\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	restoredModel := map[string]any{}
 	if err = readJSON(filepath.Join(destination, "compose.yaml"), &restoredModel); err != nil {
 		t.Fatal(err)
 	}
 	restoredModel["name"] = project + "-restored"
 	raw, _ := json.Marshal(restoredModel)
-	raw = []byte(strings.ReplaceAll(string(raw), root, destination))
+	raw = []byte(strings.ReplaceAll(string(raw), filepath.Join(root, "container_data"), filepath.Join(destination, "container_data")))
 	if err = os.WriteFile(filepath.Join(destination, "compose.yaml"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -335,15 +367,22 @@ func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 	if err = restoredConfig.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	restored := &Runner{Config: restoredConfig}
-	if _, err = restored.compose(ctx, "up", "-d", "--wait", "--wait-timeout", "90"); err != nil {
+	restored := &Runner{Config: restoredConfig, Command: testCommand}
+	override := filepath.Join(destination, "compose.backup-images.json")
+	if _, err = restored.compose(ctx, "-f", override, "up", "-d", "--wait", "--wait-timeout", "90"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		clean, stop := context.WithTimeout(context.Background(), time.Minute)
 		defer stop()
-		_, _ = restored.compose(clean, "down", "--volumes", "--remove-orphans")
+		_, _ = restored.compose(clean, "-f", override, "down", "--volumes", "--remove-orphans")
 	})
+	if got, e := restored.compose(ctx, "-f", override, "exec", "-T", "openalbert", "cat", "/etc/openalbert/models.toml"); e != nil || string(got) != modelConfig {
+		t.Fatalf("restored application did not receive its archived model configuration: %q, %v", got, e)
+	}
+	if got, e := restored.compose(ctx, "exec", "-T", "openalbert", "printenv", "ANALYSIS_LLM_API_KEY"); e != nil || strings.TrimSpace(string(got)) != "synthetic-analysis-key" {
+		t.Fatal("restored application did not receive its model credential", e)
+	}
 	for _, db := range []string{"openalbert", "temporal", "temporal_visibility"} {
 		if got := sql(restored, db, "SELECT value FROM backup_probe"); got != db+"-preserved" {
 			t.Fatalf("lost %s: %s", db, got)

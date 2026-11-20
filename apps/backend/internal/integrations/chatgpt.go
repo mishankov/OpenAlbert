@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -78,9 +79,6 @@ func (t *Telegram) SendChatGPTReply(ctx context.Context, conv domain.Conversatio
 }
 func (c *ChatGPTControls) reply(ctx context.Context, text string) string {
 	b := c.Billing
-	if b.Plan == nil {
-		return "ChatGPT plan usage is disabled. Set OPENAI_AUTH_MODE=siwc or auto on the server, then restart. API key billing remains active."
-	}
 	fields := strings.Fields(text)
 	action := "status"
 	if len(fields) > 1 {
@@ -90,13 +88,25 @@ func (c *ChatGPTControls) reply(ctx context.Context, text string) string {
 		action = "callback"
 		fields = []string{"/chatgpt", "callback", text}
 	}
+	if action == "model" && b.Mode == "profiles" {
+		return "Models are managed in models.toml in profiles mode. Set model on the profile referenced by routes.chat, routes.background or routes.analysis, then restart the server. Use /chatgpt models to view the account catalog."
+	}
+	if b.Plan == nil && action != "status" {
+		return "ChatGPT plan usage is disabled. Add an openai_chatgpt profile to models.toml, route a role to it and use OPENAI_AUTH_MODE=profiles, then restart the server. Legacy API-only configurations can use OPENAI_AUTH_MODE=siwc or auto."
+	}
 	switch action {
 	case "login":
 		link, err := b.Plan.Begin()
 		if err != nil {
 			return err.Error()
 		}
-		return "Continue with ChatGPT (/chatgpt login)\n" + link + "\n\nOpen this link in your browser. After approval the loopback page may fail to load. Within ten minutes send /chatgpt callback followed by the complete URL from its address bar. Plan usage shares your ChatGPT allowance. In auto mode a fallback request is charged to your API key."
+		message := "Continue with ChatGPT (/chatgpt login)\n" + link + "\n\nOpen this link in your browser. After approval the loopback page may fail to load. Within ten minutes send /chatgpt callback followed by the complete URL from its address bar. Plan usage shares your ChatGPT allowance."
+		if b.Mode == "auto" {
+			message += " In auto mode a fallback request is charged to your API key."
+		} else if b.Mode == "profiles" {
+			message += " Each role uses its configured profile and model from models.toml; sign-in does not change routing."
+		}
+		return message
 	case "callback":
 		if len(fields) != 3 {
 			return "Use /chatgpt callback <complete loopback URL>."
@@ -114,6 +124,9 @@ func (c *ChatGPTControls) reply(ctx context.Context, text string) string {
 		var lines []string
 		for _, m := range models {
 			lines = append(lines, m.DisplayName+" — "+m.Slug)
+		}
+		if b.Mode == "profiles" {
+			return "ChatGPT account catalog (set model on the relevant profile in models.toml, then restart the server):\n" + strings.Join(lines, "\n")
 		}
 		return "ChatGPT models (select with /chatgpt model <slug>):\n" + strings.Join(lines, "\n")
 	case "model":
@@ -137,7 +150,24 @@ func (c *ChatGPTControls) reply(ctx context.Context, text string) string {
 		if s.RetryAt != nil {
 			retry = "\nLocal fallback cooldown until " + s.RetryAt.Format(time.RFC3339) + " (not a plan reset time)."
 		}
-		return fmt.Sprintf("ChatGPT settings\nMode: %s; active lane: %s\nSigned in: %t; plan usage enabled: %t\nModel: %s\nRequests: ChatGPT %d; API key %d (since server start)\nLast 429: %s\nLast error: %s; HTTP %d; request ID: %s%s\nUsage: https://chatgpt.com/settings/usage\nCommands: /chatgpt login · /chatgpt models · /chatgpt model <slug> · /chatgpt status", s.Mode, s.ActiveLane, s.SIWC.Connected, s.SIWC.PlanEnabled, s.SIWC.Model, s.SIWCRequests, s.APIRequests, last, s.LastErrorCode, s.LastHTTPStatus, s.LastRequestID, retry)
+		models := "Model: " + s.SIWC.Model
+		commands := "/chatgpt login · /chatgpt models · /chatgpt model <slug> · /chatgpt status"
+		if s.Mode == "profiles" {
+			roles := make([]string, 0, len(s.Profiles))
+			for role := range s.Profiles {
+				roles = append(roles, string(role))
+			}
+			sort.Strings(roles)
+			lines := []string{"Configured role routes:"}
+			for _, role := range roles {
+				route := s.Profiles[domain.ModelRole(role)]
+				lines = append(lines, fmt.Sprintf("%s → %s; model: %s; auth: %s", role, route.Profile, route.Model, route.AuthMode))
+			}
+			lines = append(lines, "Models are managed in models.toml; restart the server after changes.")
+			models = strings.Join(lines, "\n")
+			commands = "/chatgpt login · /chatgpt models · /chatgpt status"
+		}
+		return fmt.Sprintf("ChatGPT settings\nMode: %s; active lane: %s\nSigned in: %t; plan usage enabled: %t\n%s\nRequests: ChatGPT %d; API key %d (since server start)\nLast 429: %s\nLast error: %s; HTTP %d; request ID: %s%s\nUsage: https://chatgpt.com/settings/usage\nCommands: %s", s.Mode, s.ActiveLane, s.SIWC.Connected, s.SIWC.PlanEnabled, models, s.SIWCRequests, s.APIRequests, last, s.LastErrorCode, s.LastHTTPStatus, s.LastRequestID, retry, commands)
 	default:
 		return "Use /chatgpt status, /chatgpt login, /chatgpt models, or /chatgpt model <slug>."
 	}

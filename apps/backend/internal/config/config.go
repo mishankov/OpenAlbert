@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"openalbert/apps/backend/internal/domain"
 )
 
 type Config struct {
@@ -23,7 +25,8 @@ type Config struct {
 	TelegramBotToken, TelegramBaseURL                       string
 	TelegramAllowedUserIDs, TelegramAllowedGroupIDs         []int64
 	TelegramAllowBotMessages                                bool
-	LLMBaseURL, LLMAPIKey, LLMModel                         string
+	ModelsFile                                              string
+	Models                                                  domain.ModelProfiles
 	STTBaseURL, STTAPIKey, STTModel, STTRevision            string
 	YandexAPIKey, YandexFolderID, YandexEndpoint            string
 	KnowledgeDir, SoulFile, HTTPAddr                        string
@@ -51,12 +54,12 @@ func load(get func(string) string) (Config, error) {
 		return fallback
 	}
 	c := Config{
-		OpenAIAuthMode: value("OPENAI_AUTH_MODE", "api_key"), OpenAITokenStore: value("OPENAI_TOKEN_STORE", "./container_data/chatgpt/credentials.json"), OpenAISiWCModel: value("OPENAI_SIWC_MODEL", value("LLM_MODEL", "")),
+		OpenAIAuthMode: value("OPENAI_AUTH_MODE", "profiles"), OpenAITokenStore: value("OPENAI_TOKEN_STORE", "./container_data/chatgpt/credentials.json"), OpenAISiWCModel: value("OPENAI_SIWC_MODEL", ""),
 		TelegramWidgets: value("TELEGRAM_WIDGETS", "auto"),
 		DesktopAPIToken: value("DESKTOP_API_TOKEN", ""),
 		STTBaseURL:      value("STT_BASE_URL", ""), STTAPIKey: value("STT_API_KEY", ""), STTModel: value("STT_MODEL", ""), STTRevision: value("STT_REVISION", ""),
 		DatabaseURL: value("DATABASE_URL", ""), TemporalAddress: value("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: value("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: value("TEMPORAL_TASK_QUEUE", "openalbert"),
-		TelegramBotToken: value("TELEGRAM_BOT_TOKEN", ""), TelegramBaseURL: value("TELEGRAM_BASE_URL", ""), LLMBaseURL: value("LLM_BASE_URL", "https://api.openai.com/v1"), LLMAPIKey: value("LLM_API_KEY", ""), LLMModel: value("LLM_MODEL", ""),
+		TelegramBotToken: value("TELEGRAM_BOT_TOKEN", ""), TelegramBaseURL: value("TELEGRAM_BASE_URL", ""), ModelsFile: value("LLM_CONFIG_FILE", ""),
 		YandexAPIKey: value("YANDEX_API_KEY", ""), YandexEndpoint: value("YANDEX_SEARCH_URL", ""), YandexFolderID: value("YANDEX_FOLDER_ID", ""), KnowledgeDir: value("KNOWLEDGE_DIR", "./container_data/knowledge"), SoulFile: value("SOUL_FILE", ""), HTTPAddr: value("HTTP_ADDR", ":8080"),
 		S3Endpoint: value("S3_ENDPOINT", "localhost:9000"), S3AccessKey: value("S3_ACCESS_KEY", ""), S3SecretKey: value("S3_SECRET_KEY", ""), S3Bucket: value("S3_BUCKET", "openalbert"),
 		InspectorPublicURL:  value("INSPECTOR_PUBLIC_URL", "http://localhost:8080/inspect/"),
@@ -70,6 +73,26 @@ func load(get func(string) string) (Config, error) {
 	var problems []error
 	if c.TelegramWidgets != "auto" && c.TelegramWidgets != "on" && c.TelegramWidgets != "off" {
 		problems = append(problems, errors.New("TELEGRAM_WIDGETS must be auto, on or off"))
+	}
+	if c.ModelsFile == "" {
+		problems = append(problems, errors.New("LLM_CONFIG_FILE is required"))
+	} else {
+		var modelErr error
+		c.Models, modelErr = loadModelProfilesForAuth(c.ModelsFile, get, c.OpenAIAuthMode)
+		if modelErr != nil {
+			problems = append(problems, modelErr)
+		}
+	}
+	if c.OpenAISiWCModel == "" {
+		c.OpenAISiWCModel = c.Models.Profiles[c.Models.Routes[domain.RoleChat]].Model
+		if c.OpenAIAuthMode == "profiles" {
+			for _, role := range []domain.ModelRole{domain.RoleChat, domain.RoleBackground, domain.RoleAnalysis} {
+				if p := c.Models.Profiles[c.Models.Routes[role]]; p.Adapter == "openai_chatgpt" {
+					c.OpenAISiWCModel = p.Model
+					break
+				}
+			}
+		}
 	}
 	if c.DesktopAPIToken != "" && len(c.DesktopAPIToken) < 32 {
 		problems = append(problems, errors.New("DESKTOP_API_TOKEN must contain at least 32 bytes"))
@@ -95,13 +118,10 @@ func load(get func(string) string) (Config, error) {
 			problems = append(problems, errors.New("STT_MODEL and STT_REVISION are required when STT_BASE_URL is set"))
 		}
 	}
-	if c.OpenAIAuthMode != "api_key" && c.OpenAIAuthMode != "siwc" && c.OpenAIAuthMode != "auto" {
-		problems = append(problems, errors.New("OPENAI_AUTH_MODE must be api_key, siwc or auto"))
+	if c.OpenAIAuthMode != "profiles" && c.OpenAIAuthMode != "api_key" && c.OpenAIAuthMode != "siwc" && c.OpenAIAuthMode != "auto" {
+		problems = append(problems, errors.New("OPENAI_AUTH_MODE must be profiles, api_key, siwc or auto"))
 	}
-	if c.OpenAIAuthMode != "siwc" && c.LLMAPIKey == "" {
-		problems = append(problems, errors.New("LLM_API_KEY is required for api_key and auto modes"))
-	}
-	required := []struct{ name, value string }{{"DATABASE_URL", c.DatabaseURL}, {"TELEGRAM_BOT_TOKEN", c.TelegramBotToken}, {"LLM_MODEL", c.LLMModel}, {"S3_ACCESS_KEY", c.S3AccessKey}, {"S3_SECRET_KEY", c.S3SecretKey}}
+	required := []struct{ name, value string }{{"DATABASE_URL", c.DatabaseURL}, {"TELEGRAM_BOT_TOKEN", c.TelegramBotToken}, {"S3_ACCESS_KEY", c.S3AccessKey}, {"S3_SECRET_KEY", c.S3SecretKey}}
 	for _, r := range required {
 		if r.value == "" {
 			problems = append(problems, fmt.Errorf("%s is required", r.name))
@@ -170,9 +190,6 @@ func load(get func(string) string) (Config, error) {
 		problems = append(problems, errors.New("BROWSER_NO_SANDBOX must be a boolean"))
 	}
 	c.BrowserExecutable = value("BROWSER_EXECUTABLE", "")
-	if u, e := url.Parse(c.LLMBaseURL); e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		problems = append(problems, errors.New("LLM_BASE_URL must be an HTTP(S) URL without credentials, query or fragment"))
-	}
 	if u, e := url.Parse(c.DatabaseURL); e != nil || u.Host == "" || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
 		problems = append(problems, errors.New("DATABASE_URL must be a PostgreSQL connection URL"))
 	}

@@ -81,17 +81,26 @@ func run() error {
 	if err != nil {
 		return errors.New("knowledge initialization failed")
 	}
-	model, err := integrations.NewOpenAI(integrations.OpenAIConfig{BaseURL: c.LLMBaseURL, APIKey: c.LLMAPIKey, Model: c.LLMModel})
+	var plan *siwc.Client
+	if c.OpenAIAuthMode == "siwc" || c.OpenAIAuthMode == "auto" || (c.OpenAIAuthMode == "profiles" && c.Models.HasSubscription()) {
+		plan, err = siwc.New(c.OpenAITokenStore, c.OpenAISiWCModel)
+		if err != nil {
+			return err
+		}
+		defer plan.Close()
+	}
+	// A typed nil must not be passed as a subscription interface.
+	var subscription integrations.SubscriptionModel
+	if plan != nil {
+		subscription = plan
+	}
+	model, err := integrations.NewModelRouterWithPlan(c.Models, subscription)
 	if err != nil {
 		return err
 	}
 	billing := &integrations.BillingModel{Mode: c.OpenAIAuthMode, API: model, Cooldown: c.OpenAILaneCooldown}
-	if c.OpenAIAuthMode != "api_key" {
-		billing.Plan, err = siwc.New(c.OpenAITokenStore, c.OpenAISiWCModel)
-		if err != nil {
-			return err
-		}
-		defer billing.Plan.Close()
+	if plan != nil {
+		billing.Plan = plan
 	}
 	var speech domain.SpeechRecognizer
 	if c.STTBaseURL != "" {
@@ -184,7 +193,7 @@ func run() error {
 	defer cancel()
 	ready.Store(true)
 	event := telemetry.Start(ctx, logger, "application.started")
-	event.Set("model", c.LLMModel)
+	event.Set("model_routes", c.Models.Routes)
 	event.Set("web_search_enabled", c.YandexAPIKey != "")
 	event.Set("log_search_enabled", logs != nil)
 	event.Set("browser_enabled", c.BrowserEnabled)

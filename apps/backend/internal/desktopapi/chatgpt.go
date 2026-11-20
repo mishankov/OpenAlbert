@@ -6,7 +6,7 @@ import (
 
 func (a *API) chatGPTAvailable(w http.ResponseWriter) bool {
 	if a.Billing == nil || a.Billing.Plan == nil {
-		fail(w, 409, "disabled", "Enable OPENAI_AUTH_MODE=siwc or auto on the server to connect ChatGPT.")
+		fail(w, 409, "disabled", "Add an openai_chatgpt profile to models.toml, route a role to it and use OPENAI_AUTH_MODE=profiles, then restart the server to connect ChatGPT. Legacy API-only configurations can use siwc or auto.")
 		return false
 	}
 	return true
@@ -58,6 +58,10 @@ func (a *API) chatGPTModels(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, map[string]any{"models": models})
 }
 func (a *API) chatGPTModel(w http.ResponseWriter, r *http.Request) {
+	if a.Billing != nil && a.Billing.Mode == "profiles" {
+		fail(w, http.StatusConflict, "config_managed", "Models are managed in models.toml in profiles mode. Set model on the profile referenced by routes.chat, routes.background or routes.analysis, then restart the server. GET /api/v1/chatgpt/models lists the account catalog.")
+		return
+	}
 	if !a.chatGPTAvailable(w) {
 		return
 	}

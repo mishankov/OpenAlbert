@@ -70,6 +70,8 @@ func IsReplyTool(name string) bool {
 }
 
 type Message struct {
+	ContextOverflow bool   `json:"context_overflow,omitempty"`
+	TurnID          string `json:"turn_id,omitempty"`
 	// ResponsesItems preserves opaque reasoning and tool-call items for stateless
 	// Responses continuation. Chat Completions ignores this transport state.
 	ResponsesItems  []json.RawMessage `json:"responses_items,omitempty"`
@@ -98,6 +100,7 @@ type Completion struct {
 	Message      Message
 	InputTokens  int
 	OutputTokens int
+	Usage        ModelUsage
 }
 type Model interface {
 	Complete(context.Context, []Message, []Tool) (Completion, error)
@@ -178,6 +181,7 @@ type Session struct {
 	ConversationID string    `json:"conversation_id"`
 	Status         string    `json:"status"`
 	Summary        string    `json:"summary,omitempty"`
+	AnalysisError  string    `json:"analysis_error,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
@@ -231,6 +235,7 @@ type Repository interface {
 	PendingAnalysis(context.Context, int) ([]Session, error)
 	ActiveSessions(context.Context) ([]Session, error)
 	MarkAnalyzed(context.Context, string) error
+	MarkAnalysisFailed(context.Context, string, string) error
 	AppendMessage(context.Context, string, string, Message) error
 	Messages(context.Context, string) ([]Message, error)
 	CreateTask(context.Context, Task) (Task, error)

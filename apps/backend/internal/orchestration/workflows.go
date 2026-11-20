@@ -234,11 +234,14 @@ func SessionWorkflow(ctx workflow.Context, in SessionInput) error {
 			}
 			queue = queue[count:]
 			steerInput := turn.Input
-			steerInput.IncomingIDs = newIDs
 			// Retain consumed inputs even if preparation is cancelled, so the
 			// dispatcher cannot resurrect them after Finish.
 			allIDs := append(append([]string{}, turn.Input.IncomingIDs...), newIDs...)
 			turn.Input.IncomingIDs = allIDs
+			steerInput.IncomingIDs = allIDs
+			if steerInput.OriginalIncomingID == "" && len(allIDs) > 0 {
+				steerInput.OriginalIncomingID = allIDs[0]
+			}
 			updated, err := prepareTurn(runctx, steerInput)
 			if err != nil {
 				return err
@@ -325,11 +328,14 @@ func prepareTurn(ctx workflow.Context, in agent.RunInput) (turn agent.Turn, err 
 type turnSteerer func(*agent.Turn, func() error) error
 
 func runTurn(ctx workflow.Context, in agent.RunInput, maxSteps int, steer ...turnSteerer) (out agent.Turn, err error) {
+	if in.OriginalIncomingID == "" && len(in.IncomingIDs) > 0 {
+		in.OriginalIncomingID = in.IncomingIDs[0]
+	}
 	if workflow.GetVersion(ctx, "turn-observability-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion {
 		in.StartedAt = workflow.Now(ctx)
 	}
 	defer func() {
-		out.Messages = agent.CompactContext(out.Messages)
+		out.Messages = agent.CompactContext(out.Messages, out.Input.Key)
 		if out.Stats.FinishReason == "" {
 			out.Stats.FinishReason = "no_reply"
 			if out.Sent {
@@ -380,7 +386,7 @@ steps:
 				return turn, nil
 			}
 		}
-		turn.Messages = agent.CompactContext(turn.Messages)
+		turn.Messages = agent.CompactContext(turn.Messages, turn.Input.Key)
 		var result agent.ModelOutput
 		turn.Stats.ModelCalls++
 		if err := workflow.ExecuteActivity(ctx, "ModelCall", agent.ModelInput{Turn: turn, Step: step, Codemode: codemodeTurn}).Get(ctx, &result); err != nil {
@@ -516,7 +522,7 @@ func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, codemodeTur
 		instruction += " Send the remaining parts in one codemode script using await tools.send_message(...) or await tools.send_rich_message(...)."
 	}
 	turn.Messages = append(turn.Messages, domain.Message{Role: "user", Content: instruction})
-	turn.Messages = agent.CompactContext(turn.Messages)
+	turn.Messages = agent.CompactContext(turn.Messages, turn.Input.Key)
 	var result agent.ModelOutput
 	turn.Stats.ModelCalls++
 	if err := workflow.ExecuteActivity(ctx, "ModelCall", agent.ModelInput{Turn: turn, Step: step, Finalize: true, Codemode: codemodeTurn}).Get(ctx, &result); err != nil {
@@ -630,7 +636,14 @@ func TaskWorkflow(ctx workflow.Context, in TaskInput) error {
 }
 func AnalysisWorkflow(ctx workflow.Context, session domain.Session) error {
 	ctx = options(ctx)
-	return workflow.ExecuteActivity(ctx, "Analyze", session).Get(ctx, nil)
+	err := workflow.ExecuteActivity(ctx, "Analyze", session).Get(ctx, nil)
+	var failure *temporal.ApplicationError
+	if errors.As(err, &failure) && failure.Type() == agent.AnalysisContextLimitErrorType && failure.NonRetryable() {
+		// An activity error wrapper otherwise allows the workflow retry policy to
+		// restart this terminal analysis indefinitely.
+		return temporal.NewNonRetryableApplicationError(failure.Message(), failure.Type(), err)
+	}
+	return err
 }
 func InitiativeWorkflow(ctx workflow.Context, in InitiativeInput) error {
 	ctx = options(ctx)

@@ -6,11 +6,11 @@ import (
 	"time"
 )
 
-func validEnv() map[string]string {
-	return map[string]string{"DATABASE_URL": "postgres://u:secret@localhost/db", "TELEGRAM_BOT_TOKEN": "secret-token", "TELEGRAM_ALLOWED_USER_IDS": "123, 123,456", "LLM_API_KEY": "secret-key", "LLM_MODEL": "test-model", "YANDEX_API_KEY": "secret-yandex", "YANDEX_FOLDER_ID": "folder", "S3_ACCESS_KEY": "test", "S3_SECRET_KEY": "secret-s3"}
+func validEnv(t testing.TB) map[string]string {
+	return map[string]string{"DATABASE_URL": "postgres://u:secret@localhost/db", "TELEGRAM_BOT_TOKEN": "secret-token", "TELEGRAM_ALLOWED_USER_IDS": "123, 123,456", "MAIN_MODEL_KEY": "secret-key", "LLM_CONFIG_FILE": modelFile(t, validModels), "YANDEX_API_KEY": "secret-yandex", "YANDEX_FOLDER_ID": "folder", "S3_ACCESS_KEY": "test", "S3_SECRET_KEY": "secret-s3"}
 }
 func TestLaunchSettings(t *testing.T) {
-	env := validEnv()
+	env := validEnv(t)
 	env["TELEGRAM_ALLOWED_GROUP_IDS"] = "-100123"
 	env["INITIATIVE_INTERVAL"] = "0"
 	cfg, err := load(func(k string) string { return env[k] })
@@ -30,7 +30,7 @@ func TestTelegramBotMessagesSetting(t *testing.T) {
 		{"", false}, {"false", false}, {"true", true}, {" true ", true},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
-			env := validEnv()
+			env := validEnv(t)
 			env["TELEGRAM_ALLOW_BOT_MESSAGES"] = tc.value
 			cfg, err := load(func(k string) string { return env[k] })
 			if err != nil || cfg.TelegramAllowBotMessages != tc.want {
@@ -42,7 +42,7 @@ func TestTelegramBotMessagesSetting(t *testing.T) {
 
 func TestComputerConnectionSettings(t *testing.T) {
 	for _, address := range []string{"", "computer:22", "[::1]:2222", "secret-invalid", "user@host:22", "host:0", "host:65536"} {
-		env := validEnv()
+		env := validEnv(t)
 		env["COMPUTER_SSH_ADDRESS"] = address
 		env["COMPUTER_SSH_KEY_FILE"] = "/data/computer/key"
 		c, err := load(func(k string) string { return env[k] })
@@ -64,7 +64,7 @@ func TestComputerAuthenticationSettings(t *testing.T) {
 		{}, {password: " private-password ", valid: true},
 		{key: "/private-key", valid: true}, {password: "private-password", key: "/private-key"},
 	} {
-		env := validEnv()
+		env := validEnv(t)
 		env["COMPUTER_SSH_ADDRESS"] = "computer:22"
 		env["COMPUTER_SSH_PASSWORD"] = tc.password
 		env["COMPUTER_SSH_KEY_FILE"] = tc.key
@@ -88,7 +88,7 @@ func TestComputerAuthenticationSettings(t *testing.T) {
 
 func TestSTTConfigurationIsIndependent(t *testing.T) {
 	for _, invalid := range []string{"", "STT_MODEL", "STT_REVISION", "STT_BASE_URL"} {
-		env := validEnv()
+		env := validEnv(t)
 		env["STT_BASE_URL"] = "http://stt:8080/v1"
 		env["STT_MODEL"] = "nemotron"
 		env["STT_REVISION"] = "weights-v1"
@@ -109,11 +109,11 @@ func TestSTTConfigurationIsIndependent(t *testing.T) {
 	}
 }
 func TestRequiredOwnerAndSecrets(t *testing.T) {
-	env := validEnv()
+	env := validEnv(t)
 	env["TELEGRAM_ALLOWED_USER_IDS"] = ""
-	env["LLM_API_KEY"] = ""
+	env["LLM_CONFIG_FILE"] = ""
 	_, err := load(func(k string) string { return env[k] })
-	if err == nil || !strings.Contains(err.Error(), "TELEGRAM_ALLOWED_USER_IDS") || !strings.Contains(err.Error(), "LLM_API_KEY") {
+	if err == nil || !strings.Contains(err.Error(), "TELEGRAM_ALLOWED_USER_IDS") || !strings.Contains(err.Error(), "LLM_CONFIG_FILE") {
 		t.Fatal("expected missing configuration errors")
 	}
 	if strings.Contains(err.Error(), "secret") {
@@ -121,9 +121,9 @@ func TestRequiredOwnerAndSecrets(t *testing.T) {
 	}
 }
 func TestInvalidSettingsNeverEchoInput(t *testing.T) {
-	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_BASE_URL", "INSPECTOR_PUBLIC_URL", "VICTORIALOGS_URL", "DATABASE_URL", "S3_SECURE", "TELEGRAM_ALLOW_BOT_MESSAGES", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX"} {
+	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_CONFIG_FILE", "INSPECTOR_PUBLIC_URL", "VICTORIALOGS_URL", "DATABASE_URL", "S3_SECURE", "TELEGRAM_ALLOW_BOT_MESSAGES", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX"} {
 		t.Run(key, func(t *testing.T) {
-			env := validEnv()
+			env := validEnv(t)
 			env[key] = "secret-bad-value"
 			if key == "S3_ENDPOINT" {
 				env[key] = "https://secret-bad-value"
@@ -142,7 +142,7 @@ func TestInvalidSettingsNeverEchoInput(t *testing.T) {
 func TestSearchCredentialsAreOptionalButMustBeComplete(t *testing.T) {
 	for _, key := range []string{"", "YANDEX_API_KEY", "YANDEX_FOLDER_ID"} {
 		t.Run("missing_"+key, func(t *testing.T) {
-			env := validEnv()
+			env := validEnv(t)
 			delete(env, "YANDEX_API_KEY")
 			delete(env, "YANDEX_FOLDER_ID")
 			if key != "" {
@@ -168,7 +168,7 @@ func TestOwnerUsesFirstAllowedIDOrExplicitAllowedID(t *testing.T) {
 	}{
 		{want: 123}, {raw: "456", want: 456}, {raw: "999", invalid: true}, {raw: "secret-invalid", invalid: true}, {raw: "0", invalid: true},
 	} {
-		env := validEnv()
+		env := validEnv(t)
 		env["TELEGRAM_OWNER_USER_ID"] = tc.raw
 		cfg, err := load(func(k string) string { return env[k] })
 		if tc.invalid {
@@ -183,7 +183,7 @@ func TestOwnerUsesFirstAllowedIDOrExplicitAllowedID(t *testing.T) {
 
 func TestDesktopAPITokenIsOptionalAndValidated(t *testing.T) {
 	for _, token := range []string{"", "short-secret", strings.Repeat("a", 32)} {
-		env := validEnv()
+		env := validEnv(t)
 		env["DESKTOP_API_TOKEN"] = token
 		c, err := load(func(k string) string { return env[k] })
 		if token == "short-secret" {
@@ -198,12 +198,12 @@ func TestDesktopAPITokenIsOptionalAndValidated(t *testing.T) {
 
 func TestOpenAIAuthModes(t *testing.T) {
 	for _, mode := range []string{"api_key", "siwc", "auto", "invalid"} {
-		env := validEnv()
+		env := validEnv(t)
 		env["OPENAI_AUTH_MODE"] = mode
-		env["LLM_API_KEY"] = ""
+		env["MAIN_MODEL_KEY"] = ""
 		c, err := load(func(k string) string { return env[k] })
 		if mode == "siwc" {
-			if err != nil || c.OpenAILaneCooldown != 15*time.Minute || c.OpenAISiWCModel != "test-model" {
+			if err != nil || c.OpenAILaneCooldown != 15*time.Minute || c.OpenAISiWCModel != "configured-model" {
 				t.Fatalf("siwc defaults: %+v %v", c, err)
 			}
 		} else if err == nil {
@@ -215,7 +215,7 @@ func TestOpenAIAuthModes(t *testing.T) {
 func TestTelegramWidgetsSetting(t *testing.T) {
 	for _, value := range []string{"", "auto", "on", "off", "invalid"} {
 		t.Run(value, func(t *testing.T) {
-			env := validEnv()
+			env := validEnv(t)
 			env["TELEGRAM_WIDGETS"] = value
 			cfg, err := load(func(k string) string { return env[k] })
 			if value == "invalid" {
@@ -230,6 +230,26 @@ func TestTelegramWidgetsSetting(t *testing.T) {
 			}
 			if err != nil || cfg.TelegramWidgets != want {
 				t.Fatalf("mode: %s %v", cfg.TelegramWidgets, err)
+			}
+		})
+	}
+}
+
+func TestProfileAuthenticationDefaultAndLegacyConflicts(t *testing.T) {
+	for _, mode := range []string{"", "profiles", "api_key", "siwc", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			env := validEnv(t)
+			env["LLM_CONFIG_FILE"] = modelFile(t, mixedSubscriptionModels())
+			env["OPENAI_AUTH_MODE"] = mode
+			cfg, err := load(func(k string) string { return env[k] })
+			if mode != "" && mode != "profiles" {
+				if err == nil {
+					t.Fatal("legacy mode silently replaced profile auth")
+				}
+				return
+			}
+			if err != nil || cfg.OpenAIAuthMode != "profiles" || cfg.OpenAISiWCModel != "chatgpt-chat-model" {
+				t.Fatalf("profile authentication default failed: %v", err)
 			}
 		})
 	}

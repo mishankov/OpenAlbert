@@ -1,58 +1,133 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"openalbert/apps/backend/internal/domain"
 )
 
 const MaxContextMessageRunes = 32000
 
-// CompactContext bounds Temporal Activity payloads while retaining the latest user
-// request and complete tool exchanges. Older details remain in persisted history.
-func CompactContext(messages []domain.Message) []domain.Message {
+var ErrAnalysisContextLimit = errors.New("latest analysis entry exceeds the profile context budget")
+
+// CompactContext bounds Temporal payloads by removing complete historical turns.
+// The caller supplies the current turn key; old prepared payloads without that
+// marker are ambiguous and must remain intact or fail with an overflow marker.
+func CompactContext(messages []domain.Message, turnID string) []domain.Message {
 	out := append([]domain.Message(nil), messages...)
+	protected := 0
+	if turnID != "" {
+		protected = domain.ModelTurnStart(out, turnID)
+	}
+	// Drop over-budget historical image turns, including their text and replies,
+	// before general eviction. Stripping just their images would misrepresent the
+	// evidence and hide them from a text-only profile's compatibility check.
 	imageBudget := 400000
-	for i := len(out) - 1; i >= 0; i-- {
-		kept := []string{}
-		for _, image := range out[i].Images {
-			if len(image) <= imageBudget {
-				kept = append(kept, image)
-				imageBudget -= len(image)
+	for _, m := range out[protected:] {
+		for _, image := range m.Images {
+			imageBudget -= len(image)
+		}
+	}
+	type span struct{ start, end int }
+	var turns []span
+	for offset := 0; offset < protected; {
+		start, end := domain.OldestModelTurn(out[offset:], protected-offset)
+		if start == end {
+			break
+		}
+		turns = append(turns, span{offset + start, offset + end})
+		offset += end
+	}
+	for i := len(turns) - 1; i >= 0; i-- {
+		turn := turns[i]
+		size := 0
+		for _, m := range out[turn.start:turn.end] {
+			for _, image := range m.Images {
+				size += len(image)
 			}
 		}
-		out[i].Images = kept
-	}
-	for i := range out {
-		out[i].Content = clip(out[i].Content, MaxContextMessageRunes)
+		if size > 0 && size > imageBudget {
+			out = append(out[:turn.start], out[turn.end:]...)
+			protected -= turn.end - turn.start
+		} else {
+			imageBudget -= size
+		}
 	}
 	for len(out) > 2 {
 		raw, _ := json.Marshal(out)
 		if len(raw) <= 750000 {
 			break
 		}
-		index := 1
-		if out[index].Role == "user" {
-			anotherUser := false
-			for i := index + 1; i < len(out); i++ {
-				if out[i].Role == "user" {
-					anotherUser = true
-					break
-				}
-			}
-			if !anotherUser {
-				index++
-			}
-		}
-		if index >= len(out) {
+		start, end := domain.OldestModelTurn(out, protected)
+		if start == end {
 			break
 		}
-		end := index + 1
-		if len(out[index].ToolCalls) > 0 {
-			for end < len(out) && out[end].Role == "tool" {
-				end++
-			}
-		}
-		out = append(out[:index], out[end:]...)
+		out = append(out[:start], out[end:]...)
+		protected -= end - start
+	}
+	if raw, _ := json.Marshal(out); len(raw) > 750000 {
+		return []domain.Message{{TurnID: turnID, ContextOverflow: true}}
 	}
 	return out
+}
+
+type analysisContext struct {
+	Existing   []domain.MemoryEntry `json:"existing_memories"`
+	Transcript []domain.Message     `json:"transcript"`
+}
+
+func (a *Activities) fitAnalysisContext(ctx context.Context, instructions string, payload analysisContext) ([]domain.Message, analysisContext, error) {
+	ctx = domain.WithModelRole(ctx, domain.RoleAnalysis)
+	messages := []domain.Message{{Role: "system", Content: instructions}, {Role: "user"}}
+	sizer, profileAware := a.Model.(domain.ModelContext)
+	transcript := payload.Transcript
+	start := 0
+	for {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return nil, payload, err
+		}
+		messages[1].Content = string(raw)
+		if !profileAware {
+			return messages, payload, nil
+		}
+		fits, err := sizer.FitsContext(ctx, messages, nil)
+		if err != nil {
+			return nil, payload, err
+		}
+		if fits {
+			// A reduced memory snapshot may leave room for transcript records
+			// discarded earlier. Restore the largest complete newest suffix.
+			for start > 0 {
+				candidate := payload
+				candidate.Transcript = transcript[start-1:]
+				raw, err := json.Marshal(candidate)
+				if err != nil {
+					return nil, payload, err
+				}
+				probe := []domain.Message{messages[0], {Role: "user", Content: string(raw)}}
+				fits, err := sizer.FitsContext(ctx, probe, nil)
+				if err != nil {
+					return nil, payload, err
+				}
+				if !fits {
+					break
+				}
+				start--
+				payload, messages = candidate, probe
+			}
+			return messages, payload, nil
+		}
+		// Retain a suffix of complete transcript records; never clip through JSON
+		// or discard the newest entry. Deletion checks use the original transcript.
+		if len(payload.Transcript) > 1 {
+			start++
+			payload.Transcript = transcript[start:]
+		} else if len(payload.Existing) > 0 {
+			payload.Existing = payload.Existing[:len(payload.Existing)-1]
+		} else {
+			return nil, payload, ErrAnalysisContextLimit
+		}
+	}
 }

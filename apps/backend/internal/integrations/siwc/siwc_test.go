@@ -32,14 +32,16 @@ import (
 var hostIDPattern = regexp.MustCompile(`^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 type oauthFixture struct {
-	c            *Client
-	server       *httptest.Server
-	key          *rsa.PrivateKey
-	nonce        string
-	tokenCalls   atomic.Int32
-	refreshCalls atomic.Int32
-	scope        string
-	refreshError string
+	c              *Client
+	server         *httptest.Server
+	key            *rsa.PrivateKey
+	nonce          string
+	tokenCalls     atomic.Int32
+	refreshCalls   atomic.Int32
+	scope          string
+	refreshError   string
+	responseStream string
+	responseStatus int
 }
 
 func newFixture(t *testing.T) *oauthFixture {
@@ -98,6 +100,12 @@ func (f *oauthFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		io.WriteString(w, `{"models":[{"slug":"test-model","display_name":"Test model","visibility":"list"},{"slug":"other-model","display_name":"Other model","visibility":"list"},{"slug":"hidden","display_name":"Hidden","visibility":"hidden"}]}`)
 	case "/responses":
+		if f.responseStatus != 0 {
+			w.Header().Set("x-request-id", "rejected-request")
+			w.WriteHeader(f.responseStatus)
+			io.WriteString(w, `{"error":{"code":"rejected","message":"synthetic rejection"}}`)
+			return
+		}
 		var request responseRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
@@ -105,7 +113,11 @@ func (f *oauthFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		model, _ := json.Marshal(request.Model)
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, `data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}],"usage":{"input_tokens":7,"output_tokens":1}}}`+"\n\n", model)
+		if f.responseStream != "" {
+			io.WriteString(w, f.responseStream)
+			return
+		}
+		fmt.Fprintf(w, `data: {"type":"response.completed","response":{"status":"completed","model":"served-model-version","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}],"usage":{"input_tokens":7,"output_tokens":1,"input_tokens_details":{"cached_tokens":4}}}}`+"\n\n", model)
 	default:
 		http.NotFound(w, r)
 	}
@@ -168,7 +180,7 @@ func TestOAuthInferenceAndRestart(t *testing.T) {
 		t.Fatal("second process can rotate same store")
 	}
 	result, err := f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "Hello"}}, nil)
-	if err != nil || result.Message.Content != "test-model" || result.Model != "test-model" || result.InputTokens != 7 {
+	if err != nil || result.Message.Content != "test-model" || result.Model != "test-model" || result.InputTokens != 7 || result.Usage.Model != "served-model-version" || result.Usage.CachedInputTokens != 4 || !result.Usage.TokenUsageKnown {
 		t.Fatalf("inference: %+v %v", result, err)
 	}
 	models, err := f.c.Models(context.Background())
@@ -352,6 +364,125 @@ func TestRefreshSerializedAndFailureRecovery(t *testing.T) {
 		}
 	}
 }
+
+func TestCompleteForModelConcurrentRequestsShareOnlyCredentials(t *testing.T) {
+	f := newFixture(t)
+	f.login(t)
+	f.c.creds.ExpiresAt = time.Now().Add(-time.Hour)
+	const requests = 20
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	entered := make(chan struct{}, requests)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" || r.Header.Get("Authorization") != "Bearer access-secret" {
+			t.Errorf("incorrect response route or shared authorization")
+			http.Error(w, "invalid route or authorization", http.StatusBadRequest)
+			return
+		}
+		var request struct {
+			Model string `json:"model"`
+			Input []struct {
+				Content string `json:"content"`
+			} `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request.Input) != 1 || request.Input[0].Content != request.Model {
+			t.Errorf("model leaked across requests: %+v %v", request, err)
+			http.Error(w, "incorrect model", http.StatusBadRequest)
+			return
+		}
+		if calls.Add(1) <= requests {
+			entered <- struct{}{}
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, `data: {"type":"response.completed","response":{"status":"completed","model":%q,"output":[{"type":"message","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":7,"output_tokens":1}}}`+"\n\n", "served-"+request.Model, request.Model)
+	}))
+	defer server.Close()
+	f.c.apiURL = server.URL
+	var wg sync.WaitGroup
+	for i := range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			model := fmt.Sprintf("profile-model-%d", i)
+			out, err := f.c.CompleteForModel(ctx, model, []domain.Message{{Role: "user", Content: model}}, nil)
+			if err != nil || out.Model != model || out.Message.Content != model || out.Usage.Model != "served-"+model || !out.Usage.TokenUsageKnown {
+				t.Errorf("incorrect request-local completion: %+v %v", out, err)
+			}
+		}()
+	}
+	for range requests {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Errorf("requests did not reach the provider concurrently: %v", ctx.Err())
+		}
+	}
+	// Observe the saved choice while every request is still in flight: a
+	// temporary account mutation must not serve as per-request routing.
+	if got := f.c.Status().Model; got != "test-model" {
+		t.Errorf("concurrent profile calls changed the saved model: %q", got)
+	}
+	close(release)
+	wg.Wait()
+	if f.refreshCalls.Load() != 1 {
+		t.Errorf("shared refresh raced: %d", f.refreshCalls.Load())
+	}
+	data, err := os.ReadFile(f.c.path)
+	var saved credentials
+	if err != nil || json.Unmarshal(data, &saved) != nil || saved.Model != "test-model" || saved.RefreshToken != "rotated-secret" {
+		t.Fatalf("profile calls changed persisted model or lost token rotation: %+v %v", saved, err)
+	}
+	out, err := f.c.Complete(ctx, []domain.Message{{Role: "user", Content: "test-model"}}, nil)
+	if err != nil || out.Model != "test-model" || out.Message.Content != "test-model" {
+		t.Fatalf("legacy completion lost the saved selection: %+v %v", out, err)
+	}
+}
+
+func TestEstimateInputUsesExactRequestAndConservativeFraming(t *testing.T) {
+	messages := []domain.Message{
+		{Role: "system", Content: "Инструкция <&>"},
+		{Role: "user", Content: "画像", Images: []string{"data:image/png;base64,AA=="}},
+		{Role: "assistant", ResponsesItems: []json.RawMessage{json.RawMessage(`{"type":"reasoning","encrypted_content":"opaque state"}`), json.RawMessage(`{"type":"function_call","namespace":"openalbert","call_id":"c1","name":"lookup","arguments":"{}"}`)}},
+		{Role: "tool", ToolCallID: "c1", Content: "résultat"},
+	}
+	tools := []domain.Tool{{Name: "lookup", Description: "Поиск", Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`)}}
+	body, err := buildRequest("profile-model", messages, tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := EstimateInput("profile-model", messages, tools)
+	want := len(raw) + len(messages)*64 + len(tools)*128 + 256
+	if err != nil || got != want {
+		t.Fatalf("estimate omitted serialized request data/framing: got %d, want %d: %v", got, want, err)
+	}
+	for _, tc := range []struct {
+		name     string
+		messages []domain.Message
+		tools    []domain.Tool
+	}{
+		{"unsupported role", []domain.Message{{Role: "invalid", Content: "text"}}, nil},
+		{"invalid tool schema", nil, []domain.Tool{{Name: "broken", Parameters: json.RawMessage(`invalid`)}}},
+		{"invalid opaque history", []domain.Message{{Role: "assistant", ResponsesItems: []json.RawMessage{json.RawMessage(`invalid`)}}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if estimate, err := EstimateInput("profile-model", tc.messages, tc.tools); err == nil || estimate != 0 {
+				t.Fatalf("invalid input estimated as usable: %d %v", estimate, err)
+			}
+		})
+	}
+}
+
 func TestRequestAllowlistAndToolHistory(t *testing.T) {
 	messages := []domain.Message{{Role: "system", Content: "instructions"}, {Role: "user", Content: "look", Images: []string{"data:image/png;base64,AA=="}}, {Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "c1", Name: "lookup", Arguments: json.RawMessage(`{"x":1}`)}}}, {Role: "tool", ToolCallID: "c1", Content: "result"}}
 	body, err := buildRequest("model", messages, []domain.Tool{{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`)}})
@@ -386,13 +517,76 @@ func TestStreamTerminalEventsAndDiagnostics(t *testing.T) {
 	}
 	event := `{"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","namespace":"openalbert","call_id":"c1","name":"lookup","arguments":"{}"}],"usage":{"input_tokens":2,"output_tokens":3}}}`
 	result, err := readStream(strings.NewReader("event: response.completed\r\ndata: " + event + "\r\n\r\n"))
-	if err != nil || len(result.Message.ToolCalls) != 1 || result.OutputTokens != 3 {
+	if err != nil || len(result.Message.ToolCalls) != 1 || result.OutputTokens != 3 || !result.Usage.TokenUsageKnown {
 		t.Fatalf("tool completion %+v %v", result, err)
 	}
 	resp := &http.Response{StatusCode: 403, Header: http.Header{"X-Request-Id": []string{"req-test"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"subscription_sharing_route_not_supported","param":"model","message":"secret"}}`))}
 	e := responseError(resp)
 	if e.Code != "subscription_sharing_route_not_supported" || e.Param != "model" || e.RequestID != "req-test" || e.Status != 403 || !strings.Contains(string(e.Body), "secret") || strings.Contains(fmt.Sprint(e), "secret") {
 		t.Fatalf("lost or leaked diagnostics: %+v", e)
+	}
+}
+
+func TestFailedResponsesPreserveUsageWithoutPartialOutput(t *testing.T) {
+	f := newFixture(t)
+	f.login(t)
+	partial := `{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","namespace":"openalbert","call_id":"partial-call","name":"lookup","arguments":"{}"}`
+	for _, tc := range []struct {
+		name, eventType, status, output string
+	}{
+		{"incomplete", "response.incomplete", "incomplete", partial},
+		{"failed", "response.failed", "failed", partial},
+		{"error", "error", "failed", partial},
+		{"invalid call", "response.completed", "completed", partial + `,{"type":"function_call","call_id":"bad","name":"lookup","arguments":"invalid"}`},
+		{"invalid item", "response.completed", "completed", partial + `,{"type":"message","content":true}`},
+		{"invalid status", "response.completed", "incomplete", partial},
+		{"empty output", "response.completed", "completed", `{"type":"reasoning","encrypted_content":"partial"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := fmt.Sprintf(`{"type":%q,"code":"failure","response":{"status":%q,"model":"served-model-version","output":[%s],"usage":{"input_tokens":7,"output_tokens":3,"input_tokens_details":{"cached_tokens":4}}}}`, tc.eventType, tc.status, tc.output)
+			f.responseStream = "data: " + event + "\n\n"
+			decoded, err := readStream(strings.NewReader(f.responseStream))
+			if err == nil || decoded.InputTokens != 7 || decoded.OutputTokens != 3 || !decoded.Usage.TokenUsageKnown || decoded.Usage.CachedInputTokens != 4 || decoded.Usage.Model != "served-model-version" || !reflect.DeepEqual(decoded.Message, domain.Message{}) {
+				t.Fatalf("decoder lost usage or exposed partial output: %+v %v", decoded, err)
+			}
+			got, err := f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			if err == nil || got.Model != "test-model" || got.InputTokens != 7 || got.OutputTokens != 3 || got.Usage != decoded.Usage || !reflect.DeepEqual(got.Message, domain.Message{}) {
+				t.Fatalf("client lost usage/model or exposed partial output: %+v %v", got, err)
+			}
+			got, err = f.c.CompleteForModel(context.Background(), "profile-model", []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			if err == nil || got.Model != "profile-model" || got.InputTokens != 7 || got.OutputTokens != 3 || got.Usage != decoded.Usage || !reflect.DeepEqual(got.Message, domain.Message{}) {
+				t.Fatalf("profile call lost usage/model or exposed partial output: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestTerminalResponseUsageValidation(t *testing.T) {
+	for _, eventType := range []string{"response.completed", "response.incomplete", "response.failed", "error"} {
+		for _, tc := range []struct {
+			name, usage           string
+			known                 bool
+			input, output, cached int
+		}{
+			{"negative input", `{"input_tokens":-1,"output_tokens":3}`, false, 0, 0, 0},
+			{"negative output", `{"input_tokens":7,"output_tokens":-1}`, false, 0, 0, 0},
+			{"cache above input", `{"input_tokens":7,"output_tokens":3,"input_tokens_details":{"cached_tokens":20}}`, true, 7, 3, 7},
+			{"negative cache", `{"input_tokens":7,"output_tokens":3,"input_tokens_details":{"cached_tokens":-1}}`, true, 7, 3, 0},
+		} {
+			t.Run(eventType+"/"+tc.name, func(t *testing.T) {
+				event := fmt.Sprintf(`{"type":%q,"response":{"status":"completed","model":"served","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":%s}}`, eventType, tc.usage)
+				got, err := readStream(strings.NewReader("data: " + event + "\n\n"))
+				if (eventType != "response.completed" || !tc.known) && err == nil {
+					t.Fatal("accepted failed response or invalid usage")
+				}
+				if got.InputTokens != tc.input || got.OutputTokens != tc.output || got.Usage.TokenUsageKnown != tc.known || got.Usage.CachedInputTokens != tc.cached || got.Usage.Model != "served" {
+					t.Fatalf("invalid usage: %+v %v", got, err)
+				}
+				if err != nil && !reflect.DeepEqual(got.Message, domain.Message{}) {
+					t.Fatalf("failed response exposed output: %+v", got.Message)
+				}
+			})
+		}
 	}
 }
 
@@ -433,5 +627,123 @@ func TestExplicitMissingPermissionRetryRequestsConsent(t *testing.T) {
 	u, _ = url.Parse(link)
 	if u.Query().Get("prompt") != "" {
 		t.Fatal("ordinary sign-in forced consent")
+	}
+}
+
+func TestStreamUsagePresence(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage   string
+		known         bool
+		input, output int
+	}{
+		{"counts", `{"input_tokens":7,"output_tokens":3}`, true, 7, 3},
+		{"zeroes", `{"input_tokens":0,"output_tokens":0}`, true, 0, 0},
+		{"missing", `{}`, false, 0, 0},
+		{"input-only", `{"input_tokens":7}`, false, 7, 0},
+		{"output-only", `{"output_tokens":3}`, false, 0, 3},
+		{"null", `{"input_tokens":null,"output_tokens":0}`, false, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := `{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":` + tc.usage + `}}`
+			got, err := readStream(strings.NewReader("data: " + event + "\n\n"))
+			if err != nil || got.Usage.TokenUsageKnown != tc.known || got.InputTokens != tc.input || got.OutputTokens != tc.output {
+				t.Fatalf("usage presence lost: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestHTTPRejectionRetainsRequestedModelWithUnknownUsage(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusTooManyRequests} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			f := newFixture(t)
+			f.responseStatus = status
+			f.login(t)
+			out, err := f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "Hello"}}, nil)
+			var api *APIError
+			if !errors.As(err, &api) || api.Status != status || api.RequestID != "rejected-request" || out.Model != "test-model" || out.Usage.TokenUsageKnown || out.InputTokens != 0 || out.OutputTokens != 0 || !reflect.DeepEqual(out.Message, domain.Message{}) {
+				t.Fatalf("HTTP rejection lost request identity or invented usage/output: %+v %v", out, err)
+			}
+			out, err = f.c.CompleteForModel(context.Background(), "profile-model", []domain.Message{{Role: "user", Content: "Hello"}}, nil)
+			if !errors.As(err, &api) || api.Status != status || api.RequestID != "rejected-request" || out.Model != "profile-model" || out.Usage.TokenUsageKnown || out.InputTokens != 0 || out.OutputTokens != 0 || !reflect.DeepEqual(out.Message, domain.Message{}) {
+				t.Fatalf("profile HTTP rejection lost request identity or invented usage/output: %+v %v", out, err)
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
+
+func TestProfileResponsesUseConfiguredDeadlineWithoutChangingAccountTimeout(t *testing.T) {
+	f := newFixture(t)
+	f.login(t)
+	var remaining time.Duration
+	f.c.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			t.Error("request reached transport without a deadline")
+		}
+		remaining = time.Until(deadline)
+		return http.DefaultTransport.RoundTrip(req)
+	})
+	for _, test := range []struct {
+		name string
+		want time.Duration
+		call func() error
+	}{
+		{"long profile", 150 * time.Second, func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+			defer cancel()
+			_, err := f.c.CompleteForModel(ctx, "profile-model", []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			return err
+		}},
+		{"short profile", 5 * time.Second, func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := f.c.CompleteForModel(ctx, "profile-model", []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			return err
+		}},
+		{"legacy completion", 120 * time.Second, func() error {
+			_, err := f.c.Complete(context.Background(), []domain.Message{{Role: "user", Content: "hello"}}, nil)
+			return err
+		}},
+		{"account catalog", 120 * time.Second, func() error {
+			_, err := f.c.Models(context.Background())
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); err != nil {
+				t.Fatal(err)
+			}
+			if remaining > test.want || remaining < test.want-time.Second {
+				t.Fatalf("transport deadline remaining %s, want %s", remaining, test.want)
+			}
+			if f.c.http.Timeout != 120*time.Second {
+				t.Fatal("profile changed shared account HTTP timeout")
+			}
+		})
+	}
+}
+
+func TestProfileDeadlineIncludesWaitingForCredentialRefresh(t *testing.T) {
+	f := newFixture(t)
+	f.c.mu.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := f.c.CompleteForModel(ctx, "profile-model", nil, nil); done <- err }()
+	select {
+	case err := <-done:
+		f.c.mu.Unlock()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("credential wait ignored deadline: %v", err)
+		}
+	case <-time.After(time.Second):
+		f.c.mu.Unlock()
+		<-done
+		t.Fatal("profile request waited beyond its deadline for another refresh")
 	}
 }

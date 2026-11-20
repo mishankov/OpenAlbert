@@ -176,6 +176,7 @@ func repositoryContract(t *testing.T, r domain.Repository) {
 			t.Fatal("analysis remains pending")
 		}
 	}
+	analysisFailureContract(t, r, nonce, scope)
 	task := domain.Task{ID: "shared-task", ConversationID: scope, Title: "Check Tickets", Goal: "Find morning trains"}
 	created, err := r.CreateTask(ctx, task)
 	if err != nil || created.Status != "queued" {

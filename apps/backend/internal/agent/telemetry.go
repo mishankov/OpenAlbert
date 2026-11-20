@@ -25,6 +25,25 @@ func runContext(ctx context.Context, in RunInput) context.Context {
 }
 func (in ToolInput) TriggerName() string { return trigger(in.TaskID, in.Background) }
 
+func modelUsageMetadata(ev *telemetry.Event, usage domain.ModelUsage) {
+	ev.Set("model_role", usage.Role)
+	if usage.Profile != "" {
+		ev.Set("model_profile", usage.Profile)
+	}
+	if usage.Model != "" {
+		ev.Set("model", usage.Model)
+	}
+	ev.Set("cached_input_tokens", usage.CachedInputTokens)
+	ev.Set("token_usage_known", usage.TokenUsageKnown)
+	ev.Set("dropped_messages", usage.DroppedMessages)
+	if usage.EstimatedInputTokens > 0 {
+		ev.Set("estimated_input_tokens", usage.EstimatedInputTokens)
+	}
+	if usage.EstimatedCostUSD != nil {
+		ev.Set("estimated_cost_usd", *usage.EstimatedCostUSD)
+	}
+}
+
 type diagnosticError string
 
 func (e diagnosticError) Error() string          { return string(e) }

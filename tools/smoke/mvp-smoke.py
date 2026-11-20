@@ -31,6 +31,40 @@ def run(args, env, **kwargs):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs).stdout.strip()
 
 
+def running_environment(compose, env, service, keys):
+    """Read only required settings from the running service selected by Compose."""
+    containers = run(compose + ["ps", "-q", service], env).splitlines()
+    if len(containers) != 1:
+        raise SystemExit(f"Expected one running {service} container in the selected Compose project.")
+    values = json.loads(run(["docker", "inspect", "--format", "{{json .Config.Env}}", containers[0]], env))
+    selected = {}
+    for entry in values:
+        key, separator, value = entry.partition("=")
+        if separator and key in keys:
+            selected[key] = value
+    if any(not selected.get(key) for key in keys):
+        raise SystemExit(f"Running {service} container is missing required infrastructure settings.")
+    return selected
+
+
+def model_config(base_url):
+    """Synthetic profile shared by deployment smokes; no application config is read."""
+    return f'''[routes]
+chat = "smoke"
+background = "smoke"
+analysis = "smoke"
+[profiles.smoke]
+adapter = "openai_chat_completions"
+base_url = {json.dumps(base_url)}
+model = "smoke-model"
+api_key_env = "LLM_API_KEY"
+capabilities = ["tools", "vision", "structured_output"]
+context_window_tokens = 256000
+max_output_tokens = 8192
+timeout = "120s"
+'''
+
+
 def wait_until(description, condition, timeout=60):
     deadline = time.monotonic() + timeout
     last = None
@@ -241,26 +275,49 @@ def main():
     parser.add_argument("--without-search", action="store_true", help="Prove startup without any Yandex credentials")
     parser.add_argument("--with-browser", action="store_true", help="Exercise real Chromium on public example.com and screenshot persistence")
     args = parser.parse_args()
-    env = dict(os.environ)
+    with tempfile.TemporaryDirectory(prefix="openalbert-smoke-settings-") as directory:
+        smoke(args, Path(directory))
+
+
+def smoke(args, settings_directory):
+    env = {key: value for key, value in os.environ.items() if key in {
+        "PATH", "HOME", "DOCKER_CONFIG", "DOCKER_HOST", "DOCKER_CONTEXT",
+        "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_DEFAULT_PLATFORM", "COMPOSE_PROJECT_NAME"}}
     env.setdefault("POSTGRES_PORT", "15432")
-    compose = ["docker", "compose", "--project-directory", str(ROOT), "-f", "deploy/compose.local.yaml"]
-    settings = json.loads(run(compose + ["config", "--format", "json"], env))
-    postgres = settings["services"]["postgres"]["environment"]
-    postgres_user = postgres["POSTGRES_USER"]
-    postgres_password = postgres["POSTGRES_PASSWORD"]
+    # A service env_file bypasses --env-file, so redirect it before rendering.
+    # All other paths keep ROOT as their Compose project directory.
+    source = (ROOT / "deploy/compose.local.yaml").read_text()
+    copied_compose = settings_directory / "compose.yaml"
+    copied_compose.write_text(source.replace("path: ./models.env", "path: /dev/null"))
+    compose = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", str(ROOT / ".env.example"), "-f", str(copied_compose)]
     if run(compose + ["ps", "-q", "openalbert"], env):
         raise SystemExit("Stop your OpenAlbert container before running isolated smoke; it will not be replaced.")
+    postgres = running_environment(compose, env, "postgres", {"POSTGRES_USER", "POSTGRES_PASSWORD"})
+    minio = running_environment(compose, env, "minio", {"MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"})
+    temporal = running_environment(compose, env, "temporal", {"DEFAULT_NAMESPACE", "TEMPORAL_ADDRESS"})
+    postgres_user = postgres["POSTGRES_USER"]
+    postgres_password = postgres["POSTGRES_PASSWORD"]
+    s3 = {"S3_ACCESS_KEY": minio["MINIO_ROOT_USER"], "S3_SECRET_KEY": minio["MINIO_ROOT_PASSWORD"]}
+    # Compose interpolates override values too; retain literal dollars in credentials.
+    s3 = {key: value.replace("$", "$$") for key, value in s3.items()}
+    infrastructure = {"services": {
+        "minio-init": {"environment": s3},
+        "openalbert": {"environment": {**s3,
+            "TEMPORAL_NAMESPACE": temporal["DEFAULT_NAMESPACE"].replace("$", "$$"),
+            "TEMPORAL_ADDRESS": temporal["TEMPORAL_ADDRESS"].replace("$", "$$")}}}}
+    infrastructure_path = settings_directory / "infrastructure.json"
+    infrastructure_path.write_text(json.dumps(infrastructure))
+    compose += ["-f", str(infrastructure_path)]
     marker = "mvp-smoke-" + uuid.uuid4().hex[:12]
     db = marker.replace("-", "_")
     volume = "openalbert_" + db
     bucket = marker
     # Every external key/endpoint is replaced. No dotenv secret is read by fake APIs.
     env.update(TELEGRAM_BOT_TOKEN="smoke-token", TELEGRAM_ALLOWED_USER_IDS="42", TELEGRAM_OWNER_USER_ID="42",
-               TELEGRAM_ALLOWED_GROUP_IDS="", LLM_API_KEY="smoke-key", LLM_MODEL="smoke-model",
+               TELEGRAM_ALLOWED_GROUP_IDS="", LLM_API_KEY="smoke-key",
                YANDEX_API_KEY="smoke-key", YANDEX_FOLDER_ID="smoke-folder",
                SESSION_IDLE_TIMEOUT="2s", INITIATIVE_INTERVAL="0", TASK_MIN_INTERVAL="1s",
                MAX_AGENT_STEPS="12", TELEGRAM_BASE_URL=f"http://{args.host_address}:{args.port}",
-               LLM_BASE_URL=f"http://{args.host_address}:{args.port}/v1",
                YANDEX_SEARCH_URL=f"http://{args.host_address}:{args.port}/search",
                TEMPORAL_TASK_QUEUE=marker)
     if args.without_search:
@@ -275,6 +332,9 @@ def main():
         created = True
         run(compose + ["run", "--rm", "--no-deps", "-e", "S3_BUCKET=" + bucket, "minio-init"], env)
         with tempfile.TemporaryDirectory(prefix="openalbert-smoke-") as temp:
+            models = Path(temp) / "models.toml"
+            models.write_text(model_config(f"http://{args.host_address}:{args.port}/v1"))
+            env["LLM_CONFIG_HOST_FILE"] = str(models)
             # JSON is also valid YAML. Overrides only the application service, no infrastructure recreation.
             override = {"services": {"openalbert": {"labels": {"openalbert.smoke": marker},
                 "environment": {"DATABASE_URL": f"postgres://{urllib.parse.quote(postgres_user, safe='')}:{urllib.parse.quote(postgres_password, safe='')}@postgres:5432/{db}?sslmode=disable", "S3_BUCKET": bucket},
