@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"openalbert/services/backup"
+	"github.com/mishankov/OpenAlbert/shared/backup"
 )
 
 func main() {

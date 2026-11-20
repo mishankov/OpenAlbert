@@ -14,10 +14,10 @@ import sys
 COMPONENTS = ('openalbert', 'stt', 'log-gateway', 'minio', 'minio-init', 'backup')
 ARCHES = ('amd64', 'arm64')
 INPUTS = {
-    'openalbert': ('apps/backend/', 'services/backup/', 'go.mod', 'go.sum'),
-    'backup': ('services/backup/', 'go.mod', 'go.sum'),
-    'stt': ('services/stt/', 'go.mod', 'go.sum'),
-    'log-gateway': ('services/log-gateway/', 'go.mod', 'go.sum'),
+    'openalbert': ('apps/backend/', 'shared/backup/'),
+    'backup': ('services/backup/', 'shared/backup/'),
+    'stt': ('services/stt/',),
+    'log-gateway': ('services/log-gateway/',),
     'minio': ('services/minio/Dockerfile',),
     'minio-init': ('services/minio/Dockerfile', 'services/minio/init.sh'),
 }

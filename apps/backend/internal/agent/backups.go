@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mishankov/OpenAlbert/shared/backup"
 	"openalbert/apps/backend/internal/domain"
-	"openalbert/services/backup"
 )
 
 func backupDefinition() domain.Tool {

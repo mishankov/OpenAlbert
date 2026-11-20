@@ -63,7 +63,7 @@ case "$component" in
       OPENALBERT_TEST_S3_ACCESS_KEY=openalbert-ci \
       OPENALBERT_TEST_S3_SECRET_KEY=ci-only-password \
       OPENALBERT_TEST_S3_BUCKET=openalbert-ci \
-      go test -race -count=1 ./apps/backend/internal/blob -run '^TestRealMinIO$'
+      GOWORK=off go -C apps/backend test -mod=readonly -race -count=1 ./internal/blob -run '^TestRealMinIO$'
     ;;
   *) echo "Unknown image component: $component" >&2; exit 1 ;;
 esac

@@ -9,10 +9,8 @@ RUN scripts/configure.sh cpu-asr -DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DNEMO_SPEE
 
 FROM golang:1.26.9-alpine AS proxy-build
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY services/stt ./services/stt
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /stt-proxy ./services/stt/cmd/stt
+COPY services/stt ./
+RUN GOWORK=off CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /stt-proxy ./cmd/stt
 
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg python3 libsentencepiece0 libgomp1 && rm -rf /var/lib/apt/lists/* && groupadd -g 10001 stt && useradd -u 10001 -g stt -M -s /usr/sbin/nologin stt

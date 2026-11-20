@@ -175,8 +175,10 @@ class Run:
 
     def check(self):
         self.command("format", [sys.executable, "tools/local.py", "--format-check"])
-        self.command("vet", ["go", "vet", "./..."])
+        self.command("vet", ["sh", "tools/testing/go-modules.sh", "vet", "-mod=readonly", "./..."])
         self.command("local-runner-tests", [sys.executable, "-m", "unittest", "discover", "-s", "tools", "-p", "test_*.py", "-v"])
+        self.command("image-planner-tests", [sys.executable, "-m", "unittest", "discover", "-s",
+                     ".agents/skills/publish-changed-images/scripts", "-p", "test_*.py", "-v"])
         self.command("compose", [sys.executable, "tools/checks/check-compose.py"])
         self.command("test-compose", ["docker", "compose", "--project-directory", str(ROOT), "--env-file", "/dev/null", "-f", "deploy/compose.test.yaml", "config", "-q"])
         self.command("bake-config", ["docker", "buildx", "bake", "-f", "deploy/docker-bake.hcl", "--print"])
@@ -328,7 +330,7 @@ def main():
     parser.add_argument("--format-check", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.format_check:
-        files = output(["gofmt", "-l", "apps/backend", "services"])
+        files = output(["gofmt", "-l", "apps/backend", "services", "shared/backup"])
         if files:
             print(files)
             return 1

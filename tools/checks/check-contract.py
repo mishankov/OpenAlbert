@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     with tempfile.TemporaryDirectory(prefix="albert-contract-") as directory:
         binary = str(Path(directory) / "testserver")
-        subprocess.run(["go", "build", "-o", binary, "./apps/backend/internal/desktopapi/testserver"], cwd=ROOT, check=True)
+        subprocess.run(["go", "-C", "apps/backend", "build", "-mod=readonly", "-o", binary, "./internal/desktopapi/testserver"],
+                       cwd=ROOT, env=dict(os.environ, GOWORK="off"), check=True)
         server = subprocess.Popen([binary], cwd=ROOT, stderr=subprocess.PIPE, text=True)
         try:
             # The server emits readiness only after binding a random loopback port.

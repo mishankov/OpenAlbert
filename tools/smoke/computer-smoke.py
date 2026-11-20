@@ -45,7 +45,7 @@ def main():
             def environment():
                 address = subprocess.check_output(["docker", "port", name, "22/tcp"], text=True).strip()
                 env = dict(os.environ, OPENALBERT_TEST_COMPUTER_ADDRESS=address,
-                           OPENALBERT_TEST_COMPUTER_KEY=str(folder / "key"))
+                           OPENALBERT_TEST_COMPUTER_KEY=str(folder / "key"), GOWORK="off")
                 return env
 
             def ready():
@@ -58,7 +58,8 @@ def main():
                 raise RuntimeError("SSH server did not start")
 
             ready()
-            run(["go", "test", "-race", "-count=1", "./apps/backend/internal/computer", "-run", "^TestRealComputer$"], env=environment())
+            go_test = ["go", "-C", "apps/backend", "test", "-mod=readonly", "-race", "-count=1", "./internal/computer", "-run"]
+            run([*go_test, "^TestRealComputer$"], env=environment())
             # Only this disposable fixture enables a synthetic password. The
             # optional user-computer template remains public-key-only by default.
             run(["docker", "exec", name, "sh", "-ec",
@@ -70,7 +71,7 @@ def main():
                  "kill -HUP $(cat /run/sshd.pid)"])
             env = environment()
             env["OPENALBERT_TEST_COMPUTER_PASSWORD"] = "synthetic-smoke-password"
-            run(["go", "test", "-race", "-count=1", "./apps/backend/internal/computer", "-run", "^TestRealComputerPassword$"], env=env)
+            run([*go_test, "^TestRealComputerPassword$"], env=env)
             # Ensure the command started before destroying its supervisor.
             time.sleep(0.3)
             run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL)
@@ -78,7 +79,7 @@ def main():
             ready()
             env = environment()
             env["OPENALBERT_TEST_COMPUTER_RESTARTED"] = "1"
-            run(["go", "test", "-race", "-count=1", "./apps/backend/internal/computer", "-run", "^TestRealComputerAfterRestart$"], env=env)
+            run([*go_test, "^TestRealComputerAfterRestart$"], env=env)
             print("Computer bootstrap, updates, key/password auth, transfers, retries, cancellation and recreation: OK")
     except BaseException:
         subprocess.run(["docker", "logs", name], check=False)

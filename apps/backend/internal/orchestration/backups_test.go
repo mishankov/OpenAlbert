@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mishankov/OpenAlbert/shared/backup"
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
-	"openalbert/services/backup"
 
 	"github.com/stretchr/testify/mock"
 	"go.temporal.io/sdk/client"
