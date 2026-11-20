@@ -14,12 +14,13 @@ import (
 type billingStub struct {
 	*siwc.Client
 	calls atomic.Int32
+	model string
 	err   error
 }
 
 func (m *billingStub) Complete(context.Context, []domain.Message, []domain.Tool) (domain.Completion, error) {
 	m.calls.Add(1)
-	return domain.Completion{Message: domain.Message{Role: "assistant", Content: "ok"}}, m.err
+	return domain.Completion{Model: m.model, Message: domain.Message{Role: "assistant", Content: "ok"}}, m.err
 }
 func (m *billingStub) Status() siwc.Status {
 	return siwc.Status{Connected: true, PlanEnabled: true, Model: "test"}
@@ -27,12 +28,12 @@ func (m *billingStub) Status() siwc.Status {
 func TestBillingFallbackCooldownAndRecovery(t *testing.T) {
 	for _, code := range []string{"subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable", "subscription_sharing_user_not_eligible", ""} {
 		t.Run(code, func(t *testing.T) {
-			plan := &billingStub{err: &siwc.APIError{Status: 429, Code: code, RequestID: "request-1"}}
-			api := &billingStub{}
+			plan := &billingStub{model: "plan-model", err: &siwc.APIError{Status: 429, Code: code, RequestID: "request-1"}}
+			api := &billingStub{model: "api-model"}
 			b := &BillingModel{Mode: "auto", Plan: plan, API: api, Cooldown: time.Hour}
 			for range 3 {
-				if _, err := b.Complete(context.Background(), nil, nil); err != nil {
-					t.Fatal(err)
+				if out, err := b.Complete(context.Background(), nil, nil); err != nil || out.Model != api.model {
+					t.Fatalf("fallback completion: %+v %v", out, err)
 				}
 			}
 			s := b.Status()

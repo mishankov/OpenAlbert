@@ -93,6 +93,8 @@ type Tool struct {
 	Parameters  json.RawMessage `json:"parameters"`
 }
 type Completion struct {
+	// Model is the slug sent to the provider for this successful request.
+	Model        string
 	Message      Message
 	InputTokens  int
 	OutputTokens int
