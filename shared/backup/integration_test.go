@@ -48,7 +48,7 @@ func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 	if configured := os.Getenv("OPENALBERT_TEST_BACKUP_PROJECT"); configured != "" {
 		project = configured
 	}
-	pgImage := "postgres:17.9-alpine"
+	pgImage := "postgres:18.7-alpine"
 	minioImage := os.Getenv("OPENALBERT_TEST_BACKUP_MINIO_IMAGE")
 	if minioImage == "" {
 		t.Fatal("OPENALBERT_TEST_BACKUP_MINIO_IMAGE is required; run task test:backup to build MinIO from pinned source")
@@ -60,7 +60,7 @@ func dockerBackupRestore(t *testing.T, excludeComputer bool) {
 		return map[string]any{"type": "bind", "source": filepath.Join(root, "container_data", source), "target": target}
 	}
 	services := map[string]any{
-		"postgres":   map[string]any{"image": pgImage, "environment": map[string]string{"POSTGRES_USER": "openalbert", "POSTGRES_PASSWORD": "test-only-password", "POSTGRES_DB": "openalbert"}, "volumes": []any{volume("postgres", "/var/lib/postgresql/data")}, "healthcheck": map[string]any{"test": []string{"CMD-SHELL", "pg_isready -h 127.0.0.1 -U openalbert"}, "interval": "1s", "timeout": "2s", "retries": 60}},
+		"postgres":   map[string]any{"image": pgImage, "environment": map[string]string{"PGDATA": "/var/lib/postgresql/data", "POSTGRES_USER": "openalbert", "POSTGRES_PASSWORD": "test-only-password", "POSTGRES_DB": "openalbert"}, "volumes": []any{volume("postgres", "/var/lib/postgresql/data")}, "healthcheck": map[string]any{"test": []string{"CMD-SHELL", "pg_isready -h 127.0.0.1 -U openalbert"}, "interval": "1s", "timeout": "2s", "retries": 60}},
 		"minio":      map[string]any{"image": minioImage, "command": []string{"server", "/data"}, "environment": map[string]string{"MINIO_ROOT_USER": "test-access", "MINIO_ROOT_PASSWORD": "test-only-secret"}, "volumes": []any{volume("minio", "/data")}},
 		"temporal":   map[string]any{"image": sleepImage, "init": true, "entrypoint": []string{"sleep", "infinity"}},
 		"openalbert": map[string]any{"image": sleepImage, "init": true, "entrypoint": []string{"sleep", "infinity"}, "volumes": []any{volume("knowledge", "/data/knowledge"), volume("computer/client", "/data/computer"), map[string]any{"type": "bind", "source": strings.ReplaceAll(filepath.Join(root, modelConfigFile), "$", "$$"), "target": "/etc/openalbert/models.toml", "read_only": true}}},

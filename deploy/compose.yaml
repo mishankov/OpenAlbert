@@ -102,9 +102,11 @@ services:
   postgres:
     labels:
       compose_service: postgres
-    image: postgres:17.9-alpine
+    image: postgres:18.7-alpine
     restart: unless-stopped
     environment:
+      # Keep the existing bind and cold-backup layout across the major upgrade.
+      PGDATA: /var/lib/postgresql/data
       POSTGRES_USER: openalbert
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
       POSTGRES_DB: openalbert
@@ -116,7 +118,7 @@ services:
       - source: postgres-init
         target: /docker-entrypoint-initdb.d/01-databases.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U openalbert -d openalbert"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U openalbert -d openalbert"]
       interval: 5s
       timeout: 3s
       retries: 30

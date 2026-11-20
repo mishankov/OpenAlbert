@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify encrypted S3 backup and cold restore with disposable Docker resources.
 
-Uses PostgreSQL 17, two independent MinIO servers built from the project's pinned
+Uses PostgreSQL 18, two independent MinIO servers built from the project's pinned
 source, and sleeping placeholders for the application/Temporal processes. All
 three databases, knowledge and artifact bytes must survive restore. Requires
 Docker; never reads the project's .env.

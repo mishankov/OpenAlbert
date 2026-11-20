@@ -38,7 +38,7 @@ AGPL и credits клиента включены в соответствующи�
 прежнего `RELEASE.2025-04-22T22-12-26Z`: перед переносом существующих данных сделай
 резервную копию и проверь обновление на копии хранилища.
 
-**Стандартными оставляем** `postgres:17.9-alpine`, `temporalio/auto-setup:1.29.1`,
+**Стандартными оставляем** `postgres:18.7-alpine`, `temporalio/auto-setup:1.29.1`,
 `temporalio/ui:2.54.1` и `victoriametrics/victoria-logs:v1.53.0`.
 Собственного кода в них нет; SQL и dynamic config передаются средствами Compose,
 поэтому отдельные сборки этих сервисов не нужны. Все четыре образа имеют ARM64-варианты.
@@ -169,6 +169,8 @@ STT и Markdown-память. Компьютер пользователь соз
 Новый Compose больше не управляет им. Не удаляй прежний контейнер как orphan до
 проверки переноса. Отдельный компьютер при дальнейших обновлениях не затрагивается.
 
+Если установка ещё использует PostgreSQL 17, сначала выполни
+[перенос баз на PostgreSQL 18](#переход-с-postgresql-17-на-18).
 Сделай резервную копию данных, возьми Compose и пример настроек из нужного коммита,
 задай общий SHA-тег и выполни:
 
@@ -180,6 +182,60 @@ docker compose up -d
 Не выполняй параллельно `up` из локального Compose. Возврат к старым образам
 возможен только с учётом совместимости схемы БД и формата данных MinIO; для
 обратного несовместимого изменения нужна соответствующая резервная копия.
+
+### Переход с PostgreSQL 17 на 18
+
+PostgreSQL 18 не открывает каталог кластера PostgreSQL 17. Перенос требует
+остановки установки и восстановления логических дампов в новый кластер.
+Для чистой установки этот раздел можно пропустить.
+
+Сделай полную резервную копию установки и сохрани прежний Compose и значения
+тегов образов. Запиши, какие профили были включены в `.env` или через
+`--profile` (например, `backup` и `local-stt`).
+Команды ниже рассчитаны на стандартную установку с ролью
+`openalbert` и тремя базами. Пользовательские роли и дополнительные базы
+перенеси отдельно. В checkout добавляй к каждой команде Docker Compose
+`--project-directory . -f deploy/compose.local.yaml` после `docker compose`.
+
+На прежней версии сначала отдельно останови контроллер резервных копий.
+Он может возобновить остановленные им сервисы при завершении копирования.
+Затем останови весь стек и запусти только PostgreSQL 17. Выполни обе группы
+команд в одном терминале.
+
+```sh
+set -eu
+umask 077
+backup_dir=$(mktemp -d "$HOME/openalbert-postgres17.XXXXXX")
+docker compose --profile backup stop backup
+docker compose --profile '*' stop
+docker compose up -d --no-deps --wait postgres
+test "$(docker compose --profile '*' ps --status running --services)" = postgres
+for db in openalbert temporal temporal_visibility; do
+  docker compose exec -T postgres pg_dump -U openalbert -Fc -d "$db" > "$backup_dir/$db.dump"
+done
+docker compose --profile '*' down
+test ! -e container_data/postgres-17
+mv container_data/postgres container_data/postgres-17
+```
+
+Теперь обнови Compose и теги образов. Запусти только PostgreSQL 18 и восстанови
+все три дампа до запуска приложения и Temporal. К последней команде добавь
+прежние флаги `--profile`, если профили не заданы в `.env`.
+
+```sh
+docker compose up -d --no-deps --wait postgres
+for db in openalbert temporal temporal_visibility; do
+  docker compose exec -T postgres pg_restore -U openalbert -d "$db" \
+    --exit-on-error --single-transaction < "$backup_dir/$db.dump"
+done
+docker compose up -d
+```
+
+Проверь историю приложения и выполнение задач Temporal. Сохрани дампы и
+`container_data/postgres-17` до проверки. Для отката останови новый стек,
+перемести его каталог PostgreSQL в отдельное место, верни каталог PostgreSQL 17
+на прежний путь и запусти прежний Compose с прежними тегами и профилями.
+Изменения после запуска нового стека останутся в кластере PostgreSQL 18.
 
 ## Резервная копия и восстановление
 
