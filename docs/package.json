@@ -12,7 +12,7 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "@playwright/test": "^1.64.1",
-    "marked": "^17.0.0"
+    "@playwright/test": "^1.65.1",
+    "marked": "^18.2.1"
   }
 }
