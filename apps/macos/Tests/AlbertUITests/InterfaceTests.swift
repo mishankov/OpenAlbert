@@ -235,6 +235,16 @@ extension InterfaceTests {
 extension InterfaceTests {
     @MainActor
     func testChatGPTSettingsKeyboardAndCredentialFlow() async throws {
+        try await checkChatGPTSettingsKeyboardAndCredentialFlow(status: #"{"mode":"auto","active_lane":"siwc","siwc":{"connected":true,"plan_enabled":true,"model":"test"},"siwc_requests":2,"api_key_requests":1}"#)
+    }
+
+    @MainActor
+    func testProfileSubscriptionKeyboardAndCredentialFlow() async throws {
+        try await checkChatGPTSettingsKeyboardAndCredentialFlow(status: #"{"mode":"profiles","active_lane":"profiles","profiles":{"chat":{"profile":"chat-plan","model":"chat-model","auth_mode":"siwc"},"background":{"profile":"background-api","model":"background-model","auth_mode":"api_key"},"analysis":{"profile":"analysis-plan","model":"analysis-model","auth_mode":"siwc"}},"siwc":{"connected":true,"plan_enabled":true,"model":"unused-global-model"},"siwc_requests":2,"api_key_requests":1}"#)
+    }
+
+    @MainActor
+    private func checkChatGPTSettingsKeyboardAndCredentialFlow(status: String) async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory); InterfaceURLProtocol.handler = nil }
@@ -246,13 +256,13 @@ extension InterfaceTests {
         let controller = ApplicationController(model: model)
         controller.createWindow(show: true)
         defer { controller.window.orderOut(nil); model.shutdown() }
-        let status = #"{"mode":"auto","active_lane":"siwc","siwc":{"connected":true,"plan_enabled":true,"model":"test"},"siwc_requests":2,"api_key_requests":1}"#
-        var begins = 0; var callbacks = 0; var opened = 0
+        var begins = 0; var callbacks = 0; var opened = 0; var modelRequests = 0
         InterfaceURLProtocol.handler = { request in
             switch request.url!.lastPathComponent {
             case "sign-in": begins += 1; return Data(#"{"url":"https://auth.openai.com/api/accounts/authorize?state=synthetic"}"#.utf8)
             case "callback": callbacks += 1; XCTAssertEqual(request.httpMethod, "POST"); return Data(status.utf8)
-            case "models": return Data(#"{"models":[{"slug":"test","display_name":"Test"}]}"#.utf8)
+            case "models": modelRequests += 1; return Data(#"{"models":[{"slug":"test","display_name":"Test"}]}"#.utf8)
+            case "model": XCTFail("Profile settings must not mutate the global model"); return Data(status.utf8)
             default: return Data(status.utf8)
             }
         }
@@ -261,6 +271,19 @@ extension InterfaceTests {
         model.openSettings()
         await model.chatGPT.load(client)
         model.chatGPT.controlsVisible = true
+        let usesProfiles = model.chatGPT.usesProfiles
+        XCTAssertEqual(model.chatGPT.showsModelPicker, !usesProfiles)
+        if usesProfiles {
+            let rows = model.chatGPT.profileRows
+            XCTAssertEqual(rows.map(\.title), ["Разговор", "Фоновые задачи", "Анализ"])
+            XCTAssertEqual(rows.map(\.details), [
+                "Профиль: chat-plan · Модель: chat-model · Оплата: План ChatGPT",
+                "Профиль: background-api · Модель: background-model · Оплата: API-ключ",
+                "Профиль: analysis-plan · Модель: analysis-model · Оплата: План ChatGPT",
+            ])
+            model.chatGPT.select("must-not-change-configured-model", client: client)
+            XCTAssertFalse(model.chatGPT.busy)
+        }
         // A callback started in Telegram (or before this app process) can finish
         // without opening a second authorization attempt in the macOS app.
         XCTAssertNil(model.chatGPT.pendingURL)
@@ -282,9 +305,13 @@ extension InterfaceTests {
         controller.chatGPTFinish(); XCTAssertEqual(callbacks, 1)
         model.chatGPT.busy = false
         let editor = NSTextView()
-        NSApp.keyWindow?.makeFirstResponder(editor)
+        let keyWindow = try XCTUnwrap(NSApp.keyWindow)
+        keyWindow.contentView?.addSubview(editor)
+        XCTAssertTrue(keyWindow.makeFirstResponder(editor))
         editor.setMarkedText("に", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
         XCTAssertFalse(KeyboardGate.permitsPrimaryAction(event: nil, responder: editor))
+        XCTAssertTrue(controller.handleCommandKeyEquivalent(KeyboardSmoke.event(code: 36, characters: "Ж", modifiers: [.command, .shift])))
+        XCTAssertEqual(callbacks, 1)
         editor.unmarkText()
         XCTAssertTrue(controller.handleCommandKeyEquivalent(KeyboardSmoke.event(code: 36, characters: "Ж", modifiers: [.command, .shift])))
         for _ in 0..<100 where model.chatGPT.busy { try await Task.sleep(for: .milliseconds(10)) }
@@ -296,6 +323,44 @@ extension InterfaceTests {
         model.escape(); XCTAssertFalse(model.showSettings)
         model.openSettings(); XCTAssertEqual(model.chatGPT.callback, "unfinished callback")
         XCTAssertEqual(model.draft.text, "Сохранить черновик")
+        if usesProfiles { XCTAssertEqual(modelRequests, 0) }
+        model.showSettings = false
+    }
+
+    @MainActor
+    func testAPIOnlyProfilesDisableSignInAndCallbackFromButtonsAndKeyboard() async throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory); InterfaceURLProtocol.handler = nil }
+        let model = AppModel(store: LocalStore(directory: directory), defaults: UserDefaults(suiteName: UUID().uuidString)!, startNetwork: false)
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [InterfaceURLProtocol.self]
+        let client = try APIClient(baseURL: URL(string: "https://albert.example")!, token: "test", session: URLSession(configuration: config))
+        model.client = client
+        let controller = ApplicationController(model: model)
+        controller.createWindow(show: true)
+        defer { controller.window.orderOut(nil); model.shutdown() }
+        let status = #"{"mode":"profiles","active_lane":"profiles","profiles":{"chat":{"profile":"api","model":"api-model","auth_mode":"api_key"}},"siwc":{"connected":true,"plan_enabled":true,"model":"old-plan-model"},"siwc_requests":0,"api_key_requests":1}"#
+        InterfaceURLProtocol.handler = { request in
+            XCTAssertEqual(request.url!.lastPathComponent, "chatgpt", "API-only profiles must not fetch models or change shared authentication")
+            return Data(status.utf8)
+        }
+        await model.chatGPT.load(client)
+        model.showSettings = true; model.chatGPT.controlsVisible = true
+        model.chatGPT.callback = "unfinished callback"
+        XCTAssertFalse(model.chatGPT.canBegin)
+        XCTAssertFalse(model.chatGPT.canFinish)
+        XCTAssertFalse(model.chatGPT.showsModelPicker)
+        XCTAssertEqual(model.chatGPT.profileRows.first?.billing, "API-ключ")
+        XCTAssertFalse(controller.validateMenuItem(try XCTUnwrap(controller.commands["chatGPTSignIn"])))
+        XCTAssertFalse(controller.validateMenuItem(try XCTUnwrap(controller.commands["chatGPTFinish"])))
+        model.chatGPT.begin(client); model.chatGPT.finish(client); model.chatGPT.select("other", client: client)
+        XCTAssertTrue(controller.handleCommandKeyEquivalent(KeyboardSmoke.event(code: 37, characters: "Д", modifiers: [.command, .shift])))
+        XCTAssertTrue(controller.handleCommandKeyEquivalent(KeyboardSmoke.event(code: 36, characters: "Ж", modifiers: [.command, .shift])))
+        XCTAssertFalse(model.chatGPT.busy)
+        XCTAssertEqual(model.chatGPT.callback, "unfinished callback")
+        model.chatGPT.status = nil
+        XCTAssertFalse(model.chatGPT.canBegin)
+        XCTAssertFalse(model.chatGPT.canFinish)
         model.showSettings = false
     }
 }

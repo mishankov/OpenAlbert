@@ -168,11 +168,18 @@ public enum APIJSON {
 }
 
 public struct ChatGPTStatus: Codable, Sendable {
+    public struct Profile: Codable, Sendable {
+        public let profile: String
+        public let model: String
+        public let authMode: String
+        enum CodingKeys: String, CodingKey { case profile, model, authMode = "auth_mode" }
+    }
     public struct Plan: Codable, Sendable { public let connected: Bool; public let planEnabled: Bool; public let model: String
         enum CodingKeys: String, CodingKey { case connected, planEnabled = "plan_enabled", model }
     }
     public let mode: String
     public let activeLane: String
+    public let profiles: [String: Profile]?
     public let planIneligible: Bool?
     public let siwc: Plan
     public let siwcRequests: UInt64
@@ -183,7 +190,7 @@ public struct ChatGPTStatus: Codable, Sendable {
     public let lastRequestID: String?
     enum CodingKeys: String, CodingKey {
         case planIneligible = "plan_ineligible"
-        case mode, siwc, activeLane = "active_lane", siwcRequests = "siwc_requests", apiKeyRequests = "api_key_requests"
+        case mode, siwc, profiles, activeLane = "active_lane", siwcRequests = "siwc_requests", apiKeyRequests = "api_key_requests"
         case last429 = "last_429", retryAt = "retry_at", lastErrorCode = "last_error_code", lastRequestID = "last_request_id"
     }
 }

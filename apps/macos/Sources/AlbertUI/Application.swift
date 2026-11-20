@@ -116,8 +116,8 @@ public final class ApplicationController: NSObject, NSApplicationDelegate, NSMen
     public func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let modal = model.modalPresented
         switch menuItem.identifier?.rawValue {
-        case "chatGPTSignIn": return model.showSettings && model.chatGPT.controlsVisible && !model.chatGPT.busy && (model.chatGPT.status.map { $0.mode != "api_key" } == true)
-        case "chatGPTFinish": return model.showSettings && model.chatGPT.controlsVisible && !model.chatGPT.busy && !model.chatGPT.callback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case "chatGPTSignIn": return model.showSettings && model.chatGPT.canBegin
+        case "chatGPTFinish": return model.showSettings && model.chatGPT.canFinish
         case "primary":
             menuItem.title = model.section == .tasks && model.selectedTask != nil ? "Обсудить поручение" : "Отправить"
             return !modal && (model.section == .tasks ? model.selectedTask != nil && !model.sending : model.section == .conversation && model.canSend)

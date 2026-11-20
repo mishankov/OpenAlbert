@@ -23,6 +23,20 @@ final class CoreTests: XCTestCase {
         return try APIClient(baseURL: URL(string: "https://albert.example")!, token: "private-token", session: URLSession(configuration: config))
     }
     override func tearDown() { StubURLProtocol.handler = nil }
+    func testChatGPTStatusDecodesLegacyAndProfileRouting() throws {
+        let legacy = try APIJSON.decoder().decode(ChatGPTStatus.self, from: Data(#"{"mode":"auto","active_lane":"siwc","siwc":{"connected":true,"plan_enabled":true,"model":"legacy-model"},"siwc_requests":2,"api_key_requests":1}"#.utf8))
+        XCTAssertNil(legacy.profiles)
+        XCTAssertEqual(legacy.siwc.model, "legacy-model")
+        let profiles = try APIJSON.decoder().decode(ChatGPTStatus.self, from: Data(#"{"mode":"profiles","active_lane":"profiles","profiles":{"chat":{"profile":"conversation-plan","model":"chat-model","auth_mode":"siwc"},"background":{"profile":"background-api","model":"background-model","auth_mode":"api_key"},"analysis":{"profile":"analysis-plan","model":"analysis-model","auth_mode":"siwc"}},"siwc":{"connected":true,"plan_enabled":true,"model":"unused-global-model"},"siwc_requests":3,"api_key_requests":2}"#.utf8))
+        XCTAssertEqual(profiles.mode, "profiles")
+        XCTAssertEqual(profiles.activeLane, "profiles")
+        XCTAssertEqual(profiles.profiles?.count, 3)
+        XCTAssertEqual(profiles.profiles?["chat"]?.profile, "conversation-plan")
+        XCTAssertEqual(profiles.profiles?["analysis"]?.model, "analysis-model")
+        XCTAssertEqual(profiles.profiles?["background"]?.authMode, "api_key")
+        let roundTrip = try APIJSON.decoder().decode(ChatGPTStatus.self, from: APIJSON.encoder().encode(profiles))
+        XCTAssertEqual(roundTrip.profiles?["chat"]?.authMode, "siwc")
+    }
     func testHTTPAndHTTPSAccepted() throws {
         for value in ["https://albert.example", "http://albert.example", "http://192.168.1.31:8080", "http://pi.local:8080", "http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"] { XCTAssertNoThrow(try APIClient.validatedURL(value)) }
         for value in ["http://", "file:///tmp/", "https://user:token@albert.example", "https://albert.example?token=x", "https://albert.example/#secret", "https://albert.example/api"] { XCTAssertThrowsError(try APIClient.validatedURL(value), value) }

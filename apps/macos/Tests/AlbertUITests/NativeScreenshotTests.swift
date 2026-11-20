@@ -156,7 +156,7 @@ private final class ScreenshotChatGPTProtocol: URLProtocol {
         print("Synthetic screenshot request: \(request.url!.lastPathComponent)")
         let json = request.url!.lastPathComponent == "models"
             ? #"{"models":[{"slug":"account-model","display_name":"Модель ChatGPT"}]}"#
-            : #"{"mode":"auto","active_lane":"siwc","siwc":{"connected":true,"plan_enabled":true,"model":"account-model"},"siwc_requests":12,"api_key_requests":3,"last_429":"2026-11-18T12:00:00Z"}"#
+            : #"{"mode":"profiles","active_lane":"profiles","profiles":{"chat":{"profile":"conversation-plan","model":"gpt-5.2","auth_mode":"siwc"},"background":{"profile":"background-api","model":"gpt-5-mini","auth_mode":"api_key"},"analysis":{"profile":"analysis-plan","model":"gpt-5.2-codex","auth_mode":"siwc"}},"siwc":{"connected":true,"plan_enabled":true,"model":"unused-global-model"},"siwc_requests":12,"api_key_requests":3}"#
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type":"application/json"])!, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(json.utf8))
         client?.urlProtocolDidFinishLoading(self)
