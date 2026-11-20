@@ -1,4 +1,4 @@
-FROM golang:1.26.9-alpine AS build
+FROM golang:1.27.4-alpine AS build
 ENV GOWORK=off
 WORKDIR /src/apps/backend
 COPY shared/backup/go.mod /src/shared/backup/
@@ -8,7 +8,7 @@ COPY shared/backup /src/shared/backup
 COPY apps/backend ./
 RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/openalbert ./cmd/openalbert
 
-FROM alpine:3.23
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata chromium font-dejavu && addgroup -g 10001 openalbert && adduser -D -u 10001 -G openalbert openalbert && mkdir -p /data/knowledge && chown -R openalbert:openalbert /data
 COPY --from=build /out/openalbert /usr/local/bin/openalbert
 USER openalbert
