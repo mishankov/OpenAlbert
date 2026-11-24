@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mishankov/OpenAlbert/shared/codemode"
 	"openalbert/apps/backend/internal/agent"
-	"openalbert/apps/backend/internal/codemode"
 	"openalbert/apps/backend/internal/domain"
 
 	"go.temporal.io/sdk/converter"

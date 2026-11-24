@@ -21,15 +21,17 @@ import (
 )
 
 const (
-	MaxRequests        = 64
-	MaxArgumentsBytes  = 100_000
-	MaxOutputBytes     = 32 << 10
-	MaxStateBytes      = 16 << 10
-	MaxCodeBytes       = 32 << 10
-	maxInputBytes      = 512 << 10
-	maxHistoryBytes    = 4 << 20
-	wasmMemoryPages    = 512 // 32 MiB
-	executionTimeLimit = 2 * time.Second
+	MaxRequests          = 64
+	MaxArgumentsBytes    = 100_000
+	MaxOutputBytes       = 32 << 10
+	MaxOutputBlocks      = 128
+	MaxStateBytes        = 16 << 10
+	MaxCodeBytes         = 32 << 10
+	MaxBridgeResultBytes = 256 << 10 // Must match MAX_RESULT_BYTES in guest/bridge.c.
+	maxInputBytes        = 512 << 10
+	maxHistoryBytes      = 4 << 20
+	wasmMemoryPages      = 512 // 32 MiB
+	executionTimeLimit   = 2 * time.Second
 )
 
 //go:embed guest/quickjs.wasm
@@ -69,6 +71,67 @@ type Result struct {
 	State   map[string]json.RawMessage
 	Error   string
 }
+
+// Limits configures resource bounds for RunLive. Zero fields fall back to the
+// package defaults.
+type Limits struct {
+	MaxRequests       int
+	MaxArgumentsBytes int
+	MaxOutputBytes    int
+	MaxOutputBlocks   int
+	MaxStateBytes     int
+	MaxCodeBytes      int
+	MaxInputBytes     int
+	StepTimeout       time.Duration
+}
+
+func (l Limits) withDefaults() Limits {
+	if l.MaxRequests <= 0 {
+		l.MaxRequests = MaxRequests
+	}
+	if l.MaxArgumentsBytes <= 0 {
+		l.MaxArgumentsBytes = MaxArgumentsBytes
+	}
+	if l.MaxOutputBytes <= 0 {
+		l.MaxOutputBytes = MaxOutputBytes
+	}
+	if l.MaxOutputBlocks <= 0 {
+		l.MaxOutputBlocks = MaxOutputBlocks
+	}
+	if l.MaxStateBytes <= 0 {
+		l.MaxStateBytes = MaxStateBytes
+	}
+	if l.MaxCodeBytes <= 0 {
+		l.MaxCodeBytes = MaxCodeBytes
+	}
+	if l.MaxInputBytes <= 0 {
+		l.MaxInputBytes = maxInputBytes
+	}
+	if l.StepTimeout <= 0 {
+		l.StepTimeout = executionTimeLimit
+	}
+	return l
+}
+
+// LiveInput configures a single stateful RunLive execution.
+type LiveInput struct {
+	Code      string
+	Tools     []Tool
+	State     map[string]json.RawMessage
+	StartedAt time.Time
+	Limits    Limits
+}
+
+// LiveResult is the final outcome of a RunLive script execution.
+type LiveResult struct {
+	Output json.RawMessage
+	State  map[string]json.RawMessage
+	Error  string
+}
+
+// ToolExecutor runs a batch of pending tool calls queued by a live Codemode
+// script and returns one Receipt per Request in the same order.
+type ToolExecutor func(context.Context, []Request) ([]Receipt, error)
 
 var loadEngine = sync.OnceValues(func() (engine, error) {
 	ctx := context.Background()
@@ -123,17 +186,27 @@ func validateImports(compiled wazero.CompiledModule) error {
 type requestQueueKey struct{}
 
 type requestQueue struct {
-	allowed  map[string]bool
-	requests []Request
-	err      string
+	allowed           map[string]bool
+	maxRequests       int
+	maxArgumentsBytes int
+	requests          []Request
+	err               string
 }
 
 func enqueueTool(ctx context.Context, module api.Module, namePointer, nameSize, argsPointer, argsSize uint32) int32 {
 	queue := ctx.Value(requestQueueKey{}).(*requestQueue)
+	maxReqs := queue.maxRequests
+	if maxReqs <= 0 {
+		maxReqs = MaxRequests
+	}
+	maxArgs := queue.maxArgumentsBytes
+	if maxArgs <= 0 {
+		maxArgs = MaxArgumentsBytes
+	}
 	switch {
-	case len(queue.requests) >= MaxRequests:
+	case len(queue.requests) >= maxReqs:
 		queue.err = "Codemode tool call limit exceeded"
-	case nameSize > 128 || argsSize > MaxArgumentsBytes:
+	case nameSize > 128 || int(argsSize) > maxArgs:
 		queue.err = "Codemode tool name or arguments exceed the size limit"
 	default:
 		name, nameOK := module.Memory().Read(namePointer, nameSize)
@@ -157,6 +230,10 @@ func enqueueTool(ctx context.Context, module api.Module, namePointer, nameSize, 
 type vm struct {
 	ctx    context.Context
 	module api.Module
+}
+
+func (v vm) withContext(ctx context.Context) vm {
+	return vm{ctx: ctx, module: v.module}
 }
 
 func (v vm) call(name string, args ...uint64) (uint64, error) {
@@ -254,7 +331,11 @@ func Run(ctx context.Context, in Input) (Result, error) {
 	}
 	vmContext, cancel := context.WithTimeout(ctx, executionTimeLimit)
 	defer cancel()
-	queue := &requestQueue{allowed: make(map[string]bool, len(in.Tools))}
+	queue := &requestQueue{
+		allowed:           make(map[string]bool, len(in.Tools)),
+		maxRequests:       MaxRequests,
+		maxArgumentsBytes: MaxArgumentsBytes,
+	}
 	for _, tool := range in.Tools {
 		queue.allowed[tool.Name] = true
 	}
@@ -282,6 +363,178 @@ func Run(ctx context.Context, in Input) (Result, error) {
 		return Result{Error: runErr.Error()}, nil
 	}
 	return result, nil
+}
+
+// RunLive runs a Codemode script in a single stateful QuickJS-NG WASM instance,
+// invoking exec whenever the script awaits one or more tool calls. The JS CPU
+// step timer pauses while Go executes tools, so slow local commands or human
+// approvals do not trip the guest execution deadline.
+func RunLive(ctx context.Context, in LiveInput, exec ToolExecutor) (LiveResult, error) {
+	limits := in.Limits.withDefaults()
+	settings, err := encodeLiveInput(in, limits)
+	if err != nil {
+		return LiveResult{Error: err.Error()}, nil
+	}
+	engine, err := loadEngine()
+	if err != nil {
+		return LiveResult{}, fmt.Errorf("initialize Codemode WebAssembly engine: %w", err)
+	}
+	queue := &requestQueue{
+		allowed:           make(map[string]bool, len(in.Tools)),
+		maxRequests:       limits.MaxRequests,
+		maxArgumentsBytes: limits.MaxArgumentsBytes,
+	}
+	for _, tool := range in.Tools {
+		queue.allowed[tool.Name] = true
+	}
+	baseCtx := context.WithValue(ctx, requestQueueKey{}, queue)
+	stamp := in.StartedAt
+	if stamp.IsZero() {
+		stamp = time.Now().UTC()
+	}
+	moduleConfig := wazero.NewModuleConfig().WithName("").WithStartFunctions("_initialize").
+		WithWalltime(func() (int64, int32) { return stamp.Unix(), int32(stamp.Nanosecond()) }, 1_000_000).
+		WithRandSource(rand.New(rand.NewSource(stamp.UnixNano())))
+	module, err := engine.runtime.InstantiateModule(baseCtx, engine.compiled, moduleConfig)
+	if err != nil {
+		return LiveResult{}, fmt.Errorf("instantiate Codemode WebAssembly module: %w", err)
+	}
+	defer func() { _ = module.Close(context.Background()) }()
+
+	runStep := func(fn func(v vm) error) error {
+		stepCtx, cancel := context.WithTimeout(baseCtx, limits.StepTimeout)
+		defer cancel()
+		err := fn(vm{ctx: stepCtx, module: module})
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if stepCtx.Err() != nil {
+			return errStepDeadline
+		}
+		return err
+	}
+
+	if err := runStep(func(v vm) error {
+		if err := v.send("initialize", bootstrap); err != nil {
+			return err
+		}
+		return v.send("invoke", settings, startOperation)
+	}); err != nil {
+		return liveError(ctx, err)
+	}
+
+	seen := 0
+	for {
+		var state snapshot
+		if err := runStep(func(v vm) error {
+			if err := v.send("invoke", nil, snapshotOperation); err != nil {
+				return err
+			}
+			raw, err := v.result()
+			if err != nil {
+				return err
+			}
+			if err := json.Unmarshal(raw, &state); err != nil {
+				return fmt.Errorf("decode Codemode result: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return liveError(ctx, err)
+		}
+		if len(state.Output) > limits.MaxOutputBytes {
+			return LiveResult{Error: "Codemode output limit exceeded"}, nil
+		}
+		staged, err := json.Marshal(state.State)
+		if err != nil || len(staged) > limits.MaxStateBytes {
+			return LiveResult{Error: "Codemode store limit exceeded"}, nil
+		}
+		if queue.err != "" {
+			return LiveResult{Output: state.Output, Error: queue.err}, nil
+		}
+		switch state.Status {
+		case "completed":
+			return LiveResult{Output: state.Output, State: state.State}, nil
+		case "failed":
+			return LiveResult{Output: state.Output, Error: state.Error}, nil
+		case "running":
+			if seen == len(queue.requests) {
+				return LiveResult{Output: state.Output, Error: "Codemode blocked on a promise without a pending tool call"}, nil
+			}
+			if exec == nil {
+				return LiveResult{Output: state.Output, Error: "Codemode tool executor is not configured"}, nil
+			}
+			pending := append([]Request(nil), queue.requests[seen:]...)
+			receipts, err := exec(ctx, pending)
+			if err != nil {
+				return LiveResult{Output: state.Output}, err
+			}
+			if len(receipts) != len(pending) {
+				return LiveResult{Output: state.Output, Error: "Codemode tool executor returned mismatched receipt count"}, nil
+			}
+			records := make([]settlement, len(receipts))
+			for i, receipt := range receipts {
+				res := receipt.Result
+				if len(bytes.TrimSpace(res)) == 0 {
+					res = json.RawMessage("null")
+				}
+				records[i] = settlement{ID: seen + i, Result: res, Failed: receipt.Failed}
+			}
+			seen += len(receipts)
+			data, err := json.Marshal(records)
+			if err != nil {
+				return LiveResult{Output: state.Output, Error: fmt.Sprintf("encode Codemode tool receipts: %v", err)}, nil
+			}
+			if err := runStep(func(v vm) error {
+				return v.send("invoke", data, settleOperation)
+			}); err != nil {
+				return liveError(ctx, err)
+			}
+		default:
+			return LiveResult{Error: "invalid Codemode guest status"}, nil
+		}
+	}
+}
+
+var errStepDeadline = errors.New("Codemode script execution deadline exceeded")
+
+func liveError(ctx context.Context, err error) (LiveResult, error) {
+	if ctx.Err() != nil {
+		return LiveResult{}, ctx.Err()
+	}
+	if errors.Is(err, errStepDeadline) {
+		return LiveResult{Error: errStepDeadline.Error()}, nil
+	}
+	return LiveResult{Error: err.Error()}, nil
+}
+
+func encodeLiveInput(in LiveInput, limits Limits) ([]byte, error) {
+	if len(in.Code) > limits.MaxCodeBytes {
+		return nil, errors.New("Codemode script exceeds the size limit")
+	}
+	// Reserve 16 KiB for the serialized JSON snapshot envelope around output + state.
+	if limits.MaxOutputBytes+limits.MaxStateBytes > MaxBridgeResultBytes-(16<<10) {
+		return nil, errors.New("Codemode output and state limits exceed WASM bridge capacity")
+	}
+	state, err := json.Marshal(in.State)
+	if err != nil || len(state) > limits.MaxStateBytes {
+		return nil, errors.New("invalid or oversized Codemode session state")
+	}
+	catalog := in.Tools
+	if catalog == nil {
+		catalog = []Tool{}
+	}
+	settings, err := json.Marshal(struct {
+		Code        string          `json:"code"`
+		Tools       []Tool          `json:"tools"`
+		State       json.RawMessage `json:"state"`
+		OutputLimit int             `json:"output_limit"`
+		StateLimit  int             `json:"state_limit"`
+		MaxBlocks   int             `json:"max_blocks"`
+	}{in.Code, catalog, state, limits.MaxOutputBytes, limits.MaxStateBytes, limits.MaxOutputBlocks})
+	if err != nil || len(settings) > limits.MaxInputBytes {
+		return nil, errors.New("invalid or oversized Codemode input")
+	}
+	return settings, nil
 }
 
 func encodeInput(in Input) ([]byte, error) {

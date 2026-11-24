@@ -12,19 +12,19 @@ import (
 )
 
 const validModels = `[routes]
-chat = "chosen-name"
-background = "chosen-name"
-analysis = "chosen-name"
+chat = "primary/configured-model"
+background = "primary/configured-model"
+analysis = "primary/configured-model"
 
-[profiles.chosen-name]
+[providers.primary]
 adapter = "openai_chat_completions"
 base_url = "https://example.invalid/v1/"
-model = "configured-model"
 api_key_env = "MAIN_MODEL_KEY"
-capabilities = ["tools", "vision", "structured_output"]
-context_window_tokens = 128000
-max_output_tokens = 8192
-timeout = "120s"
+discover_models = true
+default_capabilities = ["tools", "vision", "structured_output"]
+default_context_window_tokens = 128000
+default_max_output_tokens = 8192
+default_timeout = "120s"
 `
 
 func modelFile(t testing.TB, content string) string {
@@ -43,16 +43,26 @@ func modelEnv(key string) string {
 	return ""
 }
 
-func TestModelProfilesLoadArbitraryNamesOptionsAndPricing(t *testing.T) {
+func TestModelProvidersLoadDefaultsOverridesOptionsAndPricing(t *testing.T) {
 	content := validModels + `
-[profiles.chosen-name.options]
+[providers.primary.default_options]
+reasoning_effort = "medium"
+output_token_field = "max_completion_tokens"
+
+[models."primary/configured-model"]
+display_name = "Configured Model"
+context_window_tokens = 200000
+max_output_tokens = 16384
+supported_reasoning_efforts = ["low", "medium", "high"]
+
+[models."primary/configured-model".options]
 reasoning_effort = "high"
 thinking = "enabled"
 include_reasoning_content = true
 session_header = "x-opencode-session"
 output_token_field = "max_completion_tokens"
 
-[profiles.chosen-name.pricing]
+[models."primary/configured-model".pricing]
 input_per_million = 3.0
 cached_input_per_million = 0.3
 output_per_million = 12.0
@@ -61,12 +71,15 @@ output_per_million = 12.0
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := models.Profiles[models.Routes[domain.RoleAnalysis]]
-	if p.Model != "configured-model" || p.BaseURL != "https://example.invalid/v1" || p.APIKey != "private-model-token" || p.Timeout != 2*time.Minute || p.ContextWindowTokens != 128000 || p.MaxOutputTokens != 8192 {
-		t.Fatal("profile settings were not retained")
+	if models.Routes[domain.RoleCoding] != "" {
+		t.Fatalf("unset coding route should not be synthesized into routes map: %+v", models.Routes)
 	}
-	if p.Options.ReasoningEffort != "high" || p.Options.Thinking != "enabled" || !p.Options.IncludeReasoningContent || p.Options.SessionHeader != "x-opencode-session" || p.Options.OutputTokenField != "max_completion_tokens" || p.Pricing == nil || p.Pricing.CachedInputPerMillion != 0.3 {
-		t.Fatal("profile options or pricing were not retained")
+	p := models.Profiles[models.Routes[domain.RoleAnalysis]]
+	if p.Provider != "primary" || p.Model != "configured-model" || p.DisplayName != "Configured Model" || p.BaseURL != "https://example.invalid/v1" || p.APIKey != "private-model-token" || p.Timeout != 2*time.Minute || p.ContextWindowTokens != 200000 || p.MaxOutputTokens != 16384 {
+		t.Fatalf("profile settings were not retained: %+v", p)
+	}
+	if p.Options.ReasoningEffort != "high" || p.Options.Thinking != "enabled" || !p.Options.IncludeReasoningContent || p.Options.SessionHeader != "x-opencode-session" || p.Options.OutputTokenField != "max_completion_tokens" || p.Pricing == nil || p.Pricing.CachedInputPerMillion != 0.3 || len(p.SupportedReasoningEfforts) != 3 {
+		t.Fatalf("profile options or pricing were not retained: %+v", p)
 	}
 	raw, err := json.Marshal(models)
 	if err != nil || strings.Contains(string(raw), "private-model-token") {
@@ -74,38 +87,38 @@ output_per_million = 12.0
 	}
 }
 
-func TestModelRolesCanSelectDifferentConfiguredProfiles(t *testing.T) {
-	content := strings.Replace(validModels, `analysis = "chosen-name"`, `analysis = "other-name"`, 1)
-	content += "\n[profiles.other-name]\n" + strings.Replace(strings.SplitN(validModels, "[profiles.chosen-name]", 2)[1], `model = "configured-model"`, `model = "other-model"`, 1)
+func TestModelRolesCanSelectDifferentModelsAndCodingDefault(t *testing.T) {
+	content := strings.Replace(validModels, `analysis = "primary/configured-model"`, "analysis = \"primary/other-model\"\ncoding = \"primary/coding-model\"", 1)
 	models, err := loadModelProfiles(modelFile(t, content), modelEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if models.Routes[domain.RoleChat] != "chosen-name" || models.Profiles[models.Routes[domain.RoleAnalysis]].Model != "other-model" {
-		t.Fatal("role-specific profile selection lost")
+	if models.Routes[domain.RoleChat] != "primary/configured-model" ||
+		models.Profiles[models.Routes[domain.RoleAnalysis]].Model != "other-model" ||
+		models.Profiles[models.Routes[domain.RoleCoding]].Model != "coding-model" {
+		t.Fatalf("role-specific model selection lost: %+v", models.Routes)
 	}
 }
 
-func TestModelProfilesRejectInvalidConfigurationWithoutEchoingValues(t *testing.T) {
+func TestModelProvidersRejectInvalidConfigurationWithoutEchoingValues(t *testing.T) {
 	cases := map[string]string{
-		"conflicting model case": strings.Replace(validModels, `model = "configured-model"`, "model = \"configured-model\"\nMODEL = \"different-model\"", 1),
-		"uppercase table":        strings.Replace(validModels, "[profiles.", "[PROFILES.", 1),
-		"mixed option case":      validModels + "[profiles.chosen-name.options]\nReasoning_Effort = \"high\"\n",
-
+		"uppercase table":          strings.Replace(validModels, "[providers.", "[PROVIDERS.", 1),
+		"mixed option case":        validModels + "[providers.primary.default_options]\nReasoning_Effort = \"high\"\n",
+		"legacy profiles table":    validModels + "[profiles.legacy]\nmodel = \"x\"\n",
 		"syntax":                   validModels + "private-model-token = [\n",
 		"unknown field":            validModels + "private-model-token = true\n",
-		"unknown option":           validModels + "[profiles.chosen-name.options]\nprivate-model-token = true\n",
+		"unknown option":           validModels + "[providers.primary.default_options]\nprivate-model-token = true\n",
 		"unknown role":             strings.Replace(validModels, "chat =", "private-model-token =", 1),
 		"default role":             strings.Replace(validModels, "chat =", "default =", 1),
-		"missing role":             strings.Replace(validModels, "background = \"chosen-name\"\n", "", 1),
-		"undefined profile":        strings.Replace(validModels, "chat = \"chosen-name\"", "chat = \"private-model-token\"", 1),
-		"fallback list":            strings.Replace(validModels, "chat = \"chosen-name\"", "chat = [\"chosen-name\"]", 1),
-		"empty profile name":       strings.ReplaceAll(validModels, "chosen-name", ""),
+		"missing role":             strings.Replace(validModels, "background = \"primary/configured-model\"\n", "", 1),
+		"undefined provider":       strings.Replace(validModels, "chat = \"primary/configured-model\"", "chat = \"private-model-token/m\"", 1),
+		"missing slash in route":   strings.Replace(validModels, "chat = \"primary/configured-model\"", "chat = \"private-model-token\"", 1),
+		"fallback list":            strings.Replace(validModels, "chat = \"primary/configured-model\"", "chat = [\"primary/configured-model\"]", 1),
 		"adapter":                  strings.Replace(validModels, "openai_chat_completions", "private-model-token", 1),
 		"url scheme":               strings.Replace(validModels, "https://example.invalid/v1/", "file:///private-model-token", 1),
 		"url credentials":          strings.Replace(validModels, "https://example.invalid/v1/", "https://user:private-model-token@example.invalid/v1", 1),
 		"url query":                strings.Replace(validModels, "https://example.invalid/v1/", "https://example.invalid/v1?private-model-token", 1),
-		"empty model":              strings.Replace(validModels, "configured-model", "", 1),
+		"empty model in route":     strings.Replace(validModels, "primary/configured-model", "primary/", 1),
 		"invalid env name":         strings.Replace(validModels, "MAIN_MODEL_KEY", "private-model-token", 1),
 		"missing key":              strings.Replace(validModels, "MAIN_MODEL_KEY", "UNSET_KEY", 1),
 		"unknown capability":       strings.Replace(validModels, `"vision"`, `"private-model-token"`, 1),
@@ -118,14 +131,16 @@ func TestModelProfilesRejectInvalidConfigurationWithoutEchoingValues(t *testing.
 		"timeout":                  strings.Replace(validModels, "120s", "private-model-token", 1),
 		"negative timeout":         strings.Replace(validModels, "120s", "-1s", 1),
 		"timeout exceeds activity": strings.Replace(validModels, "120s", "150.001s", 1),
-		"reasoning":                validModels + "[profiles.chosen-name.options]\nreasoning_effort = \"private-model-token\"\n",
-		"thinking":                 validModels + "[profiles.chosen-name.options]\nthinking = \"private-model-token\"\n",
-		"session header":           validModels + "[profiles.chosen-name.options]\nsession_header = \"Authorization\"\n",
-		"output field":             validModels + "[profiles.chosen-name.options]\noutput_token_field = \"private-model-token\"\n",
-		"missing pricing field":    validModels + "[profiles.chosen-name.pricing]\ninput_per_million = 1.0\noutput_per_million = 2.0\n",
-		"negative price":           validModels + "[profiles.chosen-name.pricing]\ninput_per_million = -1.0\ncached_input_per_million = 0.0\noutput_per_million = 2.0\n",
-		"infinite price":           validModels + "[profiles.chosen-name.pricing]\ninput_per_million = inf\ncached_input_per_million = 0.0\noutput_per_million = 2.0\n",
-		"nan price":                validModels + "[profiles.chosen-name.pricing]\ninput_per_million = nan\ncached_input_per_million = 0.0\noutput_per_million = 2.0\n",
+		"reasoning":                validModels + "[providers.primary.default_options]\nreasoning_effort = \"private-model-token\"\n",
+		"thinking":                 validModels + "[providers.primary.default_options]\nthinking = \"private-model-token\"\n",
+		"session header":           validModels + "[providers.primary.default_options]\nsession_header = \"Authorization\"\n",
+		"output field":             validModels + "[providers.primary.default_options]\noutput_token_field = \"private-model-token\"\n",
+		"invalid include glob":     validModels + "include_models = [\"[private-model-token\"]\n",
+		"missing pricing field":    validModels + "[providers.primary.default_pricing]\ninput_per_million = 1.0\noutput_per_million = 2.0\n",
+		"negative price":           validModels + "[providers.primary.default_pricing]\ninput_per_million = -1.0\ncached_input_per_million = 0.0\noutput_per_million = 2.0\n",
+		"infinite price":           validModels + "[providers.primary.default_pricing]\ninput_per_million = inf\ncached_input_per_million = 0.0\noutput_per_million = 2.0\n",
+		"nan price":                validModels + "[providers.primary.default_pricing]\ninput_per_million = nan\ncached_input_per_million = 0.0\noutput_per_million = 2.0\n",
+		"bad model override key":   validModels + "[models.private-model-token]\ncontext_window_tokens = 10000\n",
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -141,15 +156,15 @@ func TestModelProfilesRejectInvalidConfigurationWithoutEchoingValues(t *testing.
 }
 
 func TestModelFileBoundsAndEnvironmentAPI(t *testing.T) {
-	for _, path := range []string{"/nonexistent/private-model-token", t.TempDir(), modelFile(t, strings.Repeat("#", maxModelConfigBytes+1))} {
-		_, err := loadModelProfiles(path, modelEnv)
+	for _, p := range []string{"/nonexistent/private-model-token", t.TempDir(), modelFile(t, strings.Repeat("#", maxModelConfigBytes+1))} {
+		_, err := loadModelProfiles(p, modelEnv)
 		if err == nil || strings.Contains(err.Error(), "private-model-token") {
 			t.Fatal("unreadable or oversized config accepted, or filename echoed")
 		}
 	}
 	t.Setenv("MAIN_MODEL_KEY", "private-model-token")
 	models, err := LoadModelProfiles(modelFile(t, validModels))
-	if err != nil || models.Profiles["chosen-name"].APIKey != "private-model-token" || models.Profiles["chosen-name"].Options.OutputTokenField != "max_tokens" {
+	if err != nil || models.Profiles["primary/configured-model"].APIKey != "private-model-token" || models.Profiles["primary/configured-model"].Options.OutputTokenField != "max_tokens" {
 		t.Fatal("exported environment loader failed", err)
 	}
 }
@@ -168,38 +183,58 @@ func TestLegacyLLMSettingsDoNotReplaceTOML(t *testing.T) {
 
 func TestModelTimeoutFitsEnclosingActivity(t *testing.T) {
 	models, err := loadModelProfiles(modelFile(t, strings.Replace(validModels, "120s", "150s", 1)), modelEnv)
-	if err != nil || models.Profiles["chosen-name"].Timeout != domain.MaxModelTimeout {
+	if err != nil || models.Profiles["primary/configured-model"].Timeout != domain.MaxModelTimeout {
 		t.Fatal("maximum model timeout should retain checkpoint headroom", err)
 	}
 }
 
-const subscriptionProfile = `
-[profiles.subscription]
+func TestModelOverrideOptionsMergeWithProviderDefaults(t *testing.T) {
+	cfg := validModels + `
+[providers.primary.default_options]
+output_token_field = "max_completion_tokens"
+include_reasoning_content = true
+reasoning_effort = "medium"
+
+[models."primary/configured-model".options]
+reasoning_effort = "high"
+`
+	models, err := loadModelProfiles(modelFile(t, cfg), modelEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := models.Profiles["primary/configured-model"].Options
+	if opts.ReasoningEffort != "high" || opts.OutputTokenField != "max_completion_tokens" || !opts.IncludeReasoningContent {
+		t.Fatalf("model options override clobbered inherited provider defaults: %+v", opts)
+	}
+}
+
+const subscriptionProvider = `
+[providers.chatgpt]
 adapter = "openai_chatgpt"
-model = "chatgpt-chat-model"
-capabilities = ["tools", "vision", "structured_output"]
-context_window_tokens = 128000
-max_output_tokens = 8192
-timeout = "90s"
+discover_models = true
+default_capabilities = ["tools", "vision", "structured_output"]
+default_context_window_tokens = 128000
+default_max_output_tokens = 8192
+default_timeout = "90s"
 `
 
 func mixedSubscriptionModels() string {
-	content := strings.Replace(validModels, `chat = "chosen-name"`, `chat = "subscription"`, 1)
-	content = strings.Replace(content, `analysis = "chosen-name"`, `analysis = "analysis-plan"`, 1)
-	return content + subscriptionProfile + strings.ReplaceAll(strings.Replace(subscriptionProfile, "chatgpt-chat-model", "chatgpt-analysis-model", 1), "profiles.subscription", "profiles.analysis-plan")
+	content := strings.Replace(validModels, `chat = "primary/configured-model"`, `chat = "chatgpt/chatgpt-chat-model"`, 1)
+	content = strings.Replace(content, `analysis = "primary/configured-model"`, `analysis = "chatgpt/chatgpt-analysis-model"`, 1)
+	return content + subscriptionProvider
 }
 
-func TestMixedSubscriptionAndAPIProfiles(t *testing.T) {
+func TestMixedSubscriptionAndAPIProviders(t *testing.T) {
 	var lookups []string
 	get := func(key string) string { lookups = append(lookups, key); return modelEnv(key) }
 	models, err := loadModelProfiles(modelFile(t, mixedSubscriptionModels()), get)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !models.HasSubscription() || models.Routes[domain.RoleChat] != "subscription" || models.Routes[domain.RoleBackground] != "chosen-name" || models.Routes[domain.RoleAnalysis] != "analysis-plan" {
+	if !models.HasSubscription() || models.Routes[domain.RoleChat] != "chatgpt/chatgpt-chat-model" || models.Routes[domain.RoleBackground] != "primary/configured-model" || models.Routes[domain.RoleAnalysis] != "chatgpt/chatgpt-analysis-model" {
 		t.Fatal("mixed role configuration lost")
 	}
-	for _, name := range []string{"subscription", "analysis-plan"} {
+	for _, name := range []string{"chatgpt/chatgpt-chat-model", "chatgpt/chatgpt-analysis-model"} {
 		p := models.Profiles[name]
 		if p.APIKey != "" || p.APIKeyEnv != "" || p.BaseURL != "" || p.Options != (domain.ModelOptions{}) || p.Timeout != 90*time.Second || p.Pricing != nil {
 			t.Fatal("subscription profile acquired API-only settings")
@@ -208,23 +243,23 @@ func TestMixedSubscriptionAndAPIProfiles(t *testing.T) {
 	if len(lookups) != 1 || lookups[0] != "MAIN_MODEL_KEY" {
 		t.Fatalf("subscription adapter read credentials from API environment: %v", lookups)
 	}
-	if models.Profiles["subscription"].Model == models.Profiles["analysis-plan"].Model {
+	if models.Profiles["chatgpt/chatgpt-chat-model"].Model == models.Profiles["chatgpt/chatgpt-analysis-model"].Model {
 		t.Fatal("independent subscription models lost")
 	}
 }
 
-func TestModelProfilesResolveHeadersForBothAdapters(t *testing.T) {
+func TestModelProvidersResolveHeadersForBothAdapters(t *testing.T) {
 	content := mixedSubscriptionModels()
-	content = strings.Replace(content, "[profiles.subscription]\nadapter", `[profiles.chosen-name.headers_env]
+	content = strings.Replace(content, "[providers.chatgpt]\nadapter", `[providers.primary.headers_env]
 "x-proxy-key" = "API_PROXY_KEY"
 
-[profiles.subscription]
+[providers.chatgpt]
 base_url = "https://proxy.example.invalid/v1/"
 adapter`, 1)
-	content = strings.Replace(content, "[profiles.analysis-plan]", `[profiles.subscription.headers_env]
+	content += `
+[providers.chatgpt.headers_env]
 "X-Proxy-Key" = "PLAN_PROXY_KEY"
-
-[profiles.analysis-plan]`, 1)
+`
 	get := func(key string) string {
 		switch key {
 		case "API_PROXY_KEY":
@@ -241,14 +276,10 @@ adapter`, 1)
 	}
 	plan := models.SubscriptionCatalogProfile()
 	if plan.Model != "chatgpt-chat-model" || plan.BaseURL != "https://proxy.example.invalid/v1" || plan.Headers["X-Proxy-Key"] != "private-plan-proxy-key" {
-		t.Fatal("wrong subscription catalog transport")
+		t.Fatalf("wrong subscription catalog transport: %+v", plan)
 	}
-	if models.Profiles["chosen-name"].Headers["X-Proxy-Key"] != "private-api-proxy-key" || len(models.Profiles["analysis-plan"].Headers) != 0 {
-		t.Fatal("headers not isolated to their profiles")
-	}
-	models.Routes[domain.RoleChat] = "chosen-name"
-	if profile := models.SubscriptionCatalogProfile(); profile.Model != "chatgpt-analysis-model" {
-		t.Fatal("catalog did not select the analysis subscription when chat uses the API")
+	if models.Profiles["primary/configured-model"].Headers["X-Proxy-Key"] != "private-api-proxy-key" {
+		t.Fatal("headers not isolated to their providers")
 	}
 	encoded, err := json.Marshal(models)
 	if err != nil || strings.Contains(string(encoded), "private-api-proxy-key") || strings.Contains(string(encoded), "private-plan-proxy-key") {
@@ -256,8 +287,8 @@ adapter`, 1)
 	}
 }
 
-func TestModelProfilesRejectInvalidHeadersWithoutEchoingValues(t *testing.T) {
-	const apiHeaders = "\n[profiles.chosen-name.headers_env]\n"
+func TestModelProvidersRejectInvalidHeadersWithoutEchoingValues(t *testing.T) {
+	const apiHeaders = "\n[providers.primary.headers_env]\n"
 	cases := map[string]string{
 		"invalid name":    validModels + apiHeaders + `"private model token" = "MAIN_MODEL_KEY"`,
 		"literal value":   validModels + apiHeaders + `"X-Proxy-Key" = "private-model-token"`,
@@ -266,8 +297,8 @@ func TestModelProfilesRejectInvalidHeadersWithoutEchoingValues(t *testing.T) {
 		"duplicate name":  validModels + apiHeaders + "\"X-Proxy-Key\" = \"MAIN_MODEL_KEY\"\n\"x-proxy-key\" = \"MAIN_MODEL_KEY\"",
 		"authentication":  validModels + apiHeaders + `"authorization" = "MAIN_MODEL_KEY"`,
 		"request framing": validModels + apiHeaders + `"transfer-encoding" = "MAIN_MODEL_KEY"`,
-		"session header":  validModels + "\n[profiles.chosen-name.options]\nsession_header = \"x-opencode-session\"\n" + apiHeaders + `"X-OpenCode-Session" = "MAIN_MODEL_KEY"`,
-		"implicit URL":    validModels + subscriptionProfile + "\n[profiles.subscription.headers_env]\n" + `"X-Proxy-Key" = "MAIN_MODEL_KEY"`,
+		"session header":  validModels + "\n[providers.primary.default_options]\nsession_header = \"x-opencode-session\"\n" + apiHeaders + `"X-OpenCode-Session" = "MAIN_MODEL_KEY"`,
+		"implicit URL":    validModels + subscriptionProvider + "\n[providers.chatgpt.headers_env]\n" + `"X-Proxy-Key" = "MAIN_MODEL_KEY"`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -284,20 +315,20 @@ func TestModelProfilesRejectInvalidHeadersWithoutEchoingValues(t *testing.T) {
 	}
 }
 
-func TestSubscriptionProfilesRejectIncompatibleSettings(t *testing.T) {
+func TestSubscriptionProvidersRejectIncompatibleSettings(t *testing.T) {
 	for name, extra := range map[string]string{
 		"invalid endpoint":     `base_url = "https://private-sentinel.invalid/v1?token=PRIVATE_SENTINEL"`,
 		"empty fragment":       `base_url = "https://private-sentinel.invalid/v1#"`,
 		"API credential":       `api_key_env = "PRIVATE_SENTINEL"`,
 		"empty API credential": `api_key_env = ""`,
-		"empty API options":    "[profiles.subscription.options]",
-		"false API option":     "[profiles.subscription.options]\ninclude_reasoning_content = false",
-		"empty API pricing":    "[profiles.subscription.pricing]",
-		"API option":           "[profiles.subscription.options]\nreasoning_effort = \"high\"",
-		"API pricing":          "[profiles.subscription.pricing]\ninput_per_million = 1\ncached_input_per_million = 0\noutput_per_million = 2",
+		"empty API options":    "[providers.chatgpt.default_options]",
+		"false API option":     "[providers.chatgpt.default_options]\ninclude_reasoning_content = false",
+		"empty API pricing":    "[providers.chatgpt.default_pricing]",
+		"API option":           "[providers.chatgpt.default_options]\nreasoning_effort = \"high\"",
+		"API pricing":          "[providers.chatgpt.default_pricing]\ninput_per_million = 1\ncached_input_per_million = 0\noutput_per_million = 2",
 	} {
 		t.Run(name, func(t *testing.T) {
-			content := validModels + subscriptionProfile + "\n" + extra + "\n"
+			content := validModels + subscriptionProvider + "\n" + extra + "\n"
 			_, err := loadModelProfiles(modelFile(t, content), modelEnv)
 			if err == nil || strings.Contains(err.Error(), "private-sentinel") || strings.Contains(err.Error(), "PRIVATE_SENTINEL") {
 				t.Fatalf("invalid subscription settings accepted or echoed: %v", err)
@@ -313,9 +344,11 @@ func TestSubscriptionProfilesRejectIncompatibleSettings(t *testing.T) {
 }
 
 func TestSubscriptionOnlyRequiresNoAPISecretButMixedAPIStillDoes(t *testing.T) {
-	allPlan := strings.ReplaceAll(mixedSubscriptionModels(), `background = "chosen-name"`, `background = "subscription"`)
-	// Unused API profiles are validated too; remove it from this all-plan file.
-	allPlan = strings.SplitN(allPlan, "[profiles.chosen-name]", 2)[0] + subscriptionProfile + strings.ReplaceAll(subscriptionProfile, "profiles.subscription", "profiles.analysis-plan")
+	allPlan := `[routes]
+chat = "chatgpt/chatgpt-chat-model"
+background = "chatgpt/chatgpt-chat-model"
+analysis = "chatgpt/chatgpt-analysis-model"
+` + subscriptionProvider
 	if _, err := loadModelProfiles(modelFile(t, allPlan), func(string) string { t.Fatal("plan-only config read API credentials"); return "" }); err != nil {
 		t.Fatal(err)
 	}

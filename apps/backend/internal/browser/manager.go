@@ -6,11 +6,14 @@ import (
 	"errors"
 	"log/slog"
 	"openalbert/apps/backend/internal/telemetry"
+	"strings"
 	"sync"
 	"time"
 
 	"openalbert/apps/backend/internal/domain"
 )
+
+const defaultEphemeralBrowserTTL = 10 * time.Minute
 
 type driver interface {
 	Execute(context.Context, domain.BrowserRequest) (domain.BrowserResult, error)
@@ -19,6 +22,7 @@ type driver interface {
 type factory func(context.Context) (driver, error)
 type entry struct {
 	createdAt time.Time
+	lastUsed  time.Time
 	owner     domain.BrowserOwner
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -41,6 +45,7 @@ type Manager struct {
 	closed          bool
 	proxy           *publicProxy
 	timeout         time.Duration
+	ephemeralTTL    time.Duration
 }
 
 func newManager(parent context.Context, limit, reserved int, start factory) (*Manager, error) {
@@ -48,7 +53,7 @@ func newManager(parent context.Context, limit, reserved int, start factory) (*Ma
 		return nil, errors.New("invalid browser capacity")
 	}
 	ctx, cancel := context.WithCancel(parent)
-	return &Manager{entries: map[string]*entry{}, limit: limit, reserved: reserved, start: start, ctx: ctx, cancel: cancel, timeout: 45 * time.Second}, nil
+	return &Manager{entries: map[string]*entry{}, limit: limit, reserved: reserved, start: start, ctx: ctx, cancel: cancel, timeout: 45 * time.Second, ephemeralTTL: defaultEphemeralBrowserTTL}, nil
 }
 func (m *Manager) acquire(ctx context.Context, o domain.BrowserOwner, create bool) (*entry, bool, error) {
 	if o.SessionID == "" || o.ConversationID == "" {
@@ -68,6 +73,7 @@ func (m *Manager) acquire(ctx context.Context, o domain.BrowserOwner, create boo
 			m.mu.Unlock()
 			return nil, false, domain.ErrBrowserCapacity
 		}
+		e.lastUsed = time.Now()
 		m.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -91,7 +97,8 @@ func (m *Manager) acquire(ctx context.Context, o domain.BrowserOwner, create boo
 		return nil, false, domain.ErrBrowserCapacity
 	}
 	root, cancel := context.WithCancel(m.ctx)
-	e := &entry{createdAt: time.Now(), owner: o, ctx: root, cancel: cancel, ready: make(chan struct{}), gate: make(chan struct{}, 1), done: make(chan struct{})}
+	now := time.Now()
+	e := &entry{createdAt: now, lastUsed: now, owner: o, ctx: root, cancel: cancel, ready: make(chan struct{}), gate: make(chan struct{}, 1), done: make(chan struct{})}
 	m.entries[o.SessionID] = e
 	m.mu.Unlock()
 	stop := context.AfterFunc(ctx, cancel)
@@ -237,8 +244,17 @@ func (m *Manager) CloseSession(id string) {
 func (m *Manager) Reconcile(active map[string]bool, observedAt time.Time) {
 	m.mu.Lock()
 	var stale []*entry
+	ephemeralTTL := m.ephemeralTTL
+	if ephemeralTTL <= 0 {
+		ephemeralTTL = defaultEphemeralBrowserTTL
+	}
 	for id, e := range m.entries {
-		if !active[id] && !e.createdAt.After(observedAt) {
+		if strings.HasPrefix(id, "ephemeral-") {
+			if observedAt.Sub(e.lastUsed) >= ephemeralTTL {
+				stale = append(stale, e)
+				continue
+			}
+		} else if !active[id] && !e.createdAt.After(observedAt) {
 			stale = append(stale, e)
 			continue
 		}

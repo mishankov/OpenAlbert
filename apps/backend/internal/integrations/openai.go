@@ -1,12 +1,16 @@
 package integrations
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"maps"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,6 +31,14 @@ type OpenAIConfig struct {
 type OpenAI struct {
 	config OpenAIConfig
 	client *http.Client
+}
+
+// DiscoveredModel holds optional metadata parsed from GET /models responses.
+type DiscoveredModel struct {
+	ID                  string
+	DisplayName         string
+	ContextWindowTokens int
+	MaxOutputTokens     int
 }
 
 func NewOpenAI(c OpenAIConfig) (*OpenAI, error) {
@@ -73,7 +85,7 @@ type apiMessage struct {
 	ToolCallID       string        `json:"tool_call_id,omitempty"`
 }
 
-func (o *OpenAI) requestData(messages []domain.Message, tools []domain.Tool) ([]byte, error) {
+func (o *OpenAI) requestBody(messages []domain.Message, tools []domain.Tool, stream bool) (map[string]any, error) {
 	converted := make([]apiMessage, 0, len(messages))
 	for _, m := range messages {
 		a := apiMessage{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}
@@ -99,6 +111,10 @@ func (o *OpenAI) requestData(messages []domain.Message, tools []domain.Tool) ([]
 		converted = append(converted, a)
 	}
 	body := map[string]any{"model": o.config.Model, "messages": converted}
+	if stream {
+		body["stream"] = true
+		body["stream_options"] = map[string]bool{"include_usage": true}
+	}
 	if o.config.MaxOutputTokens > 0 {
 		body[o.config.Options.OutputTokenField] = o.config.MaxOutputTokens
 	}
@@ -121,11 +137,104 @@ func (o *OpenAI) requestData(messages []domain.Message, tools []domain.Tool) ([]
 		}
 		body["tools"] = defs
 	}
-	data, err := json.Marshal(body)
+	return body, nil
+}
+
+func (o *OpenAI) requestData(messages []domain.Message, tools []domain.Tool) ([]byte, error) {
+	body, err := o.requestBody(messages, tools, false)
 	if err != nil {
 		return nil, err
 	}
-	return data, nil
+	return json.Marshal(body)
+}
+
+func (o *OpenAI) sanitizeModel(model string) string {
+	if key := strings.TrimSpace(o.config.APIKey); key != "" && strings.Contains(model, key) {
+		return ""
+	}
+	for _, value := range o.config.Headers {
+		if value != "" && strings.Contains(model, value) {
+			return ""
+		}
+	}
+	return model
+}
+
+func (o *OpenAI) prepareRequest(ctx context.Context, method, endpoint string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, o.config.BaseURL+endpoint, body)
+	if err != nil {
+		return nil, errors.New("invalid model request")
+	}
+	for name, value := range o.config.Headers {
+		req.Header.Set(name, value)
+	}
+	req.Header.Set("User-Agent", "OpenAlbert/0.1")
+	if o.config.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+o.config.APIKey)
+	}
+	return req, nil
+}
+
+// ListModels fetches the OpenAI-compatible GET /models catalog from this provider.
+func (o *OpenAI) ListModels(ctx context.Context) ([]DiscoveredModel, error) {
+	req, err := o.prepareRequest(ctx, http.MethodGet, "/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	var response struct {
+		Data []struct {
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+			DisplayName   string `json:"display_name"`
+			ContextLength int    `json:"context_length"`
+			ContextWindow int    `json:"context_window"`
+			MaxOutput     int    `json:"max_output_tokens"`
+			TopProvider   *struct {
+				ContextLength       int `json:"context_length"`
+				MaxCompletionTokens int `json:"max_completion_tokens"`
+			} `json:"top_provider"`
+		} `json:"data"`
+	}
+	if err := request(ctx, o.client, req, &response, 4<<20); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	out := make([]DiscoveredModel, 0, len(response.Data))
+	for _, item := range response.Data {
+		id := strings.TrimSpace(o.sanitizeModel(item.ID))
+		if id == "" || seen[id] || strings.ContainsAny(id, "\r\n\x00") {
+			continue
+		}
+		seen[id] = true
+		display := strings.TrimSpace(o.sanitizeModel(item.DisplayName))
+		if display == "" {
+			display = strings.TrimSpace(o.sanitizeModel(item.Name))
+		}
+		if display == "" {
+			display = id
+		}
+		ctxLen := item.ContextLength
+		if ctxLen <= 0 {
+			ctxLen = item.ContextWindow
+		}
+		maxOut := item.MaxOutput
+		if item.TopProvider != nil {
+			if ctxLen <= 0 {
+				ctxLen = item.TopProvider.ContextLength
+			}
+			if maxOut <= 0 {
+				maxOut = item.TopProvider.MaxCompletionTokens
+			}
+		}
+		out = append(out, DiscoveredModel{
+			ID:                  id,
+			DisplayName:         display,
+			ContextWindowTokens: ctxLen,
+			MaxOutputTokens:     maxOut,
+		})
+	}
+	return out, nil
 }
 
 func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
@@ -133,24 +242,17 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 	if err != nil {
 		return domain.Completion{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.config.BaseURL+"/chat/completions", bytes.NewReader(data))
+	req, err := o.prepareRequest(ctx, http.MethodPost, "/chat/completions", bytes.NewReader(data))
 	if err != nil {
-		return domain.Completion{}, errors.New("invalid model request")
-	}
-	for name, value := range o.config.Headers {
-		req.Header.Set(name, value)
+		return domain.Completion{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "OpenAlbert/0.1")
 	if o.config.Options.SessionHeader != "" {
 		session := domain.ModelSession(ctx)
 		if session == "" {
 			return domain.Completion{}, errors.New("model requires a conversation session ID")
 		}
 		req.Header.Set(o.config.Options.SessionHeader, session)
-	}
-	if o.config.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+o.config.APIKey)
 	}
 	var response struct {
 		Model   string `json:"model"`
@@ -177,17 +279,7 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 	if err := request(ctx, o.client, req, &response, 8<<20); err != nil {
 		return domain.Completion{}, err
 	}
-	model := response.Model
-	// The provider model is logged as usage metadata. A proxy can echo credentials.
-	if key := strings.TrimSpace(o.config.APIKey); key != "" && strings.Contains(model, key) {
-		model = ""
-	}
-	for _, value := range o.config.Headers {
-		if value != "" && strings.Contains(model, value) {
-			model = ""
-			break
-		}
-	}
+	model := o.sanitizeModel(response.Model)
 	if model == "" {
 		model = o.config.Model
 	}
@@ -255,6 +347,280 @@ func (o *OpenAI) Complete(ctx context.Context, messages []domain.Message, tools 
 	}
 	out.Model = o.config.Model
 	out.Message = m
+	return out, nil
+}
+
+// CompleteStream executes a streaming Chat Completions request, invoking onEvent
+// for incremental text, reasoning and tool-call argument deltas while returning
+// the assembled final Completion.
+func (o *OpenAI) CompleteStream(ctx context.Context, messages []domain.Message, tools []domain.Tool, onEvent domain.StreamFunc) (domain.Completion, error) {
+	body, err := o.requestBody(messages, tools, true)
+	if err != nil {
+		return domain.Completion{}, err
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return domain.Completion{}, err
+	}
+	req, err := o.prepareRequest(ctx, http.MethodPost, "/chat/completions", bytes.NewReader(data))
+	if err != nil {
+		return domain.Completion{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if o.config.Options.SessionHeader != "" {
+		session := domain.ModelSession(ctx)
+		if session == "" {
+			return domain.Completion{}, errors.New("model requires a conversation session ID")
+		}
+		req.Header.Set(o.config.Options.SessionHeader, session)
+	}
+	streamClient := *o.client
+	streamClient.Timeout = 0
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return domain.Completion{}, ctx.Err()
+		}
+		return domain.Completion{}, &RequestError{Cause: err}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return domain.Completion{}, &HTTPError{Status: resp.StatusCode, Source: "upstream"}
+	}
+
+	type partialCall struct {
+		id, typ, name string
+		args          strings.Builder
+	}
+	calls := map[int]*partialCall{}
+	var textBuf, reasonBuf strings.Builder
+	var finishReason, responseModel string
+	var promptTokens, completionTokens *int
+	var cachedTokens int
+
+	scanner := bufio.NewScanner(io.LimitReader(resp.Body, 32<<20))
+	scanner.Buffer(make([]byte, 4096), 4<<20)
+	var dataLines []string
+	processEvent := func() (bool, error) {
+		if len(dataLines) == 0 {
+			return false, nil
+		}
+		raw := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		dataLines = nil
+		if raw == "" {
+			return false, nil
+		}
+		if raw == "[DONE]" {
+			return true, nil
+		}
+		var chunk struct {
+			Model   string `json:"model"`
+			Error   any    `json:"error"`
+			Choices []struct {
+				FinishReason string `json:"finish_reason"`
+				Delta        struct {
+					Content          string `json:"content"`
+					Refusal          string `json:"refusal"`
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
+					ToolCalls        []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+			Usage *struct {
+				Prompt         *int `json:"prompt_tokens"`
+				Completion     *int `json:"completion_tokens"`
+				PromptCacheHit int  `json:"prompt_cache_hit_tokens"`
+				PromptDetails  struct {
+					Cached int `json:"cached_tokens"`
+				} `json:"prompt_tokens_details"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+			return false, errors.New("invalid model stream event")
+		}
+		if chunk.Error != nil {
+			return false, errors.New("model stream returned an error")
+		}
+		if chunk.Model != "" {
+			responseModel = chunk.Model
+		}
+		if chunk.Usage != nil {
+			if chunk.Usage.Prompt != nil {
+				v := *chunk.Usage.Prompt
+				promptTokens = &v
+			}
+			if chunk.Usage.Completion != nil {
+				v := *chunk.Usage.Completion
+				completionTokens = &v
+			}
+			if chunk.Usage.PromptDetails.Cached > cachedTokens {
+				cachedTokens = chunk.Usage.PromptDetails.Cached
+			}
+			if chunk.Usage.PromptCacheHit > cachedTokens {
+				cachedTokens = chunk.Usage.PromptCacheHit
+			}
+		}
+		if len(chunk.Choices) > 0 {
+			ch := chunk.Choices[0]
+			if ch.FinishReason != "" {
+				finishReason = ch.FinishReason
+			}
+			reason := ch.Delta.ReasoningContent
+			if reason == "" {
+				reason = ch.Delta.Reasoning
+			}
+			if reason != "" {
+				reasonBuf.WriteString(reason)
+				if onEvent != nil {
+					if err := onEvent(domain.StreamEvent{Type: "reasoning_delta", Delta: reason}); err != nil {
+						return false, err
+					}
+				}
+			}
+			content := ch.Delta.Content
+			if content == "" && ch.Delta.Refusal != "" {
+				content = ch.Delta.Refusal
+			}
+			if content != "" {
+				textBuf.WriteString(content)
+				if onEvent != nil {
+					if err := onEvent(domain.StreamEvent{Type: "text_delta", Delta: content}); err != nil {
+						return false, err
+					}
+				}
+			}
+			for _, tc := range ch.Delta.ToolCalls {
+				pc := calls[tc.Index]
+				if pc == nil {
+					pc = &partialCall{}
+					calls[tc.Index] = pc
+				}
+				if tc.ID != "" {
+					pc.id = tc.ID
+				}
+				if tc.Type != "" {
+					pc.typ = tc.Type
+				}
+				if tc.Function.Name != "" {
+					pc.name += tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					pc.args.WriteString(tc.Function.Arguments)
+				}
+				if onEvent != nil && (tc.Function.Name != "" || tc.Function.Arguments != "") {
+					if err := onEvent(domain.StreamEvent{
+						Type:       "tool_call_delta",
+						ToolCallID: pc.id,
+						ToolName:   tc.Function.Name,
+						ToolArgs:   tc.Function.Arguments,
+					}); err != nil {
+						return false, err
+					}
+				}
+			}
+		}
+		return false, nil
+	}
+
+	done := false
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if line == "" {
+			var err error
+			done, err = processEvent()
+			if err != nil {
+				return domain.Completion{}, err
+			}
+			if done {
+				break
+			}
+		} else if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if ctx.Err() != nil {
+			return domain.Completion{}, ctx.Err()
+		}
+		return domain.Completion{}, errors.New("model stream interrupted")
+	}
+	if !done {
+		var err error
+		done, err = processEvent()
+		if err != nil {
+			return domain.Completion{}, err
+		}
+	}
+	if !done && finishReason == "" {
+		return domain.Completion{}, errors.New("model stream ended unexpectedly without completion")
+	}
+
+	model := o.sanitizeModel(responseModel)
+	if model == "" {
+		model = o.config.Model
+	}
+	out := domain.Completion{Model: o.config.Model, Usage: domain.ModelUsage{Model: model}}
+	if promptTokens != nil {
+		out.InputTokens = *promptTokens
+	}
+	if completionTokens != nil {
+		out.OutputTokens = *completionTokens
+	}
+	if out.InputTokens < 0 || out.OutputTokens < 0 {
+		out.InputTokens, out.OutputTokens = 0, 0
+		return out, errors.New("model returned invalid token usage")
+	}
+	out.Usage.TokenUsageKnown = promptTokens != nil && completionTokens != nil
+	if cachedTokens < 0 {
+		cachedTokens = 0
+	}
+	if cachedTokens > out.InputTokens {
+		cachedTokens = out.InputTokens
+	}
+	out.Usage.CachedInputTokens = cachedTokens
+
+	if finishReason == "length" {
+		return out, errors.New("model response truncated by token limit")
+	}
+	msg := domain.Message{Role: "assistant", Content: textBuf.String(), Reasoning: reasonBuf.String()}
+	if len(calls) > 0 {
+		indices := make([]int, 0, len(calls))
+		for idx := range calls {
+			indices = append(indices, idx)
+		}
+		sort.Ints(indices)
+		for _, idx := range indices {
+			pc := calls[idx]
+			if pc.typ != "" && pc.typ != "function" {
+				return out, errors.New("model returned invalid tool call")
+			}
+			args := strings.TrimSpace(pc.args.String())
+			if args == "" {
+				args = "{}"
+			}
+			if pc.id == "" {
+				pc.id = fmt.Sprintf("call_%d", idx)
+			}
+			if pc.name == "" || !json.Valid([]byte(args)) {
+				return out, errors.New("model returned invalid tool call")
+			}
+			msg.ToolCalls = append(msg.ToolCalls, domain.ToolCall{ID: pc.id, Name: pc.name, Arguments: json.RawMessage(args)})
+		}
+	}
+	if msg.Content == "" && len(msg.ToolCalls) == 0 && finishReason != "stop" {
+		return out, errors.New("model returned empty response")
+	}
+	out.Message = msg
 	return out, nil
 }
 

@@ -109,20 +109,26 @@ func (c *Client) Complete(ctx context.Context, messages []domain.Message, tools 
 	}
 	model := c.creds.Model
 	c.mu.Unlock()
-	return c.completeForModel(ctx, domain.ModelProfile{Model: model}, messages, tools, c.http)
+	return c.completeForModel(ctx, domain.ModelProfile{Model: model}, messages, tools, c.http, nil)
 }
 
 // CompleteForProfile uses the profile's model and endpoint while sharing the
 // connection's serialized token refresh and saved account settings.
 func (c *Client) CompleteForProfile(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
+	return c.CompleteForProfileStream(ctx, profile, messages, tools, nil)
+}
+
+// CompleteForProfileStream streams text, reasoning, and tool argument deltas to
+// onEvent while returning the authoritative completed response.
+func (c *Client) CompleteForProfileStream(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool, onEvent domain.StreamFunc) (domain.Completion, error) {
 	// Profiled Responses use the router's deadline. Keep the shared client's
 	// timeout for legacy completions, token refresh and account management.
 	client := *c.http
 	client.Timeout = 0
-	return c.completeForModel(ctx, profile, messages, tools, &client)
+	return c.completeForModel(ctx, profile, messages, tools, &client, onEvent)
 }
 
-func (c *Client) completeForModel(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool, client *http.Client) (domain.Completion, error) {
+func (c *Client) completeForModel(ctx context.Context, profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool, client *http.Client, onEvent domain.StreamFunc) (domain.Completion, error) {
 	if err := c.mu.LockContext(ctx); err != nil {
 		return domain.Completion{}, err
 	}
@@ -152,7 +158,7 @@ func (c *Client) completeForModel(ctx context.Context, profile domain.ModelProfi
 		return domain.Completion{Model: body.Model}, endpoint.sanitizeError(err, token)
 	}
 	defer resp.Body.Close()
-	result, err := readStream(resp.Body)
+	result, err := readStreamWithCallback(resp.Body, onEvent)
 	var api *APIError
 	if errors.As(err, &api) {
 		api.RequestID = resp.Header.Get("x-request-id")
@@ -182,6 +188,9 @@ type responseEvent struct {
 	Type     string `json:"type"`
 	Code     string `json:"code"`
 	Param    string `json:"param"`
+	Delta    string `json:"delta"`
+	CallID   string `json:"call_id"`
+	ItemID   string `json:"item_id"`
 	Response struct {
 		Status string `json:"status"`
 		Model  string `json:"model"`
@@ -219,9 +228,13 @@ func (event responseEvent) completionUsage() (domain.Completion, error) {
 	return result, nil
 }
 
-// Partial deltas are never executed or returned. The authoritative completed
-// response contains final text/calls and usage; EOF alone cannot be success.
+// Partial deltas are never executed or returned as final state. The authoritative
+// completed response contains final text/calls and usage; EOF alone cannot be success.
 func readStream(reader io.Reader) (domain.Completion, error) {
+	return readStreamWithCallback(reader, nil)
+}
+
+func readStreamWithCallback(reader io.Reader, onEvent domain.StreamFunc) (domain.Completion, error) {
 	scanner := bufio.NewScanner(io.LimitReader(reader, 32<<20))
 	scanner.Buffer(make([]byte, 4096), 8<<20)
 	var data []string
@@ -239,6 +252,24 @@ func readStream(reader io.Reader) (domain.Completion, error) {
 			return domain.Completion{}, false, errors.New("invalid ChatGPT stream event")
 		}
 		switch event.Type {
+		case "response.output_text.delta":
+			if onEvent != nil && event.Delta != "" {
+				if err := onEvent(domain.StreamEvent{Type: "text_delta", Delta: event.Delta}); err != nil {
+					return domain.Completion{}, false, err
+				}
+			}
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+			if onEvent != nil && event.Delta != "" {
+				if err := onEvent(domain.StreamEvent{Type: "reasoning_delta", Delta: event.Delta}); err != nil {
+					return domain.Completion{}, false, err
+				}
+			}
+		case "response.function_call_arguments.delta":
+			if onEvent != nil && event.Delta != "" {
+				if err := onEvent(domain.StreamEvent{Type: "tool_call_delta", ToolCallID: event.CallID, ToolArgs: event.Delta}); err != nil {
+					return domain.Completion{}, false, err
+				}
+			}
 		case "response.failed", "error":
 			result, _ := event.completionUsage()
 			e := &APIError{Body: append([]byte{}, raw...), Code: event.Code, Param: event.Param}

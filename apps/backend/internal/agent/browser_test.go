@@ -179,3 +179,30 @@ func TestLargeBrowserObservationKeepsStructuredPageAndReferences(t *testing.T) {
 		t.Fatalf("large observation lost its envelope: %s %v", out, err)
 	}
 }
+
+func TestCodingBrowserToolWorksWithoutInspectorSession(t *testing.T) {
+	a, repo, _, _ := fixture(t)
+	f := &fakeBrowser{result: domain.BrowserResult{InstanceID: "browser-one", Pages: []domain.BrowserPage{{ID: "p1", URL: "https://example.com"}}}}
+	a.Browser = f
+	res, err := a.ExecuteCodingTool(context.Background(), CodingToolRequest{
+		SessionID:     "",
+		CorrelationID: "ephemeral-coding-1",
+		TurnID:        "coding-t1",
+		Step:          0,
+		Name:          "browser_tabs",
+		Arguments:     json.RawMessage(`{}`),
+	})
+	if err != nil || res.Failed {
+		t.Fatalf("ExecuteCodingTool browser_tabs without SessionID failed: err=%v failed=%v out=%s", err, res.Failed, res.Output)
+	}
+	if f.owner.SessionID != "ephemeral-coding-1" {
+		t.Fatalf("browser owner session ID = %q, want ephemeral-coding-1", f.owner.SessionID)
+	}
+	sessions, err := repo.ActiveSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("expected zero Inspector sessions when SessionID is empty, got %+v", sessions)
+	}
+}

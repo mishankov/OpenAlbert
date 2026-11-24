@@ -15,16 +15,23 @@ func (s *Store) SaveTrace(ctx context.Context, tr domain.Trace) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO openalbert_traces(id,session_id,turn_id,started_at,data) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data`, tr.ID, tr.SessionID, tr.TurnID, tr.StartedAt, raw)
-	return err
+	raw = sanitizeJSONB(raw)
+	tag, err := s.pool.Exec(ctx, `INSERT INTO openalbert_traces(id,session_id,turn_id,started_at,data) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data WHERE openalbert_traces.session_id=EXCLUDED.session_id`, tr.ID, tr.SessionID, tr.TurnID, tr.StartedAt, raw)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrSessionConflict
+	}
+	return nil
 }
 
 const sessionColumns = `s.seq,s.data,COALESCE(c.data,'{}'),s.analyzed,
  (SELECT count(*) FROM openalbert_messages m WHERE m.session_id=s.id),
  (SELECT COALESCE(sum(jsonb_array_length(COALESCE(m.data->'tool_calls','[]'))),0) FROM openalbert_messages m WHERE m.session_id=s.id),
  (SELECT count(*) FROM openalbert_traces tr WHERE tr.session_id=s.id),
- COALESCE((SELECT tr.data->>'trigger' FROM openalbert_traces tr WHERE tr.session_id=s.id AND tr.data->>'trigger' IN ('message','task','initiative') ORDER BY tr.started_at LIMIT 1),
- (SELECT CASE WHEN COALESCE(cp.data->'Input'->>'TaskID','')<>'' THEN 'task' WHEN cp.data->'Input'->>'Initiative'='true' THEN 'initiative' ELSE 'message' END FROM openalbert_checkpoints cp WHERE cp.id LIKE 'turn-done/%' AND cp.data->'Input'->>'SessionID'=s.id LIMIT 1),'message'),
+ COALESCE((SELECT tr.data->>'trigger' FROM openalbert_traces tr WHERE tr.session_id=s.id AND tr.data->>'trigger' IN ('message','task','initiative','coding') ORDER BY tr.started_at LIMIT 1),
+ CASE WHEN s.conversation_id LIKE 'coding:%' THEN 'coding' ELSE COALESCE((SELECT CASE WHEN COALESCE(cp.data->'Input'->>'TaskID','')<>'' THEN 'task' WHEN cp.data->'Input'->>'Initiative'='true' THEN 'initiative' ELSE 'message' END FROM openalbert_checkpoints cp WHERE cp.id LIKE 'turn-done/%' AND cp.data->'Input'->>'SessionID'=s.id LIMIT 1),'message') END),
  COALESCE((SELECT left(m.data->>'content',180) FROM openalbert_messages m WHERE m.session_id=s.id AND m.data->>'role'='user' ORDER BY m.seq LIMIT 1),left(s.data->>'summary',180),'')`
 
 type scanner interface{ Scan(...any) error }
@@ -51,8 +58,8 @@ func (s *Store) InspectSessions(ctx context.Context, f inspector.Filter) ([]insp
  WHERE ($1::bigint=0 OR s.seq<$1) AND ($2='' OR s.data->>'status'=$2) AND ($3='' OR s.conversation_id=$3)
  AND ($4='' OR strpos(lower(s.id||' '||s.conversation_id||' '||COALESCE(c.data->>'title','')||' '||COALESCE(s.data->>'summary','')),lower($4))>0
  OR EXISTS(SELECT 1 FROM openalbert_messages m WHERE m.session_id=s.id AND strpos(lower(m.data::text),lower($4))>0))
- AND ($5='' OR COALESCE((SELECT tr.data->>'trigger' FROM openalbert_traces tr WHERE tr.session_id=s.id AND tr.data->>'trigger' IN ('message','task','initiative') ORDER BY tr.started_at LIMIT 1),
- (SELECT CASE WHEN COALESCE(cp.data->'Input'->>'TaskID','')<>'' THEN 'task' WHEN cp.data->'Input'->>'Initiative'='true' THEN 'initiative' ELSE 'message' END FROM openalbert_checkpoints cp WHERE cp.id LIKE 'turn-done/%' AND cp.data->'Input'->>'SessionID'=s.id LIMIT 1),'message')=$5)
+ AND ($5='' OR COALESCE((SELECT tr.data->>'trigger' FROM openalbert_traces tr WHERE tr.session_id=s.id AND tr.data->>'trigger' IN ('message','task','initiative','coding') ORDER BY tr.started_at LIMIT 1),
+ CASE WHEN s.conversation_id LIKE 'coding:%' THEN 'coding' ELSE COALESCE((SELECT CASE WHEN COALESCE(cp.data->'Input'->>'TaskID','')<>'' THEN 'task' WHEN cp.data->'Input'->>'Initiative'='true' THEN 'initiative' ELSE 'message' END FROM openalbert_checkpoints cp WHERE cp.id LIKE 'turn-done/%' AND cp.data->'Input'->>'SessionID'=s.id LIMIT 1),'message') END)=$5)
  ORDER BY s.seq DESC LIMIT $6`, f.Before, f.Status, f.Conversation, f.Query, f.Trigger, f.Limit)
 	if err != nil {
 		return nil, err
@@ -129,7 +136,7 @@ func (s *Store) InspectSession(ctx context.Context, id string, after int64) (out
 	// repeatedly decompresses the same large checkpoint for every model record.
 	legacy, e := s.pool.Query(ctx, `WITH turn_prefixes AS MATERIALIZED (
  SELECT 'model/'||(data->'Input'->>'Key')||'/' AS prefix FROM openalbert_checkpoints
- WHERE id LIKE 'turn-done/%' AND data->'Input'->>'SessionID'=$1
+ WHERE id LIKE 'turn-done/%' AND id NOT LIKE 'turn-done/coding/%' AND data->'Input'->>'SessionID'=$1
 )
  SELECT m.id FROM openalbert_checkpoints m WHERE m.id LIKE 'model/%'
  AND EXISTS(SELECT 1 FROM turn_prefixes t WHERE starts_with(m.id,t.prefix))
@@ -206,7 +213,7 @@ func (s *Store) InspectTrace(ctx context.Context, session, id string) (tr domain
 		return
 	}
 	var raw json.RawMessage
-	raw, found, err = oneJSON[json.RawMessage](ctx, s.pool, `SELECT m.data FROM openalbert_checkpoints m WHERE m.id=$2 AND EXISTS(SELECT 1 FROM openalbert_checkpoints t WHERE t.id LIKE 'turn-done/%' AND t.data->'Input'->>'SessionID'=$1 AND starts_with(m.id,'model/'||(t.data->'Input'->>'Key')||'/'))`, session, id)
+	raw, found, err = oneJSON[json.RawMessage](ctx, s.pool, `SELECT m.data FROM openalbert_checkpoints m WHERE m.id=$2 AND EXISTS(SELECT 1 FROM openalbert_checkpoints t WHERE t.id LIKE 'turn-done/%' AND t.id NOT LIKE 'turn-done/coding/%' AND t.data->'Input'->>'SessionID'=$1 AND starts_with(m.id,'model/'||(t.data->'Input'->>'Key')||'/'))`, session, id)
 	if !found || err != nil {
 		return
 	}

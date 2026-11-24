@@ -56,6 +56,7 @@ const labels = {
   message: "Сообщение",
   task: "Задача",
   initiative: "Инициатива",
+  coding: "Кодинг",
   active: "Активна",
   closed: "Закрыта",
   running: "Не завершён",

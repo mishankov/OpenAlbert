@@ -1,60 +1,61 @@
-# Copy to models.toml in the installation root. Set the actual model, its
-# supported capabilities and limits before starting the application.
-# Names such as everyday are arbitrary; several roles may use one profile.
+# Copy to models.toml in the installation root. Configure your providers,
+# defaults and role routes before starting the application.
+# Route targets use "<provider>/<model_id>".
 [routes]
-chat = "everyday"
-background = "everyday"
-analysis = "everyday"
+chat = "openai/SET_MODEL_ID"
+background = "openai/SET_MODEL_ID"
+analysis = "openai/SET_MODEL_ID"
+# Optional default model for ACP coding sessions (defaults to chat).
+# coding = "openai/SET_MODEL_ID"
 
-[profiles.everyday]
+[providers.openai]
 adapter = "openai_chat_completions"
 base_url = "https://api.openai.com/v1"
-model = "SET_MODEL_ID"
 api_key_env = "LLM_API_KEY"
-capabilities = ["tools", "vision", "structured_output"]
-context_window_tokens = 128000
-max_output_tokens = 8192
-timeout = "120s"
+discover_models = true
+# Optional glob allowlist/denylist for GET /models discovery:
+# include_models = ["gpt-5*", "claude-*"]
+# exclude_models = ["*embedding*", "*audio*"]
+default_capabilities = ["tools", "vision", "structured_output"]
+default_context_window_tokens = 128000
+default_max_output_tokens = 8192
+default_timeout = "120s"
 
-# To use LLM Proxy, change the base_url above to "https://proxy.example.com/v1"
-# and put the proxy client key in OPENALBERT_PROXY_KEY in models.env.
-# [profiles.everyday.headers_env]
+# To use an LLM Proxy, set base_url to "https://proxy.example.com/v1" and put
+# the proxy client key in OPENALBERT_PROXY_KEY in models.env.
+# [providers.openai.headers_env]
 # "X-LLM-Proxy-Key" = "OPENALBERT_PROXY_KEY"
 
-# Optional provider settings. Enable only options supported by your endpoint.
-# [profiles.everyday.options]
+# Optional provider defaults. Enable only options supported by your endpoint.
+# [providers.openai.default_options]
 # reasoning_effort = "high"
 # thinking = "enabled"
 # include_reasoning_content = true # DeepSeek thinking/tool history
 # session_header = "x-opencode-session" # OpenCode Go
 # output_token_field = "max_completion_tokens" # default: max_tokens
 
-# Optional estimates in USD per million tokens; specify all three prices.
-# [profiles.everyday.pricing]
+# Optional per-model overrides (limits, options, pricing, display name):
+# [models."openai/SET_MODEL_ID"]
+# display_name = "My Model"
+# context_window_tokens = 200000
+# max_output_tokens = 16384
+# supported_reasoning_efforts = ["low", "medium", "high"]
+# [models."openai/SET_MODEL_ID".pricing]
 # input_per_million = 0.0
 # cached_input_per_million = 0.0
 # output_per_million = 0.0
 
-# Optional ChatGPT subscription profile (keep commented until configured).
+# Optional ChatGPT subscription provider (keep commented until configured).
 # Use OPENAI_AUTH_MODE=profiles (default), then sign in with /chatgpt login
-# in Telegram. All subscription profiles share one account.
-# To route chat/analysis here, EDIT their existing [routes] entries above:
-# chat = "subscription"
-# analysis = "subscription"
-# Keep background = "everyday" for API billing; profiles mode never falls back.
-# Set model to an available slug from /chatgpt models and verify capabilities/limits.
-# [profiles.subscription]
+# in Telegram. All models under openai_chatgpt share one account.
+# [providers.chatgpt]
 # adapter = "openai_chatgpt"
 # base_url = "https://proxy.example.com/v1" # Optional. Default: https://api.openai.com/v1.
-# model = "SET_CHATGPT_MODEL_SLUG"
-# capabilities = ["tools", "vision", "structured_output"]
-# context_window_tokens = 128000
-# max_output_tokens = 8192 # LOCAL input reserve only; does not cap provider output.
-# timeout = "120s"
-# To use another subscription model for analysis, add a separate profile and
-# route analysis to it. Models are configured in TOML; restart after changes.
-
-# To use LLM Proxy, enable base_url above and put the proxy client key in
-# OPENALBERT_PROXY_KEY in models.env.
-# [profiles.subscription.headers_env]
+# discover_models = true
+# default_capabilities = ["tools", "vision", "structured_output"]
+# default_context_window_tokens = 128000
+# default_max_output_tokens = 8192 # LOCAL input reserve only; does not cap provider output.
+# default_timeout = "120s"
+#
+# [providers.chatgpt.headers_env]
 # "X-LLM-Proxy-Key" = "OPENALBERT_PROXY_KEY"
