@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/integrations"
 )
@@ -33,11 +35,13 @@ type MemoryReader interface {
 	ListMemory(context.Context, string) ([]domain.MemoryEntry, error)
 }
 type API struct {
-	Billing *integrations.BillingModel
-	Repo    domain.Repository
-	Memory  MemoryReader
-	OwnerID int64
-	Token   string
+	Billing    *integrations.BillingModel
+	Activities *agent.Activities
+	Logger     *slog.Logger
+	Repo       domain.Repository
+	Memory     MemoryReader
+	OwnerID    int64
+	Token      string
 }
 type Attachment struct {
 	ID        string `json:"id"`
@@ -85,6 +89,13 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/files", a.files)
 	mux.HandleFunc("POST /api/v1/attachments", a.upload)
 	mux.HandleFunc("GET /api/v1/attachments/{id}/content", a.download)
+	mux.HandleFunc("GET /api/v1/llm/models", a.llmModels)
+	mux.HandleFunc("POST /api/v1/llm/complete", a.llmComplete)
+	mux.HandleFunc("GET /api/v1/agent/context", a.agentContext)
+	mux.HandleFunc("POST /api/v1/agent/tools/{name}", a.agentTool)
+	mux.HandleFunc("POST /api/v1/coding/sessions", a.codingSessionCreate)
+	mux.HandleFunc("POST /api/v1/coding/sessions/{id}/sync", a.codingSessionSync)
+	mux.HandleFunc("POST /api/v1/coding/sessions/{id}/close", a.codingSessionClose)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")

@@ -289,7 +289,7 @@ def main():
     parser.add_argument("--format-check", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.format_check:
-        files = output(["gofmt", "-l", "apps/backend", "services", "shared/backup"])
+        files = output(["gofmt", "-l", "apps", "services", "shared"])
         if files:
             print(files)
             return 1

@@ -132,6 +132,18 @@ Authenticated binary download with accurate Content-Type, attachment filename,
 `X-Content-Type-Options: nosniff`, and private/no-store caching. IDs are URL path
 escaped. Images are downloaded by the client and decoded locally.
 
+### Coding Agent Gateway & Inspector Sync (`/api/v1/llm/*`, `/api/v1/agent/*`, `/api/v1/coding/*`)
+
+Authenticated with the same `DESKTOP_API_TOKEN` Bearer header for `openalbert-acp`:
+
+- `GET /api/v1/llm/models?refresh=true` — returns `{"default_model":"<provider>/<model>","models":[CatalogModel]}` discovered from configured providers and static `[models.*]` entries.
+- `POST /api/v1/llm/complete` — Server-Sent Events (`text/event-stream`) streaming completion gateway (`text_delta`, `reasoning_delta`, `tool_call_delta`, `done`, `error`). Records model traces and token/cost telemetry server-side under the coding session.
+- `GET /api/v1/agent/context` — returns `SOUL.md`, `USER.md`, active server skills, and schemas of authorized owner server tools (excluding Telegram-only delivery tools).
+- `POST /api/v1/agent/tools/{name}` — executes an authorized owner server tool in owner scope and records its trace under `trigger="coding"`.
+- `POST /api/v1/coding/sessions` — registers a `coding:<session_id>` conversation and active session for Inspector.
+- `POST /api/v1/coding/sessions/{id}/sync` — idempotently persists coding messages (including nested Codemode `parent_tool_call_id` records) and local/MCP tool traces for Inspector.
+- `POST /api/v1/coding/sessions/{id}/close` — closes the coding session so post-session `AnalysisWorkflow` extracts durable user preferences/facts into `personal:<owner id>`.
+
 ## Client behavior
 
 Preserve draft and task context while navigating; retain the UUID for failed

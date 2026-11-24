@@ -5,9 +5,9 @@
   const parse = JSON.parse;
   const stringify = JSON.stringify;
   const own = Object.hasOwn;
-  const outputLimit = 32 * 1024;
-  const stateLimit = 16 * 1024;
-  const maxBlocks = 128;
+  let outputLimit = 32 * 1024;
+  let stateLimit = 16 * 1024;
+  let maxBlocks = 128;
   const pending = new Map();
   let state;
   let status = "running";
@@ -34,7 +34,23 @@
   }
 
   function start(rawInput) {
-    const { code, tools: catalog, state: initialState } = parse(rawInput);
+    const {
+      code,
+      tools: catalog,
+      state: initialState,
+      output_limit: customOutputLimit,
+      state_limit: customStateLimit,
+      max_blocks: customMaxBlocks,
+    } = parse(rawInput);
+    if (typeof customOutputLimit === "number" && customOutputLimit > 0) {
+      outputLimit = customOutputLimit;
+    }
+    if (typeof customStateLimit === "number" && customStateLimit > 0) {
+      stateLimit = customStateLimit;
+    }
+    if (typeof customMaxBlocks === "number" && customMaxBlocks > 0) {
+      maxBlocks = Math.floor(customMaxBlocks);
+    }
     state = Object.assign(Object.create(null), initialState);
     const tools = Object.create(null);
     const definitions = Object.create(null);

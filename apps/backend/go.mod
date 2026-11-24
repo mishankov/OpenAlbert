@@ -11,9 +11,9 @@ require (
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/minio/minio-go/v7 v7.4.1
 	github.com/mishankov/OpenAlbert/shared/backup v0.0.0
+	github.com/mishankov/OpenAlbert/shared/codemode v0.0.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.12.1
-	github.com/tetratelabs/wazero v1.12.0
 	github.com/yuin/goldmark v1.8.7
 	go.temporal.io/api v1.64.3
 	go.temporal.io/sdk v1.51.0
@@ -52,6 +52,7 @@ require (
 	github.com/robfig/cron v1.2.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
+	github.com/tetratelabs/wazero v1.12.0 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
@@ -69,4 +70,7 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 )
 
-replace github.com/mishankov/OpenAlbert/shared/backup => ../../shared/backup
+replace (
+	github.com/mishankov/OpenAlbert/shared/backup => ../../shared/backup
+	github.com/mishankov/OpenAlbert/shared/codemode => ../../shared/codemode
+)

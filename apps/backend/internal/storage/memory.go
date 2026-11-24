@@ -131,12 +131,25 @@ func (m *Memory) Conversation(ctx context.Context, id string) (domain.Conversati
 	v, ok := m.conversations[id]
 	return v, ok, ctx.Err()
 }
+func (m *Memory) SaveConversation(ctx context.Context, conv domain.Conversation) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validID(conv.ID); err != nil {
+		return err
+	}
+	conv.DeliveryChannel = ""
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.conversations[conv.ID] = conv
+	return nil
+}
 func (m *Memory) ListPrivateConversations(ctx context.Context) ([]domain.Conversation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := []domain.Conversation{}
 	for _, v := range m.conversations {
-		if v.Private {
+		if v.Private && !strings.HasPrefix(v.ID, "coding:") {
 			out = append(out, v)
 		}
 	}
@@ -166,6 +179,12 @@ func (m *Memory) ConversationHistory(ctx context.Context, scope, query string, b
 	}
 	return out, ctx.Err()
 }
+func (m *Memory) Session(ctx context.Context, id string) (domain.Session, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	return s, ok, ctx.Err()
+}
 func (m *Memory) StartSession(ctx context.Context, s domain.Session) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -183,6 +202,95 @@ func (m *Memory) StartSession(ctx context.Context, s domain.Session) error {
 		s.CreatedAt = nowIfZero(s.CreatedAt)
 		m.sessions[s.ID] = s
 		m.sessionOrder = append(m.sessionOrder, s.ID)
+	}
+	return nil
+}
+func (m *Memory) SyncCodingSession(ctx context.Context, batch domain.CodingSyncBatch) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validID(batch.SessionID); err != nil {
+		return err
+	}
+	if err := validID(batch.ConversationID); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(batch.ConversationID, "coding:") {
+		return domain.ErrSessionForbidden
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Pre-validate session state, message keys, trace ownership, and checkpoint key
+	// BEFORE publishing any session/conversation/title mutations so failed batches are atomic.
+	existingSess, hasSess := m.sessions[batch.SessionID]
+	if hasSess {
+		if !strings.HasPrefix(existingSess.ConversationID, "coding:") {
+			return domain.ErrSessionForbidden
+		}
+		if existingSess.ConversationID != batch.ConversationID {
+			return domain.ErrSessionConflict
+		}
+		if existingSess.Status != "active" {
+			return domain.ErrSessionClosed
+		}
+	}
+	for _, item := range batch.Messages {
+		if err := validID(item.Key); err != nil {
+			return err
+		}
+	}
+	for _, tr := range batch.Traces {
+		if existing, ok := m.traces[tr.ID]; ok && existing.SessionID != tr.SessionID {
+			return domain.ErrSessionConflict
+		}
+	}
+	if batch.CheckpointKey != "" && len(batch.CheckpointPayload) > 0 {
+		if err := validID(batch.CheckpointKey); err != nil {
+			return err
+		}
+	}
+
+	if !hasSess {
+		m.sessions[batch.SessionID] = domain.Session{
+			ID: batch.SessionID, ConversationID: batch.ConversationID, Status: "active", CreatedAt: time.Now().UTC(),
+		}
+		m.sessionOrder = append(m.sessionOrder, batch.SessionID)
+	}
+	if conv, ok := m.conversations[batch.ConversationID]; !ok {
+		title := strings.TrimSpace(batch.Title)
+		if title == "" {
+			title = "Coding · " + batch.SessionID
+		}
+		m.conversations[batch.ConversationID] = domain.Conversation{
+			ID: batch.ConversationID, Title: title, OwnerID: batch.OwnerID, Private: true,
+		}
+	} else if title := strings.TrimSpace(batch.Title); title != "" && conv.Title != title {
+		conv.Title = title
+		m.conversations[batch.ConversationID] = conv
+	}
+	se := m.sessions[batch.SessionID]
+	for _, item := range batch.Messages {
+		k := taskKey(batch.SessionID, item.Key)
+		if !m.messageKeys[k] {
+			m.messageKeys[k] = true
+			m.messages[batch.SessionID] = append(m.messages[batch.SessionID], clone(item.Message))
+			m.history = append(m.history, domain.HistoryMessage{
+				Seq:              int64(len(m.history) + 1),
+				ConversationID:   se.ConversationID,
+				SessionID:        batch.SessionID,
+				SessionStartedAt: se.CreatedAt,
+				Role:             item.Message.Role,
+				Content:          historyContent(item.Message),
+				AuthorID:         item.Message.AuthorID,
+				ToolCalls:        historyToolCalls(item.Message),
+			})
+		}
+	}
+	for _, tr := range batch.Traces {
+		m.traces[tr.ID] = clone(tr)
+	}
+	if batch.CheckpointKey != "" && len(batch.CheckpointPayload) > 0 {
+		m.checkpoints[batch.CheckpointKey] = append(json.RawMessage(nil), batch.CheckpointPayload...)
 	}
 	return nil
 }
@@ -544,6 +652,9 @@ func (m *Memory) ActiveSessions(ctx context.Context) ([]domain.Session, error) {
 func (m *Memory) SaveTrace(ctx context.Context, tr domain.Trace) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if existing, ok := m.traces[tr.ID]; ok && existing.SessionID != tr.SessionID {
+		return domain.ErrSessionConflict
+	}
 	m.traces[tr.ID] = clone(tr)
 	return ctx.Err()
 }

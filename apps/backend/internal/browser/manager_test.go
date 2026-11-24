@@ -275,3 +275,21 @@ func TestIdleCrashedBrowserReleasesSlotEvenWithActiveSession(t *testing.T) {
 		t.Fatal("dead browser retained capacity")
 	}
 }
+
+func TestReconciliationPreservesActiveEphemeralBrowserUntilIdleTTL(t *testing.T) {
+	d := &fakeDriver{}
+	m := testManager(t, func(context.Context) (driver, error) { return d, nil })
+	if _, err := perform(m, owner("ephemeral-coding-1", false)); err != nil {
+		t.Fatal(err)
+	}
+	// Normal 15s/30s reconciler sweeps with empty DB active sessions must NOT close an active ephemeral browser.
+	m.Reconcile(map[string]bool{}, time.Now().Add(30*time.Second))
+	if d.closed.Load() {
+		t.Fatal("reconciler closed active ephemeral browser before idle TTL")
+	}
+	// Once idle beyond TTL, reconciler reaps the abandoned ephemeral browser.
+	m.Reconcile(map[string]bool{}, time.Now().Add(defaultEphemeralBrowserTTL+time.Second))
+	if !d.closed.Load() {
+		t.Fatal("reconciler did not reap expired idle ephemeral browser")
+	}
+}

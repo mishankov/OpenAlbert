@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"openalbert/apps/backend/internal/codemode"
+	"github.com/mishankov/OpenAlbert/shared/codemode"
 	"openalbert/apps/backend/internal/domain"
 
 	"go.temporal.io/sdk/converter"

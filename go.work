@@ -1,9 +1,11 @@
 go 1.26.0
 
 use (
+	./apps/acp
 	./apps/backend
 	./services/backup
 	./services/log-gateway
 	./services/stt
 	./shared/backup
+	./shared/codemode
 )

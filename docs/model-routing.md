@@ -1,122 +1,78 @@
-# Модели и роли
+# Модели, провайдеры и роли
 
 [К содержанию](README.md)
 
-OpenAlbert выбирает роль по операции приложения. `chat` — интерактивный агентский цикл Telegram, включая группы, и личного HTTP API; `background` — запланированные задачи и инициатива; `analysis` — итоговый разбор закрытой сессии, краткое содержание и извлечение памяти без tools. Задача «проанализировать логи» остаётся `background`: ключевые слова не меняют роль.
+OpenAlbert выбирает роль по операции приложения: `chat` — интерактивный агентский цикл Telegram и личного HTTP API; `background` — запланированные задачи и инициатива; `analysis` — итоговый разбор закрытой сессии, краткое содержание и извлечение памяти без tools; необязательная роль `coding` задаёт модель по умолчанию для ACP кодинг-агента (если не задана, используется `chat`).
 
-## TOML
+## Формат `models.toml`
 
-Скопируй `deploy/models.example.toml` в `models.toml` рядом с `.env` и задай параметры своей модели. Приложению обязателен `LLM_CONFIG_FILE`; Compose выставляет `/etc/openalbert/models.toml` и подключает файл хоста из `LLM_CONFIG_HOST_FILE` (по умолчанию `./models.toml`) только для чтения. Вне Docker укажи `LLM_CONFIG_FILE=./models.toml`.
-
-Пример смешанной конфигурации: `chat` и `analysis` используют разные модели одной подписки, а `background` — API. В `.env` оставь `OPENAI_AUTH_MODE=profiles` (значение по умолчанию) и задай `LLM_API_KEY` для API-профиля. Slug моделей ChatGPT возьми из `/chatgpt models` после входа; ID, возможности и лимиты ниже иллюстративные и требуют проверки для выбранной модели.
+Скопируй `deploy/models.example.toml` в `models.toml` рядом с `.env`. Маршруты в `[routes]` указывают пару `<provider>/<model_id>`. Провайдеры объявляются в `[providers.<name>]`, а точечные переопределения параметров конкретной модели — в `[models."<provider>/<model_id>"]`.
 
 ```toml
 [routes]
-chat = "subscription_chat"
-background = "api_background"
-analysis = "subscription_analysis"
+chat = "chatgpt/gpt-5.4"
+background = "proxy/deepseek-chat"
+analysis = "chatgpt/gpt-5.4-mini"
+coding = "chatgpt/gpt-5.4"
 
-[profiles.subscription_chat]
-adapter = "openai_chatgpt"
-model = "your-chatgpt-chat-slug"
-capabilities = ["tools", "vision"]
-context_window_tokens = 128000
-max_output_tokens = 8192
-timeout = "120s"
-
-[profiles.api_background]
+[providers.proxy]
 adapter = "openai_chat_completions"
-base_url = "https://api.openai.com/v1"
-model = "your-api-model"
+base_url = "https://proxy.example.com/v1"
 api_key_env = "LLM_API_KEY"
-capabilities = ["tools", "vision", "structured_output"]
+discover_models = true
+include_models = ["gpt-5*", "claude-*", "deepseek-*"]
+exclude_models = ["*embedding*"]
+default_capabilities = ["tools", "vision", "structured_output"]
+default_context_window_tokens = 128000
+default_max_output_tokens = 8192
+default_timeout = "120s"
+
+[providers.proxy.headers_env]
+"X-LLM-Proxy-Key" = "OPENALBERT_PROXY_KEY"
+
+[providers.chatgpt]
+adapter = "openai_chatgpt"
+discover_models = true
+default_capabilities = ["tools", "vision", "structured_output"]
+default_context_window_tokens = 128000
+default_max_output_tokens = 8192
+default_timeout = "120s"
+
+[models."proxy/deepseek-reasoner"]
+display_name = "DeepSeek Reasoner"
 context_window_tokens = 128000
 max_output_tokens = 8192
-timeout = "120s"
+supported_reasoning_efforts = ["low", "medium", "high"]
 
-[profiles.subscription_analysis]
-adapter = "openai_chatgpt"
-model = "your-chatgpt-analysis-slug"
-capabilities = ["structured_output"]
-context_window_tokens = 64000
-max_output_tokens = 4096
-timeout = "60s"
-```
-
-`deploy/models.example.toml` остаётся API-only по умолчанию; в конце есть полностью закомментированный пример подписочного профиля и указания по смене маршрутов. Для конфигурации только с подпиской API-ключи не нужны.
-
-Имена профилей произвольные. Все три роли обязательны, каждая ссылается на один профиль. Несколько ролей могут использовать один профиль, в том числе одну модель с разными настройками. Лимиты и ID в примере иллюстративные: проверь их по контракту выбранного endpoint.
-
-Для `openai_chat_completions` значение `api_key_env` — имя переменной окружения процесса, не сам ключ. Compose передаёт `LLM_API_KEY` из `.env`. Для дополнительных имён создай рядом необязательный `models.env`:
-
-```dotenv
-ANALYSIS_LLM_API_KEY=your-analysis-api-key
-```
-
-Затем задай `chmod 600 models.env`. Оба Compose-файла читают этот файл через `env_file`; отдельный override не нужен. Помещай в него дополнительные переменные ключей, а `LLM_API_KEY` оставь в `.env`: явные значения `environment` имеют приоритет. Вне Docker загрузи эти переменные в окружение процесса перед запуском.
-
-`models.toml` и `models.env` исключены из Git и Docker build context. Автоматический backup сохраняет TOML из bind-монтирования и, если существует, точные байты `models.env` внутри зашифрованного архива. Файлы должны находиться внутри каталога установки без символических ссылок. Внешние пути TOML нужно резервировать отдельно или перенести файл внутрь установки. Для необязательного `env_file` нужен Docker Compose 2.24.0 или новее.
-
-## Прокси и HTTP-заголовки
-
-Чтобы направить профиль через прокси, укажи его базовый URL с нужным префиксом пути, например `base_url = "https://proxy.example.com/v1"`. Для `openai_chat_completions` поле `base_url` обязательно. У `openai_chatgpt` по умолчанию используется `https://api.openai.com/v1`.
-
-Оба адаптера поддерживают необязательную таблицу `headers_env`. Ключ таблицы задаёт имя HTTP-заголовка, значение указывает имя переменной окружения. Добавь заголовок в профиль, который использует прокси.
-
-```toml
-[profiles.subscription_chat.headers_env]
-"X-LLM-Proxy-Key" = "OPENALBERT_PROXY_KEY"
-```
-
-В `models.env` укажи `OPENALBERT_PROXY_KEY=your-proxy-key` с ключом своего клиента. При наличии дополнительных заголовков нужен явный `base_url`. Приложение проверяет заголовки при запуске и требует непустое значение каждой указанной переменной. Адаптер передаёт свой API-ключ или access token в `Authorization`. Служебные заголовки адаптера зарезервированы. Для удалённого прокси используй доверенный HTTPS endpoint, который получает запросы и учётные данные профиля.
-
-## Возможности и настройки провайдера
-
-- `tools` требуется профилям `chat` и `background`.
-- `vision` требуется, когда запрос действительно содержит изображения. Возможность не выдаёт новые инструменты или права.
-- `structured_output` требуется `analysis`; для этой роли адаптер запрашивает JSON-объект.
-
-Адаптер проверяет совместимость запроса перед HTTP-вызовом. Для API-профилей `openai_chat_completions` настройки endpoint задаются явно, без распознавания модели по имени или провайдера по хосту:
-
-```toml
-[profiles.api_background.options]
-reasoning_effort = "high"
+[models."proxy/deepseek-reasoner".options]
 thinking = "enabled"
 include_reasoning_content = true
-session_header = "x-opencode-session"
-output_token_field = "max_tokens"
+
+[models."proxy/deepseek-reasoner".pricing]
+input_per_million = 0.55
+cached_input_per_million = 0.14
+output_per_million = 2.19
 ```
 
-Таймаут профиля должен быть положительным и не больше `150s`: оставшееся время трёхминутной Temporal Activity нужно для сохранения результата.
+## Обнаружение моделей (`/models`) и выбор в T3 Code
 
-Включай только поддерживаемые провайдером поля. `include_reasoning_content` возвращает сохранённое служебное reasoning в историю ассистента для DeepSeek thinking с tools. `session_header` задаёт поддерживаемый заголовок OpenCode Go; его значение — непрозрачный ID разговора. `output_token_field` выбирает `max_tokens` (по умолчанию) или `max_completion_tokens`. Эти настройки не обязательно нужны вместе.
+Когда у провайдера задано `discover_models = true`, сервер опрашивает:
 
-Для API-профилей необязательная таблица `profiles.<имя>.pricing` принимает `input_per_million`, `cached_input_per_million`, `output_per_million`: неотрицательные цены в USD за миллион токенов. Если таблица задана, нужны все три значения. Без неё стоимость неизвестна; показанная оценка не заменяет биллинг провайдера.
+- `GET {base_url}/models` для адаптера `openai_chat_completions` (с кэшированием на 5 минут и фильтрацией по `include_models` / `exclude_models`);
+- каталог подписки ChatGPT (`Plan.Models`) для адаптера `openai_chatgpt`.
 
-## ChatGPT plan и API key
+Если ответ `/models` не содержит лимитов контекста или возможностей, применяются значения `default_*` провайдера, а поверх них — явные переопределения из `[models."<provider>/<model>"]`.
 
-В `OPENAI_AUTH_MODE=profiles` адаптер каждого профиля определяет оплату: `openai_chat_completions` использует свой API-ключ, `openai_chatgpt` — подключённый ChatGPT plan. Роль выбирает ровно один профиль, его явный `model`, возможности, окно контекста, резерв ответа и таймаут. Глобальная сохранённая модель аккаунта и `OPENAI_SIWC_MODEL` на этот выбор не влияют. Ошибка подписки не запускает API-запрос; переключения между профилями или полосами оплаты нет.
+Авторизованный клиент (`openalbert-acp`) получает итоговый список `tools`-моделей через `GET /api/v1/llm/models` и запускает потоковые запросы к выбранной модели через `POST /api/v1/llm/complete` (SSE).
 
-Все `openai_chatgpt` профили используют **один общий вход в ChatGPT**. Каждый профиль задаёт свои `model`, `capabilities`, `context_window_tokens`, `max_output_tokens` и `timeout` и может выбрать прокси через `base_url` и `headers_env`. Оценка стоимости в USD для подписки не рассчитывается.
+## Прокси, заголовки и секреты
 
-`max_output_tokens` подписочного профиля — только локальный резерв для проверки входного контекста, а не ограничение выходного ответа OpenAI: [preview-контракт](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations) запрещает отправлять это поле. И API, и подписочные профили проверяют контекст по своему `context_window_tokens` с этим резервом; оба соблюдают `timeout` профиля.
+- `api_key_env` и `headers_env` ссылаются на имена переменных окружения (значения задаются в `.env` или `models.env`), а не на сами ключи.
+- При наличии `headers_env` требуется явный `base_url`. Служебные HTTP-заголовки (`Authorization`, `Host`, и т. п.) зарезервированы.
+- Для `openai_chatgpt` запрещены `api_key_env`, `default_options`/`options` и `default_pricing`/`pricing`: все подписочные модели используют единый вход `/chatgpt login`.
 
-[Вход в ChatGPT](chatgpt-plan-usage.md) через `/chatgpt login` в Telegram подключает общий аккаунт. `/chatgpt models` и HTTP API получают каталог через первый подписочный профиль среди маршрутов `chat`, `background`, `analysis` в этом порядке. Меняй модель в TOML и пересоздавай приложение: `/chatgpt model` и `PUT /api/v1/chatgpt/model` в `profiles` отклоняются с объяснением, HTTP возвращает `409 config_managed`. `/chatgpt status` и HTTP API статус показывают для каждой роли профиль, модель и `auth_mode`; активная полоса — `profiles`.
+## Валидация и лимиты
 
-### Совместимость старых глобальных режимов
-
-`api_key`, `siwc` и `auto` поддерживаются только с TOML, содержащим исключительно `openai_chat_completions`. `api_key` использует API-профили ролей; `siwc` отправляет все роли в общий ChatGPT plan; `auto` сначала использует план, затем API-профиль при предусмотренных ошибках доступности/лимита. Для `api_key` и `auto` нужны ключи API-профилей. Добавление `openai_chatgpt` требует перехода на `profiles`.
-
-Только в старых `siwc`/`auto` `OPENAI_SIWC_MODEL` задаёт начальную общую модель (по умолчанию model ID профиля `chat`); `/chatgpt model` меняет и сохраняет её для всех ролей. Глобальный `auto` не является fallback между TOML-профилями.
-
-## Исполнение и ошибки
-
-TOML загружается и проверяется при старте. Неизвестные поля, отсутствующие роли, неизвестные профили, неподдерживаемые возможности и некорректные лимиты приводят к ошибке запуска. Маршрута по умолчанию, fallback на другую модель, переопределения через `/model` или параметры задачи нет. Для применения изменений пересоздай приложение.
-
-Каждый вызов учитывает окно контекста профиля и резерв ответа, включая историю, instructions, tools и изображения. Используется консервативная оценка, а не точный tokenizer провайдера. Удаляются только целые старые ходы; текущий запрос и его обмены с tools сохраняются. Если обязательная часть не помещается, вызов завершается понятной ошибкой. Отдельный байтовый лимит Temporal продолжает действовать.
-
-Телеметрия и результат вызова показывают роль, профиль, фактическую модель, токены и при заданных ценах оценку стоимости. Возврат сохранённого checkpoint не означает новый платный запрос. Ошибки не переключают модель.
-
-Только в старом глобальном `siwc` анализ сохраняет целые записи в пределах локального лимита 64 000 байт сериализованного Responses-запроса, независимо от API-профилей. Это защитный лимит приложения, а не заявленное контекстное окно модели ChatGPT. В `auto` остаётся бюджет API-профиля, чтобы запрос помещался и при переходе на API.
-
-Если даже новейшая целая запись анализа не помещается без памяти, сессия сохраняет `analysis_error=context_limit` и исключается из очереди автоматического анализа. Неудача не считается успешным анализом; исходная история остаётся в хранилище, а другие сессии продолжают обрабатываться. Временные ошибки провайдера по-прежнему допускают повторную попытку.
+- Таймаут (`default_timeout` / `timeout`) должен быть положительным и не больше `150s`.
+- Роли `chat`, `background` и `coding` требуют возможность `tools`; роль `analysis` — `structured_output`.
+- `models.toml` загружается и проверяется при старте приложения без вывода секретов в сообщениях об ошибках.

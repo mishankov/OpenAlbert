@@ -200,8 +200,20 @@ func (s *Store) MarkIncomingHandled(ctx context.Context, id string) error {
 func (s *Store) Conversation(ctx context.Context, id string) (domain.Conversation, bool, error) {
 	return oneJSON[domain.Conversation](ctx, s.pool, "SELECT data FROM openalbert_conversations WHERE id=$1", id)
 }
+func (s *Store) SaveConversation(ctx context.Context, conv domain.Conversation) error {
+	if err := validID(conv.ID); err != nil {
+		return err
+	}
+	conv.DeliveryChannel = ""
+	b, err := encode(conv)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, "INSERT INTO openalbert_conversations(id,data) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data", conv.ID, b)
+	return err
+}
 func (s *Store) ListPrivateConversations(ctx context.Context) ([]domain.Conversation, error) {
-	return selectJSON[domain.Conversation](ctx, s.pool, "SELECT data FROM openalbert_conversations WHERE (data->>'private')::boolean ORDER BY id")
+	return selectJSON[domain.Conversation](ctx, s.pool, "SELECT data FROM openalbert_conversations WHERE (data->>'private')::boolean AND id NOT LIKE 'coding:%' ORDER BY id")
 }
 func (s *Store) ListConversations(ctx context.Context) ([]domain.Conversation, error) {
 	return selectJSON[domain.Conversation](ctx, s.pool, "SELECT data FROM openalbert_conversations ORDER BY id")
@@ -296,6 +308,9 @@ ORDER BY seq DESC LIMIT $4`, scope, query, before, historyLimit(n))
 	}
 	return out, rows.Err()
 }
+func (s *Store) Session(ctx context.Context, id string) (domain.Session, bool, error) {
+	return oneJSON[domain.Session](ctx, s.pool, "SELECT data FROM openalbert_sessions WHERE id=$1", id)
+}
 func (s *Store) StartSession(ctx context.Context, se domain.Session) error {
 	if err := validID(se.ID); err != nil {
 		return err
@@ -311,6 +326,162 @@ func (s *Store) StartSession(ctx context.Context, se domain.Session) error {
 	}
 	_, err = s.pool.Exec(ctx, "INSERT INTO openalbert_sessions(id,conversation_id,data) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", se.ID, se.ConversationID, b)
 	return err
+}
+
+// sanitizeJSONB removes NUL escape sequences (\u0000) and literal NUL bytes
+// that PostgreSQL jsonb rejects with SQLSTATE 22P05.
+func sanitizeJSONB(raw []byte) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	var out []byte
+	for i := 0; i < len(raw); {
+		if raw[i] == 0 {
+			if out == nil {
+				out = append(make([]byte, 0, len(raw)), raw[:i]...)
+			}
+			out = append(out, '\xef', '\xbf', '\xbd')
+			i++
+			continue
+		}
+		if raw[i] == '\\' && i+5 < len(raw) && raw[i+1] == 'u' && raw[i+2] == '0' && raw[i+3] == '0' && raw[i+4] == '0' && raw[i+5] == '0' {
+			// Count preceding backslashes to distinguish \u0000 from \\u0000.
+			slashes := 0
+			for j := i - 1; j >= 0 && raw[j] == '\\'; j-- {
+				slashes++
+			}
+			if slashes%2 == 0 {
+				if out == nil {
+					out = append(make([]byte, 0, len(raw)), raw[:i]...)
+				}
+				out = append(out, `\ufffd`...)
+				i += 6
+				continue
+			}
+		}
+		if out != nil {
+			out = append(out, raw[i])
+		}
+		i++
+	}
+	if out == nil {
+		return raw
+	}
+	return out
+}
+
+func (s *Store) SyncCodingSession(ctx context.Context, batch domain.CodingSyncBatch) error {
+	if err := validID(batch.SessionID); err != nil {
+		return err
+	}
+	if err := validID(batch.ConversationID); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(batch.ConversationID, "coding:") {
+		return domain.ErrSessionForbidden
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Ensure conversation exists / update title if provided.
+	var existingConvRaw []byte
+	convErr := tx.QueryRow(ctx, "SELECT data FROM openalbert_conversations WHERE id=$1", batch.ConversationID).Scan(&existingConvRaw)
+	if errors.Is(convErr, pgx.ErrNoRows) {
+		title := strings.TrimSpace(batch.Title)
+		if title == "" {
+			title = "Coding · " + batch.SessionID
+		}
+		convBytes, err := encode(domain.Conversation{
+			ID: batch.ConversationID, Title: title, OwnerID: batch.OwnerID, Private: true,
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, "INSERT INTO openalbert_conversations(id,data) VALUES($1,$2) ON CONFLICT (id) DO NOTHING", batch.ConversationID, sanitizeJSONB(convBytes)); err != nil {
+			return err
+		}
+	} else if convErr != nil {
+		return convErr
+	} else if title := strings.TrimSpace(batch.Title); title != "" {
+		var conv domain.Conversation
+		if json.Unmarshal(existingConvRaw, &conv) == nil && conv.Title != title {
+			conv.Title = title
+			if convBytes, err := encode(conv); err == nil {
+				if _, err := tx.Exec(ctx, "UPDATE openalbert_conversations SET data=$2 WHERE id=$1", batch.ConversationID, sanitizeJSONB(convBytes)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// Atomically ensure session row exists, then lock it FOR UPDATE so close cannot race with sync.
+	sessBytes, err := encode(domain.Session{
+		ID: batch.SessionID, ConversationID: batch.ConversationID, Status: "active", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO openalbert_sessions(id,conversation_id,data) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", batch.SessionID, batch.ConversationID, sessBytes); err != nil {
+		return err
+	}
+	var lockedRaw []byte
+	if err := tx.QueryRow(ctx, "SELECT data FROM openalbert_sessions WHERE id=$1 FOR UPDATE", batch.SessionID).Scan(&lockedRaw); err != nil {
+		return err
+	}
+	var existing domain.Session
+	if err := json.Unmarshal(lockedRaw, &existing); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(existing.ConversationID, "coding:") {
+		return domain.ErrSessionForbidden
+	}
+	if existing.ConversationID != batch.ConversationID {
+		return domain.ErrSessionConflict
+	}
+	if existing.Status != "active" {
+		return domain.ErrSessionClosed
+	}
+
+	for _, item := range batch.Messages {
+		if err := validID(item.Key); err != nil {
+			return err
+		}
+		mb, err := encode(item.Message)
+		if err != nil {
+			return err
+		}
+		mb = sanitizeJSONB(mb)
+		if _, err := tx.Exec(ctx, "INSERT INTO openalbert_messages(session_id,mutation_key,data,recorded_at) VALUES($1,$2,$3,now()) ON CONFLICT DO NOTHING", batch.SessionID, item.Key, mb); err != nil {
+			return err
+		}
+	}
+	for _, tr := range batch.Traces {
+		raw, err := json.Marshal(tr)
+		if err != nil {
+			return err
+		}
+		raw = sanitizeJSONB(raw)
+		tag, err := tx.Exec(ctx, `INSERT INTO openalbert_traces(id,session_id,turn_id,started_at,data) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data WHERE openalbert_traces.session_id=EXCLUDED.session_id`, tr.ID, tr.SessionID, tr.TurnID, tr.StartedAt, raw)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.ErrSessionConflict
+		}
+	}
+	if batch.CheckpointKey != "" && len(batch.CheckpointPayload) > 0 {
+		if err := validID(batch.CheckpointKey); err != nil {
+			return err
+		}
+		cp := sanitizeJSONB(batch.CheckpointPayload)
+		if _, err := tx.Exec(ctx, "INSERT INTO openalbert_checkpoints(id,data) VALUES($1,$2) ON CONFLICT (id) DO UPDATE SET data=EXCLUDED.data", batch.CheckpointKey, cp); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 func (s *Store) EndSession(ctx context.Context, id, summary string) error {
 	tag, err := s.pool.Exec(ctx, "UPDATE openalbert_sessions SET data=jsonb_set(jsonb_set(data,'{status}','\"closed\"'::jsonb),'{summary}',to_jsonb($2::text)) WHERE id=$1 AND (data->>'status'='active' OR (COALESCE(data->>'summary','')='' AND $2<>''))", id, summary)

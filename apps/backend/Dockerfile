@@ -1,10 +1,12 @@
 FROM golang:1.27.4-alpine AS build
 ENV GOWORK=off
 WORKDIR /src/apps/backend
-COPY shared/backup/go.mod /src/shared/backup/
+COPY shared/backup/go.mod shared/backup/go.sum /src/shared/backup/
+COPY shared/codemode/go.mod shared/codemode/go.sum /src/shared/codemode/
 COPY apps/backend/go.mod apps/backend/go.sum ./
 RUN go mod download
 COPY shared/backup /src/shared/backup
+COPY shared/codemode /src/shared/codemode
 COPY apps/backend ./
 RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/openalbert ./cmd/openalbert
 

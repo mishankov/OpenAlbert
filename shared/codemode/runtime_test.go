@@ -3,6 +3,7 @@ package codemode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -140,6 +141,106 @@ return tools;
 	if string(result.Output) != `["local variable",2]` {
 		t.Fatalf("unexpected result with shadowed helpers: %+v", result)
 	}
+}
+
+func TestRunLiveMultiBatchCustomLimitsAndSlowToolPause(t *testing.T) {
+	batches := 0
+	res, err := RunLive(context.Background(), LiveInput{
+		Code: `
+const [a, b] = await Promise.all([
+  tools.read({name: "a", pad: "x".repeat(120000)}),
+  tools.read({name: "b"}),
+]);
+store("seen", a + b);
+const saved = await tools.write({value: load("seen")});
+return {saved, big: "y".repeat(40000).length};
+`,
+		Tools: []Tool{
+			{Name: "read", Description: "Read file", Parameters: json.RawMessage(`{"type":"object"}`)},
+			{Name: "write", Description: "Write file", Parameters: json.RawMessage(`{"type":"object"}`)},
+		},
+		Limits: Limits{
+			MaxArgumentsBytes: 256 << 10,
+			MaxOutputBytes:    128 << 10,
+			MaxStateBytes:     64 << 10,
+			StepTimeout:       150 * time.Millisecond,
+		},
+	}, func(ctx context.Context, reqs []Request) ([]Receipt, error) {
+		batches++
+		// Sleep longer than StepTimeout to prove JS CPU timeout pauses during Go tool execution.
+		time.Sleep(220 * time.Millisecond)
+		receipts := make([]Receipt, len(reqs))
+		for i, r := range reqs {
+			if r.Name == "read" {
+				var p struct{ Name string }
+				_ = json.Unmarshal(r.Arguments, &p)
+				raw, _ := json.Marshal(p.Name)
+				receipts[i] = Receipt{Request: r, Result: raw}
+			} else {
+				receipts[i] = Receipt{Request: r, Result: json.RawMessage(`"ok"`)}
+			}
+		}
+		return receipts, nil
+	})
+	if err != nil || res.Error != "" {
+		t.Fatalf("RunLive failed: %+v %v", res, err)
+	}
+	if batches != 2 {
+		t.Fatalf("expected 2 batches, got %d", batches)
+	}
+	if string(res.Output) != `{"saved":"ok","big":40000}` || string(res.State["seen"]) != `"ab"` {
+		t.Fatalf("unexpected RunLive output/state: %+v", res)
+	}
+}
+
+func TestRunLiveCancellationAndStepDeadline(t *testing.T) {
+	t.Run("step deadline", func(t *testing.T) {
+		res, err := RunLive(context.Background(), LiveInput{
+			Code:   `for (;;) {}`,
+			Limits: Limits{StepTimeout: 100 * time.Millisecond},
+		}, nil)
+		if err != nil || !strings.Contains(res.Error, "deadline") {
+			t.Fatalf("expected step deadline error, got %+v %v", res, err)
+		}
+	})
+	t.Run("context cancel during tool", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		_, err := RunLive(ctx, LiveInput{
+			Code:  `return await tools.slow({});`,
+			Tools: []Tool{{Name: "slow"}},
+		}, func(ctx context.Context, reqs []Request) ([]Receipt, error) {
+			cancel()
+			return nil, ctx.Err()
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	})
+	t.Run("large output within rebuilt bridge limit", func(t *testing.T) {
+		res, err := RunLive(context.Background(), LiveInput{
+			Code: `return "A".repeat(70000);`,
+			Limits: Limits{
+				MaxOutputBytes:  128 << 10,
+				MaxOutputBlocks: 256,
+				MaxStateBytes:   64 << 10,
+			},
+		}, nil)
+		if err != nil || res.Error != "" {
+			t.Fatalf("expected 70k output to succeed, got %+v %v", res, err)
+		}
+		var got string
+		if err := json.Unmarshal(res.Output, &got); err != nil || len(got) != 70000 {
+			t.Fatalf("expected 70000-char string, got len=%d err=%v", len(got), err)
+		}
+	})
+	t.Run("legacy Run preserves 128 output block limit", func(t *testing.T) {
+		res, err := Run(context.Background(), Input{
+			Code: `for (let i = 0; i < 129; i++) { text("x"); }`,
+		})
+		if err != nil || !strings.Contains(res.Error, "output limit") {
+			t.Fatalf("expected legacy Run to reject 129 text() blocks, got %+v %v", res, err)
+		}
+	})
 }
 
 func runTestScript(t *testing.T, in Input) Result {

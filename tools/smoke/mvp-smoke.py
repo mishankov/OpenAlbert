@@ -48,20 +48,20 @@ def running_environment(compose, env, service, keys):
 
 
 def model_config(base_url):
-    """Synthetic profile shared by deployment smokes; no application config is read."""
+    """Synthetic provider shared by deployment smokes; no application config is read."""
     return f'''[routes]
-chat = "smoke"
-background = "smoke"
-analysis = "smoke"
-[profiles.smoke]
+chat = "smoke/smoke-model"
+background = "smoke/smoke-model"
+analysis = "smoke/smoke-model"
+[providers.smoke]
 adapter = "openai_chat_completions"
 base_url = {json.dumps(base_url)}
-model = "smoke-model"
 api_key_env = "LLM_API_KEY"
-capabilities = ["tools", "vision", "structured_output"]
-context_window_tokens = 256000
-max_output_tokens = 8192
-timeout = "120s"
+discover_models = false
+default_capabilities = ["tools", "vision", "structured_output"]
+default_context_window_tokens = 256000
+default_max_output_tokens = 8192
+default_timeout = "120s"
 '''
 
 

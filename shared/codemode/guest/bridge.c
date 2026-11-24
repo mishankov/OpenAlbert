@@ -5,7 +5,7 @@
 #include "quickjs.h"
 
 #define EXPORT(name) __attribute__((export_name(#name)))
-#define MAX_RESULT_BYTES (64 * 1024)
+#define MAX_RESULT_BYTES (256 * 1024)
 
 __attribute__((import_module("openalbert"), import_name("enqueue_tool")))
 extern int32_t enqueue_tool(const char *, size_t, const char *, size_t);

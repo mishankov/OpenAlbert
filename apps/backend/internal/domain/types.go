@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -220,6 +221,28 @@ type HistoryToolCall struct {
 	Name string `json:"name"`
 }
 
+var (
+	ErrSessionForbidden = errors.New("session does not belong to a coding conversation")
+	ErrSessionConflict  = errors.New("session belongs to a different coding conversation")
+	ErrSessionClosed    = errors.New("coding session is already closed")
+)
+
+type CodingSyncMessage struct {
+	Key     string  `json:"key"`
+	Message Message `json:"message"`
+}
+
+type CodingSyncBatch struct {
+	SessionID         string
+	ConversationID    string
+	Title             string
+	OwnerID           int64
+	Messages          []CodingSyncMessage
+	Traces            []Trace
+	CheckpointKey     string
+	CheckpointPayload json.RawMessage
+}
+
 // Repository stores operational state. All mutation keys supplied by callers must be idempotent.
 type Repository interface {
 	Close()
@@ -241,10 +264,13 @@ type Repository interface {
 	Incoming(context.Context, string) (Incoming, bool, error)
 	MarkIncomingHandled(context.Context, string) error
 	Conversation(context.Context, string) (Conversation, bool, error)
+	SaveConversation(context.Context, Conversation) error
 	ListPrivateConversations(context.Context) ([]Conversation, error)
 	ListConversations(context.Context) ([]Conversation, error)
 	ConversationHistory(context.Context, string, string, int64, int) ([]HistoryMessage, error)
+	Session(context.Context, string) (Session, bool, error)
 	StartSession(context.Context, Session) error
+	SyncCodingSession(context.Context, CodingSyncBatch) error
 	EndSession(context.Context, string, string) error
 	PendingAnalysis(context.Context, int) ([]Session, error)
 	ActiveSessions(context.Context) ([]Session, error)

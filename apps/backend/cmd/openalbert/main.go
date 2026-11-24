@@ -192,7 +192,7 @@ func run() error {
 			defer w.Stop()
 		}
 	}
-	(&desktopapi.API{Repo: artifacts, Memory: knowledgeStore, OwnerID: c.TelegramOwnerUserID, Token: c.DesktopAPIToken, Billing: billing}).Register(mux)
+	(&desktopapi.API{Repo: artifacts, Memory: knowledgeStore, OwnerID: c.TelegramOwnerUserID, Token: c.DesktopAPIToken, Billing: billing, Activities: activities, Logger: logger}).Register(mux)
 	inspector.Register(mux, repo, artifacts)
 	inspector.RegisterMemory(mux, repo, knowledgeStore)
 	runtime.Start(ctx)

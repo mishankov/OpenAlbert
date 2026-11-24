@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ type BillingModel struct {
 	Plan                      PlanClient
 	API                       domain.Model
 	Cooldown                  time.Duration
+	StreamTimeout             time.Duration
 	mu                        sync.Mutex
 	retryAt                   time.Time
 	lastErr                   error
@@ -156,6 +158,237 @@ func (b *BillingModel) Complete(ctx context.Context, messages []domain.Message, 
 	b.apiRequests++
 	b.mu.Unlock()
 	return b.API.Complete(ctx, messages, tools)
+}
+
+// Catalog exposes selectable models from the configured billing mode/router for coding clients.
+func (b *BillingModel) Catalog(ctx context.Context, refresh bool) (string, []domain.CatalogModel, error) {
+	if b.Mode == "siwc" && b.Plan != nil {
+		defSlug := b.Plan.Status().Model
+		models, err := b.Plan.Models(ctx)
+		if err != nil && defSlug == "" {
+			return "", nil, err
+		}
+		var out []domain.CatalogModel
+		seen := map[string]bool{}
+		for _, m := range models {
+			if m.Slug == "" || (m.Visibility != "" && m.Visibility != "list") {
+				continue
+			}
+			id := "chatgpt/" + m.Slug
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			name := m.DisplayName
+			if name == "" {
+				name = m.Slug
+			}
+			out = append(out, domain.CatalogModel{
+				ID:                  id,
+				Provider:            "chatgpt",
+				Model:               m.Slug,
+				DisplayName:         name,
+				Capabilities:        []string{"tools", "vision", "structured_output"},
+				ContextWindowTokens: 128000,
+				MaxOutputTokens:     8192,
+				Default:             m.Slug == defSlug,
+			})
+		}
+		defaultID := ""
+		if defSlug != "" {
+			defaultID = "chatgpt/" + defSlug
+			if !seen[defaultID] {
+				out = append([]domain.CatalogModel{{
+					ID:                  defaultID,
+					Provider:            "chatgpt",
+					Model:               defSlug,
+					DisplayName:         defSlug,
+					Capabilities:        []string{"tools", "vision", "structured_output"},
+					ContextWindowTokens: 128000,
+					MaxOutputTokens:     8192,
+					Default:             true,
+				}}, out...)
+			}
+		} else if len(out) > 0 {
+			out[0].Default = true
+			defaultID = out[0].ID
+		}
+		return defaultID, out, nil
+	}
+	if router, ok := b.API.(interface {
+		Catalog(context.Context, bool) (string, []domain.CatalogModel, error)
+	}); ok {
+		def, models, err := router.Catalog(ctx, refresh)
+		if err != nil {
+			return def, models, err
+		}
+		// In auto mode while the ChatGPT plan lane is active, strip reasoning_effort
+		// options because the plan lane cannot honor per-request reasoning overrides.
+		if b.Mode == "auto" && b.Plan != nil {
+			b.mu.Lock()
+			planActive := !b.ineligible && !time.Now().Before(b.retryAt)
+			b.mu.Unlock()
+			if planActive {
+				for i := range models {
+					models[i].SupportedReasoningEfforts = nil
+				}
+			}
+		}
+		return def, models, nil
+	}
+	return "", nil, errors.New("model catalog is unavailable")
+}
+
+// CompleteModelStream streams a completion for a specifically selected model ID
+// while respecting the configured billing mode (profiles, siwc, auto, api_key).
+func (b *BillingModel) CompleteModelStream(ctx context.Context, modelID string, opts domain.ModelOptions, messages []domain.Message, tools []domain.Tool, onEvent domain.StreamFunc) (domain.Completion, error) {
+	if b.Mode == "profiles" {
+		router, ok := b.API.(interface {
+			CompleteModelStream(context.Context, string, domain.ModelOptions, []domain.Message, []domain.Tool, domain.StreamFunc) (domain.Completion, error)
+		})
+		if !ok {
+			return domain.Completion{}, errors.New("streaming model gateway is unavailable")
+		}
+		lane := ""
+		if laner, ok := b.API.(interface{ ModelLane(string) string }); ok {
+			lane = laner.ModelLane(modelID)
+		}
+		b.mu.Lock()
+		switch lane {
+		case "siwc":
+			b.siwcRequests++
+		case "api_key":
+			b.apiRequests++
+		}
+		b.mu.Unlock()
+		res, err := router.CompleteModelStream(ctx, modelID, opts, messages, tools, onEvent)
+		if err != nil && lane == "siwc" {
+			b.mu.Lock()
+			b.recordPlanError(ctx, err)
+			b.mu.Unlock()
+			res.Message = domain.Message{}
+		}
+		return res, err
+	}
+
+	// Validate model selection and reasoning_effort overrides before attempting
+	// either lane in auto mode.
+	if b.Mode == "auto" {
+		if validator, ok := b.API.(interface {
+			ValidateModelOptions(string, domain.ModelOptions) error
+		}); ok {
+			if err := validator.ValidateModelOptions(modelID, opts); err != nil {
+				return domain.Completion{}, err
+			}
+		}
+	}
+
+	b.mu.Lock()
+	if b.Mode == "siwc" && (b.ineligible || time.Now().Before(b.retryAt)) {
+		err := b.lastErr
+		b.mu.Unlock()
+		if err == nil {
+			err = siwc.ErrDisconnected
+		}
+		return domain.Completion{}, err
+	}
+	usePlan := b.Mode == "siwc" || (b.Mode == "auto" && !b.ineligible && !time.Now().Before(b.retryAt))
+	if usePlan && opts.ReasoningEffort != "" {
+		b.mu.Unlock()
+		return domain.Completion{}, errors.New("reasoning_effort override is not supported while the ChatGPT plan lane is active")
+	}
+	if usePlan {
+		b.siwcRequests++
+	}
+	b.mu.Unlock()
+
+	if usePlan {
+		if b.Plan == nil {
+			err := siwc.ErrDisconnected
+			if b.Mode == "siwc" {
+				return domain.Completion{}, err
+			}
+		} else {
+			emitted := false
+			wrappedOnEvent := func(ev domain.StreamEvent) error {
+				emitted = true
+				if onEvent != nil {
+					return onEvent(ev)
+				}
+				return nil
+			}
+			result, err := b.streamViaPlan(ctx, modelID, messages, tools, wrappedOnEvent)
+			if err == nil {
+				return result, nil
+			}
+			b.mu.Lock()
+			api := b.recordPlanError(ctx, err)
+			canFallback := b.Mode == "auto" && fallback(err) && ctx.Err() == nil && !emitted
+			if fallback(err) && ctx.Err() == nil {
+				b.lastErr = err
+				cooldown := b.Cooldown
+				if cooldown <= 0 {
+					cooldown = 15 * time.Minute
+				}
+				b.retryAt = time.Now().Add(cooldown)
+				if api != nil && api.Code == "subscription_sharing_user_not_eligible" {
+					b.ineligible = true
+				}
+			}
+			b.mu.Unlock()
+			if !canFallback {
+				return domain.Completion{}, err
+			}
+		}
+	}
+
+	router, ok := b.API.(interface {
+		CompleteModelStream(context.Context, string, domain.ModelOptions, []domain.Message, []domain.Tool, domain.StreamFunc) (domain.Completion, error)
+	})
+	if !ok {
+		return domain.Completion{}, errors.New("streaming model gateway is unavailable")
+	}
+	b.mu.Lock()
+	b.apiRequests++
+	b.mu.Unlock()
+	return router.CompleteModelStream(ctx, modelID, opts, messages, tools, onEvent)
+}
+
+func (b *BillingModel) streamViaPlan(ctx context.Context, modelID string, messages []domain.Message, tools []domain.Tool, onEvent domain.StreamFunc) (domain.Completion, error) {
+	timeout := b.StreamTimeout
+	if timeout <= 0 {
+		timeout = domain.MaxModelTimeout
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	slug := b.Plan.Status().Model
+	if prefix, s, ok := strings.Cut(modelID, "/"); ok && prefix == "chatgpt" && s != "" {
+		slug = s
+	} else if slug == "" {
+		if _, s, ok := strings.Cut(modelID, "/"); ok && s != "" {
+			slug = s
+		} else {
+			slug = modelID
+		}
+	}
+	if streamer, ok := b.Plan.(interface {
+		CompleteForProfileStream(context.Context, domain.ModelProfile, []domain.Message, []domain.Tool, domain.StreamFunc) (domain.Completion, error)
+	}); ok {
+		return streamer.CompleteForProfileStream(ctx, domain.ModelProfile{Model: slug}, messages, tools, onEvent)
+	}
+	res, err := b.Plan.Complete(ctx, messages, tools)
+	if err != nil {
+		return domain.Completion{}, err
+	}
+	if onEvent != nil && res.Message.Content != "" {
+		if err := onEvent(domain.StreamEvent{Type: "text_delta", Delta: res.Message.Content}); err != nil {
+			return domain.Completion{}, err
+		}
+	}
+	return res, nil
 }
 
 var _ domain.Model = (*BillingModel)(nil)
