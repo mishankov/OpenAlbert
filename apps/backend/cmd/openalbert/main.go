@@ -109,6 +109,13 @@ func run() error {
 			return err
 		}
 	}
+	var voice domain.SpeechSynthesizer
+	if c.TTSBaseURL != "" {
+		voice, err = integrations.NewTTS(integrations.TTSConfig{BaseURL: c.TTSBaseURL, APIKey: c.TTSAPIKey, Model: c.TTSModel, Voice: c.TTSVoice})
+		if err != nil {
+			return err
+		}
+	}
 	search, err := integrations.NewSearch(integrations.YandexConfig{APIKey: c.YandexAPIKey, FolderID: c.YandexFolderID, Endpoint: c.YandexEndpoint})
 	if err != nil {
 		return err
@@ -166,7 +173,7 @@ func run() error {
 	if browsers != nil {
 		activities.Widgets.PrepareCloseTask = browsers.(*browser.Manager).PrepareCloseTask
 	}
-	runtime := &orchestration.Runtime{Repo: artifacts, Activities: activities, Telegram: telegram, Client: temporalClient, TaskQueue: c.TemporalTaskQueue, IdleTimeout: c.SessionIdleTimeout, MaxSteps: c.MaxAgentSteps, InitiativeInterval: c.InitiativeInterval, Logger: logger}
+	runtime := &orchestration.Runtime{Repo: artifacts, Activities: activities, Telegram: telegram, TTS: voice, Client: temporalClient, TaskQueue: c.TemporalTaskQueue, IdleTimeout: c.SessionIdleTimeout, MaxSteps: c.MaxAgentSteps, InitiativeInterval: c.InitiativeInterval, Logger: logger}
 	worker := runtime.Worker()
 	if err = worker.Start(); err != nil {
 		return errors.New("Temporal worker startup failed")

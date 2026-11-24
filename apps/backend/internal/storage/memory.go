@@ -395,6 +395,31 @@ func (m *Memory) PendingOutgoing(ctx context.Context, n int) ([]domain.Outgoing,
 	}
 	return out, ctx.Err()
 }
+
+func (m *Memory) PendingDeliverableOutgoing(ctx context.Context, n int, readyVoiceID string, startVoice bool) ([]domain.Outgoing, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []domain.Outgoing
+	waitingForVoice := make(map[string]bool)
+	for _, id := range m.outgoingOrder {
+		o := m.outgoing[id]
+		if o.State != "pending" || waitingForVoice[o.Conversation.ID] {
+			continue
+		}
+		if o.VoiceReplyTo > 0 && o.VoiceFallback == "" {
+			waitingForVoice[o.Conversation.ID] = true
+			if id != readyVoiceID && !startVoice {
+				continue
+			}
+			startVoice = false
+		}
+		out = append(out, clone(o))
+		if len(out) >= limitValue(n) {
+			break
+		}
+	}
+	return out, ctx.Err()
+}
 func (m *Memory) SetOutgoingState(ctx context.Context, id, state string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -418,6 +443,21 @@ func (m *Memory) SetOutgoingState(ctx context.Context, id, state string) error {
 	if state == "sending" {
 		o.Attempts++
 	}
+	m.outgoing[id] = o
+	return nil
+}
+
+func (m *Memory) FallbackVoice(ctx context.Context, id string, reason domain.VoiceFallback) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o := m.outgoing[id]
+	if o.VoiceReplyTo == 0 || o.VoiceFallback != "" || (o.State != "pending" && o.State != "sending") {
+		return ErrInvalidTransition
+	}
+	o.State, o.VoiceFallback = "pending", reason
 	m.outgoing[id] = o
 	return nil
 }

@@ -39,6 +39,8 @@ type Incoming struct {
 	Quote          *MessageQuote `json:"quote,omitempty"`
 	Attachments    []Attachment  `json:"attachments,omitempty"`
 	CreatedAt      time.Time     `json:"created_at"`
+
+	TelegramMessageID int64 `json:"telegram_message_id,omitempty"` // Chat-scoped message ID used to address a Telegram reply.
 }
 
 // ReplyContext is a snapshot supplied by Telegram, not another incoming message.
@@ -66,7 +68,7 @@ type ToolCall struct {
 
 // IsReplyTool identifies tools that queue user-facing replies.
 func IsReplyTool(name string) bool {
-	return name == "send_message" || name == "send_rich_message"
+	return name == "send_message" || name == "send_rich_message" || name == "send_voice"
 }
 
 type Message struct {
@@ -156,7 +158,19 @@ type Outgoing struct {
 	EnqueuedAt      time.Time    `json:"enqueued_at,omitempty"`
 	PartIndex       int          `json:"part_index,omitempty"`
 	PartCount       int          `json:"part_count,omitempty"`
+
+	VoiceReplyTo  int64         `json:"voice_reply_to,omitempty"`
+	VoiceFallback VoiceFallback `json:"voice_fallback,omitempty"`
 }
+
+type VoiceFallback string
+
+const (
+	VoiceDisabled        VoiceFallback = "disabled"
+	VoiceSynthesisFailed VoiceFallback = "synthesis_failed"
+	VoiceRejected        VoiceFallback = "telegram_rejected"
+	VoiceUnconfirmed     VoiceFallback = "telegram_unconfirmed"
+)
 
 // TextEntity uses Telegram's UTF-16 code unit offsets, including for emoji.
 type TextEntity struct {
@@ -199,7 +213,7 @@ type HistoryMessage struct {
 	Content          string            `json:"content"`
 }
 
-// HistoryToolCall identifies an actual send_message or send_rich_message call. Its text is already
+// HistoryToolCall identifies an actual reply tool call. Its text is already
 // included in HistoryMessage.Content; full arguments remain in stored messages.
 type HistoryToolCall struct {
 	ID   string `json:"id"`
@@ -246,7 +260,9 @@ type Repository interface {
 	RunnableTasks(context.Context) ([]Task, error)
 	EnqueueOutgoing(context.Context, Outgoing) error
 	PendingOutgoing(context.Context, int) ([]Outgoing, error)
+	PendingDeliverableOutgoing(ctx context.Context, limit int, readyVoiceID string, startVoice bool) ([]Outgoing, error)
 	SetOutgoingState(context.Context, string, string) error
+	FallbackVoice(context.Context, string, VoiceFallback) error
 	StartProgress(context.Context, Progress) error
 	ReportProgress(context.Context, string, int, string) error
 	EndProgress(context.Context, string, string) error

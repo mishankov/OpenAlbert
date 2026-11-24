@@ -27,7 +27,7 @@ Use an async function body (top-level await and return are supported). Await eve
 func codemodeDefinition(finalize bool) domain.Tool {
 	description := codemodeDescription
 	if finalize {
-		description = "Run an async JavaScript script to deliver the remaining reply. The only available tools are await tools.send_message({text}) and await tools.send_rich_message({text}). Either accepts an optional artifact_id. Queue each remaining part once."
+		description = "Run an async JavaScript script to deliver the remaining reply. Use await tools.send_message({text}) or await tools.send_rich_message({text}). Either accepts an optional artifact_id. Use await tools.send_voice({text}) if it is available and the user explicitly asked for voice. Queue each remaining part once."
 	}
 	return domain.Tool{
 		Name:        CodemodeName,
@@ -131,8 +131,9 @@ func (a *Activities) CodemodeStep(ctx context.Context, in CodemodeInput) (codemo
 		}
 	}
 	turn := Turn{
-		Input:        RunInput{TaskID: in.TaskID, Initiative: in.Background},
-		Conversation: in.Conversation,
+		Input:         RunInput{TaskID: in.TaskID, Initiative: in.Background},
+		Conversation:  in.Conversation,
+		TelegramReply: in.TelegramReply,
 	}
 	var tools []codemode.Tool
 	for _, tool := range a.toolsForTurn(turn) {

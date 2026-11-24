@@ -9,7 +9,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-OWN_IMAGES = {"openalbert", "stt", "log-gateway", "minio", "minio-init", "backup"}
+OWN_IMAGES = {"openalbert", "stt", "tts", "log-gateway", "minio", "minio-init", "backup"}
 TEST_ENV = {
     "OPENALBERT_IMAGE_PREFIX": "ghcr.io/example/openalbert",
     "OPENALBERT_IMAGE_TAG": "sha-" + "1" * 40,
@@ -153,6 +153,19 @@ def main():
         assert "stt" not in external["services"], "Disabled bundled speech recognition must not start"
         dependency = external["services"]["openalbert"].get("depends_on", {}).get("stt")
         assert dependency is None or dependency.get("required") is False, "External speech recognition still requires the bundled service"
+    assert "tts" not in current["services"], "Bundled speech synthesis must be opt-in"
+    assert current["services"]["openalbert"]["environment"]["TTS_BASE_URL"] == ""
+    bundled = check_pair({"COMPOSE_PROFILES": "local-stt,local-tts", "TTS_BASE_URL": "http://tts:8080/v1",
+                          "TTS_API_KEY": "tts-test-only"})
+    assert bundled["services"]["tts"]["environment"]["TTS_API_KEY"] == "tts-test-only"
+    assert not bundled["services"]["tts"].get("ports"), "Bundled TTS must remain internal"
+    assert bundled["services"]["openalbert"]["environment"]["TTS_BASE_URL"] == "http://tts:8080/v1"
+    external_tts = {"TTS_BASE_URL": "https://speech.example/v1", "TTS_MODEL": "external-model",
+                    "TTS_VOICE": "external-voice", "TTS_API_KEY": "tts-test-only"}
+    external = check_pair(external_tts)
+    assert "tts" not in external["services"]
+    app = external["services"]["openalbert"]["environment"]
+    assert all(app[key] == value for key, value in external_tts.items()), "External synthesis settings were lost"
     assert not {"computer", "computer-init"} & current["services"].keys(), "Albert must not manage a user computer"
     assert set(current["services"]["openalbert"]["networks"]) == {"default"}
     assert current["services"]["openalbert"]["environment"]["COMPUTER_SSH_ADDRESS"] == ""

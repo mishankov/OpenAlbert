@@ -26,6 +26,7 @@ type Runtime struct {
 	Repo               domain.Repository
 	Activities         *agent.Activities
 	Telegram           *integrations.Telegram
+	TTS                domain.SpeechSynthesizer
 	Client             client.Client
 	TaskQueue          string
 	IdleTimeout        time.Duration
@@ -33,6 +34,7 @@ type Runtime struct {
 	InitiativeInterval time.Duration
 	Logger             *slog.Logger
 	wg                 sync.WaitGroup
+	voice              *voiceSynthesis
 }
 
 func (r *Runtime) Worker() worker.Worker {
@@ -326,11 +328,28 @@ func (r *Runtime) deliver(ctx context.Context) {
 	}
 }
 func (r *Runtime) DeliverOnce(ctx context.Context) error {
-	outgoing, err := r.Repo.PendingOutgoing(ctx, 50)
+	readyVoiceID := ""
+	if r.voice != nil {
+		select {
+		case <-r.voice.done:
+			readyVoiceID = r.voice.id
+		default:
+		}
+	}
+	outgoing, err := r.Repo.PendingDeliverableOutgoing(ctx, 50, readyVoiceID, r.voice == nil)
 	if err != nil {
 		return err
 	}
 	for _, out := range outgoing {
+		var voice []byte
+		var fallback domain.VoiceFallback
+		if out.VoiceReplyTo > 0 && out.VoiceFallback == "" {
+			var ready bool
+			voice, fallback, ready = r.voiceReady(ctx, out)
+			if !ready {
+				continue
+			}
+		}
 		event := telemetry.Start(ctx, r.Logger, "telegram.deliver")
 		ctx := event.Context()
 		event.Set("delivery_id", out.ID)
@@ -346,7 +365,18 @@ func (r *Runtime) DeliverOnce(ctx context.Context) error {
 		if !out.EnqueuedAt.IsZero() {
 			event.Set("queue_wait_ms", float64(time.Since(out.EnqueuedAt).Microseconds())/1000)
 		}
-		// Sending is claimed durably before network access. Startup turns abandoned sends into unknown.
+		if fallback != "" {
+			if err = r.Repo.FallbackVoice(ctx, out.ID, fallback); err != nil {
+				event.End(err)
+				return err
+			}
+			out.VoiceFallback = fallback
+		}
+		if out.VoiceFallback != "" {
+			event.Set("voice_fallback", out.VoiceFallback)
+		}
+		// Claim the Telegram send durably before uploading. Synthesis can safely
+		// run again if interrupted before this point.
 		if err = r.Repo.SetOutgoingState(ctx, out.ID, "sending"); err != nil {
 			event.End(err)
 			return err
@@ -354,6 +384,10 @@ func (r *Runtime) DeliverOnce(ctx context.Context) error {
 		if out.Conversation.DeliveryChannel == "desktop" {
 			// Durable queuing is delivery for the polling client; no Telegram call.
 			err = nil
+		} else if len(voice) > 0 {
+			_, err = r.Telegram.SendVoice(ctx, out.Conversation, out.VoiceReplyTo, voice)
+		} else if out.VoiceFallback != "" {
+			_, err = r.Telegram.SendFormatted(ctx, out.Conversation, voiceFallbackText(out.VoiceFallback)+"\n\n"+out.Text, nil)
 		} else if out.ArtifactID != "" {
 			artifact, ok, e := r.Repo.Artifact(ctx, out.Conversation.ID, out.ArtifactID)
 			if e != nil {
@@ -377,25 +411,41 @@ func (r *Runtime) DeliverOnce(ctx context.Context) error {
 			}
 		}
 		state := "sent"
+		var apiErr *integrations.TelegramError
+		rateLimited := false
 		if err != nil {
 			state = "unknown"
-			var apiErr *integrations.TelegramError
 			var deliveryErr *integrations.TelegramDeliveryError
 			if errors.As(err, &deliveryErr) && deliveryErr.Unknown {
 				state = "unknown"
 			} else if errors.As(err, &apiErr) {
 				if apiErr.Code == 429 {
 					state = "pending"
+					rateLimited = true
 				} else {
 					state = "failed"
 				}
+			} else if len(voice) > 0 {
+				state = "failed"
 			}
 		}
+		var persistErr error
+		if len(voice) > 0 && err != nil && (!rateLimited || out.Attempts >= 2) {
+			fallback := domain.VoiceRejected
+			if state == "unknown" {
+				fallback = domain.VoiceUnconfirmed
+			}
+			persistErr = r.Repo.FallbackVoice(ctx, out.ID, fallback)
+			event.Set("voice_fallback", fallback)
+			state = "pending"
+		} else {
+			persistErr = r.Repo.SetOutgoingState(ctx, out.ID, state)
+		}
 		event.Set("delivery_state", state)
-		if e := r.Repo.SetOutgoingState(ctx, out.ID, state); e != nil {
+		if persistErr != nil {
 			event.Set("delivery_state", "state_persist_failed")
-			event.End(e)
-			return e
+			event.End(persistErr)
+			return persistErr
 		}
 		if !out.StartedAt.IsZero() {
 			event.Set("since_turn_started_ms", float64(time.Since(out.StartedAt).Microseconds())/1000)
@@ -408,10 +458,9 @@ func (r *Runtime) DeliverOnce(ctx context.Context) error {
 		}
 		event.End(err)
 		if err != nil {
-			if state == "pending" {
-				var apiErr *integrations.TelegramError
+			if state == "pending" && rateLimited {
 				delay := 5 * time.Second
-				if errors.As(err, &apiErr) && apiErr.RetryAfter > delay {
+				if apiErr.RetryAfter > delay {
 					delay = apiErr.RetryAfter
 				}
 				if !pause(ctx, delay) {

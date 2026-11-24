@@ -90,7 +90,7 @@ def main():
 
             # Render the unmodified standalone file in an empty directory first.
             model = json.loads(run(base + ["config", "--format", "json"]).stdout)
-            assert "stt" not in model["services"], "Disabled STT still starts on a clean deployment"
+            assert not {"stt", "tts"} & model["services"].keys(), "Disabled speech services still start on a clean deployment"
             assert not {"computer", "computer-init"} & model["services"].keys(), "Release must not manage a computer"
             assert model["services"]["openalbert"]["environment"]["COMPUTER_SSH_ADDRESS"] == ""
             gateway_port = free_port()

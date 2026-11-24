@@ -58,6 +58,7 @@ func Definitions() []domain.Tool {
 		{Name: "web_read", Description: "Fetch plain text from a known public HTTP(S) URL. Use for static articles, documentation or plain-text files when only their text is needed. Does not run JavaScript or share browser cookies. HTML extraction discards link destinations and flattens headings, lists and tables; long results may be truncated. For search results, catalogs, following links, structured tables or JavaScript content, use the listed browser tools. An HTTP success may contain a CAPTCHA or an empty page; check that the requested content is actually present. Private network addresses are forbidden.", Parameters: schema(`"url":{"type":"string"}`, "url")},
 		{Name: "send_message", Description: sendMessageDescription, Parameters: schema(`"text":{"type":"string","description":"Default user-facing reply in Markdown: headings, emphasis, links, lists and code. Use an empty string for an artifact without a caption. For native tables, formulas or collapsible sections use send_rich_message."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
 		{Name: "send_rich_message", Description: sendRichMessageDescription, Parameters: schema(`"text":{"type":"string","description":"User-facing Rich Markdown: native tables, formulas, collapsible details and other rich blocks. Use an empty string for an artifact without a caption."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
+		{Name: "send_voice", Description: "Queue a Telegram voice note as a reply to the current incoming message. Call only if the user explicitly requests a voice reply. The application sends the text if voice delivery is unavailable. Queued means the answer is scheduled, and you should not send a duplicate text reply or confirmation.", Parameters: schema(fmt.Sprintf(`"text":{"type":"string","minLength":1,"maxLength":%d,"description":"Plain text to speak in the user's language."}`, domain.MaxVoiceReplyRunes), "text")},
 		{Name: "send_widget", Description: sendWidgetDescription, Parameters: schema(`"kind":{"type":"string","enum":["html","schedules"]},"task_ids":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":4},"html":{"type":"string","description":"Original self-contained HTML/CSS/JavaScript generated for this request, for kind=html."},"width":{"type":"integer","minimum":200},"height":{"type":"integer","minimum":50,"maximum":600},"public_data":{"type":"string"},"chat_data":{"type":"string"},"caption":{"type":"string"},"allow_queries":{"type":"boolean"}`, "kind")},
 		{Name: "edit_widget_data", Description: "Edit chat_data and/or public_data of a registered HTML widget in this private conversation, using message_id returned by send_widget with fallback=false. Each field is a UTF-8 string of at most 1024 bytes; omit to preserve it, pass an empty string to clear. HTML is immutable. Schedule state is managed by the server and cannot be overridden.", Parameters: schema(`"message_id":{"type":"integer","minimum":1},"chat_data":{"type":"string"},"public_data":{"type":"string"}`, "message_id")},
 		{Name: "send_group_message", Description: "Post the text your owner explicitly requests to a known allowed Telegram group or topic, only from the owner's interactive private chat. Get the exact conversation_id from conversation_list; ask if the intended group/topic is ambiguous. Use original Rich Markdown, up to 32000 UTF-8 bytes. Send only the intended public text, never private instructions/history. Returns queued, not confirmed delivered. Does not finish this turn: acknowledge the queued post privately via send_message. Do not repost it to check delivery. Text only; attachments are not supported by this tool.", Parameters: schema(`"conversation_id":{"type":"string"},"text":{"type":"string"}`, "conversation_id", "text")},
@@ -66,7 +67,7 @@ func Definitions() []domain.Tool {
 		{Name: "task_read", Description: "Read saved task status, result, last update, next check. Reading does not execute it.", Parameters: schema(`"id":{"type":"string"}`, "id")},
 		{Name: "task_update", Description: "Update a task goal, result, status or schedule. Status: queued, running, waiting, paused, completed, cancelled, failed. Completed and cancelled tasks stop. To resume use queued. Use for progress and stop requests.", Parameters: schema(`"id":{"type":"string"},"goal":{"type":"string"},"result":{"type":"string"},"status":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0},"schedule_cron":{"type":"string"},"schedule_timezone":{"type":"string"},"maintenance":{"type":"boolean"}`, "id")},
 		{Name: "conversation_list", Description: "List readable saved conversations. In the owner's private chat includes all known groups; elsewhere only the current conversation. Use before recalling group discussions. Does not send messages to those chats.", Parameters: schema(``)},
-		{Name: "conversation_history", Description: "Search or read saved user/assistant messages across sessions, including active sessions. conversation_id defaults to this chat; only the owner's private chat can read groups. Results newest first with original scope, session and sequence. Use for earlier messages and who said what; memory_search is not a complete message log. Optional query is one literal case-insensitive substring of the message, not keywords combined with AND or OR; use a short distinctive fragment. Omit query or use an empty string to read recent messages. Use next_before_seq as before_seq to page backwards. session_started_at is the session start, not the message timestamp. Only messages actually received and processed by this bot are available. tool_calls lists the IDs and names of actual send_message/send_rich_message calls; their text is included in content. An ordinary assistant text without either delivery tool is internal run history. A delivery tool call is a request to send, not confirmation of delivery.", Parameters: schema(`"conversation_id":{"type":"string"},"query":{"type":"string","description":"One literal substring of a saved message, not a list of keywords. Omit or use an empty string to read recent messages."},"before_seq":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}`)},
+		{Name: "conversation_history", Description: "Search or read saved user/assistant messages across sessions, including active sessions. conversation_id defaults to this chat; only the owner's private chat can read groups. Results newest first with original scope, session and sequence. Use for earlier messages and who said what; memory_search is not a complete message log. Optional query is one literal case-insensitive substring of the message, not keywords combined with AND or OR; use a short distinctive fragment. Omit query or use an empty string to read recent messages. Use next_before_seq as before_seq to page backwards. session_started_at is the session start, not the message timestamp. Only messages actually received and processed by this bot are available. tool_calls lists the IDs and names of actual send_message, send_rich_message, and send_voice calls; their text is included in content. An ordinary assistant response without a delivery tool is internal run history. A delivery tool call is a request to send, not confirmation of delivery.", Parameters: schema(`"conversation_id":{"type":"string"},"query":{"type":"string","description":"One literal substring of a saved message, not a list of keywords. Omit or use an empty string to read recent messages."},"before_seq":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}`)},
 		{Name: "memory_search", Description: "Search saved memory entries by literal, case-insensitive substrings, NOT semantic search. Every whitespace-separated query term must occur in the SAME entry (content, source or kind). Punctuation is literal; commas do not mean OR. No stemming, translation, synonyms, regex or wildcard syntax. Start with one distinctive name or keyword, for example Polka; search unrelated topics in separate calls. After an empty result, shorten the query or try an alternative spelling; adding words narrows the search. An empty query returns up to 50 most recently updated readable entries, not a complete export. An empty result means no matching entries, not that no memories exist. In the owner's private chat searches this chat and saved groups by default; optional conversation_id selects an authorized scope. Results include scope and source; do not attribute group participants' facts to the owner. Use task_find/task_read for assignments and schedules, conversation_history for earlier messages.", Parameters: schema(`"query":{"type":"string","description":"Literal terms that must all match one entry. Prefer a single distinctive term, e.g. Polka. Empty string lists recent entries; do not use comma-separated topics."},"conversation_id":{"type":"string","description":"Optional authorized conversation scope. Omit to search all scopes readable from this chat."}`, "query")},
 		{Name: "memory_read", Description: "Read a memory and its source. For a group result found from the owner's private chat, supply its conversation_id from the result scope.", Parameters: schema(`"id":{"type":"string"},"conversation_id":{"type":"string"}`, "id")},
 		{Name: "memory_update", Description: "Save useful user memory with provenance. Use profile for core user facts (name, home city, timezone), preference only for explicitly stated lasting preferences, fact for contextual facts, episode for past events, hypothesis for uncertain inferences. Profile and preference rebuild USER.md automatically. A one-time request/reminder is task state, not a lasting preference; do not save it as one. Update the same ID for corrections; delete obsolete memory using delete=true.", Parameters: schema(`"id":{"type":"string"},"content":{"type":"string"},"kind":{"type":"string","enum":["profile","fact","preference","episode","hypothesis"]},"delete":{"type":"boolean"}`)},
@@ -123,7 +124,16 @@ type ToolInput struct {
 	Background       bool
 	StartedAt        time.Time
 	ReceivedAt       time.Time
-	ParentToolCallID string `json:",omitempty"`
+	ParentToolCallID string               `json:",omitempty"`
+	TelegramReply    *TelegramReplyTarget `json:",omitempty"`
+}
+
+// TelegramReplyTarget comes from the durable incoming message. A conversation's
+// latest routing metadata can change before an older turn sends its reply.
+type TelegramReplyTarget struct {
+	ChatID    int64
+	ThreadID  int
+	MessageID int64
 }
 
 func taskUpdateAccess(in ToolInput) error {
@@ -269,6 +279,18 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 			if err := a.Repo.EnqueueOutgoing(ctx, out); err != nil {
 				return nil, err
 			}
+		}
+		return map[string]string{"delivery_id": key, "state": "queued"}, nil
+	case "send_voice":
+		if !visibleMessageText(p.Text) || !utf8.ValidString(p.Text) || utf8.RuneCountInString(p.Text) > domain.MaxVoiceReplyRunes {
+			return nil, fmt.Errorf("voice reply needs visible, valid UTF-8 text of at most %d characters", domain.MaxVoiceReplyRunes)
+		}
+		conversation := in.Conversation
+		conversation.ThreadID = in.TelegramReply.ThreadID
+		out := domain.Outgoing{ID: key, Conversation: conversation, Text: p.Text, VoiceReplyTo: in.TelegramReply.MessageID,
+			TurnID: in.RunKey, SessionID: in.SessionID, Trigger: in.TriggerName(), StartedAt: in.StartedAt, ReceivedAt: in.ReceivedAt, EnqueuedAt: now, PartCount: 1}
+		if err := a.Repo.EnqueueOutgoing(ctx, out); err != nil {
+			return nil, err
 		}
 		return map[string]string{"delivery_id": key, "state": "queued"}, nil
 	case "report_progress":
@@ -603,11 +625,18 @@ func (a *Activities) toolDefinitions() []domain.Tool {
 }
 
 // Global personality tools are only available in the owner's interactive private turns.
+func canReplyWithVoice(conv domain.Conversation, reply *TelegramReplyTarget, taskID string, background bool) bool {
+	return reply != nil && reply.MessageID > 0 && conv.ChatID != 0 && reply.ChatID == conv.ChatID && conv.DeliveryChannel != "desktop" && taskID == "" && !background
+}
+
 func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 	tools := a.toolDefinitions()
 	interactive := turn.Input.TaskID == "" && !turn.Input.Initiative
 	filtered := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
+		if tool.Name == "send_voice" && !canReplyWithVoice(turn.Conversation, turn.TelegramReply, turn.Input.TaskID, turn.Input.Initiative) {
+			continue
+		}
 		if (tool.Name == "send_widget" || tool.Name == "edit_widget_data") && (!turn.Conversation.Private || turn.Conversation.ChatID <= 0 || turn.Conversation.DeliveryChannel == "desktop") {
 			continue
 		}

@@ -9,6 +9,7 @@ The helper's current source-input map is:
 | openalbert | apps/backend/, shared/backup/ |
 | backup | services/backup/, shared/backup/ |
 | stt | services/stt/ |
+| tts | services/tts/ |
 | log-gateway | services/log-gateway/ |
 | minio | services/minio/Dockerfile |
 | minio-init | services/minio/Dockerfile, services/minio/init.sh |
@@ -21,7 +22,7 @@ Plan without building or pushing:
 python3 <skill-dir>/scripts/openalbert_publish.py --repo <clean-master-checkout> --prefix ghcr.io/mishankov/openalbert
 ```
 
-The planner inspects each component's `master` image, both platform revision labels, and platform digests. It compares every distinct published revision to local HEAD. It requires an existing published two-platform release; investigate a missing image, missing platform, or registry failure rather than using the helper for an initial release. Unknown/unavailable revision labels conservatively select that image for rebuild.
+The planner inspects each component's `master` image, both platform revision labels, and platform digests. It compares every distinct published revision to local HEAD. An explicit registry `not found` for `tts:master` selects TTS for first publication on both platforms. Other missing images, missing platforms, and registry access or network failures halt the plan. Unknown or unavailable revision labels conservatively select that image for rebuild.
 
 When building and publishing is authorized, execute through Task using a temporary Taskfile outside tracked sources (for example, in ignored `reports/local/`). Set its task `dir` to the clean checkout and command to:
 
@@ -33,6 +34,6 @@ The helper reuses `tools/local.py`'s clean-master gate, check/test suites, repor
 
 Selected images receive `sha-<full revision>-amd64`, `sha-<full revision>-arm64`, `sha-<full revision>`, and `master`. Unselected images retain their existing manifests, tags, and revision labels.
 
-`deploy/compose.yaml` uses one `OPENALBERT_IMAGE_TAG` for all six components. After a selective release, the new SHA tag exists only on changed images. The moving `master` set still works, but do not tell users to set the global deployment tag to that SHA. A fully pinned release needs per-component references/overrides or an explicitly requested tag-only promotion of unchanged manifests. Never imply that selective publication deployed the app.
+`deploy/compose.yaml` uses one `OPENALBERT_IMAGE_TAG` for all components. After a selective release, the new SHA tag exists only on changed images. The moving `master` set still works, but do not tell users to set the global deployment tag to that SHA. A fully pinned release needs per-component references/overrides or an explicitly requested tag-only promotion of unchanged manifests. Never imply that selective publication deployed the app.
 
 The helper runs the container-release verification described above; for a session that already has exact-revision passing reports, an agent may prepare a temporary Task adapter using the same `Run` helpers to resume only unfinished stages. Record the report provenance and retain all checks required by the repository. Do not edit tracked publication tooling simply to bypass its target selection or validation gates.

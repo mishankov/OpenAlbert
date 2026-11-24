@@ -39,7 +39,7 @@ func repositoryContract(t *testing.T, r domain.Repository) {
 	scope := nonce + ":private"
 	other := nonce + ":group"
 	conv := domain.Conversation{ID: scope, ChatID: 123, OwnerID: 321, Private: true}
-	incoming := domain.Incoming{ID: nonce + ":in", Conversation: conv, Text: "hello", Attachments: []domain.Attachment{{Name: "image.png", Data: []byte("image bytes")}}}
+	incoming := domain.Incoming{ID: nonce + ":in", Conversation: conv, Text: "hello", TelegramMessageID: 43, Attachments: []domain.Attachment{{Name: "image.png", Data: []byte("image bytes")}}}
 	incoming.ReplyTo = &domain.ReplyContext{MessageID: 42, AuthorID: 7, AuthorName: "Альберт", AuthorIsBot: true, Text: "Исходное сообщение", MediaKinds: []string{"image"}}
 	incoming.Quote = &domain.MessageQuote{Text: "сообщение", Position: 9, IsManual: true}
 	accepted, err := r.AcceptIncoming(ctx, incoming, 101)
@@ -66,7 +66,7 @@ func repositoryContract(t *testing.T, r domain.Repository) {
 	if err != nil || !ok || got.Text != "hello" || len(got.Attachments) != 1 || string(got.Attachments[0].Data) != "image bytes" {
 		t.Fatalf("incoming %#v %v %v", got, ok, err)
 	}
-	if !reflect.DeepEqual(got.ReplyTo, incoming.ReplyTo) || !reflect.DeepEqual(got.Quote, incoming.Quote) {
+	if got.TelegramMessageID != incoming.TelegramMessageID || !reflect.DeepEqual(got.ReplyTo, incoming.ReplyTo) || !reflect.DeepEqual(got.Quote, incoming.Quote) {
 		t.Fatalf("durable inbox lost reply/quote: reply=%+v quote=%+v", got.ReplyTo, got.Quote)
 	}
 	pending, err := r.PendingIncoming(ctx, 1000)
@@ -365,6 +365,24 @@ func TestPostgresRestartDurability(t *testing.T) {
 	if err = s.SetOutgoingState(ctx, id, "sending"); err != nil {
 		t.Fatal(err)
 	}
+	voice := domain.Outgoing{ID: id + ":voice", Conversation: conv, VoiceReplyTo: 21, Text: "Голосовой ответ"}
+	if err = s.AppendMessage(ctx, id, "voice-reply", domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "voice", Name: "send_voice", Arguments: json.RawMessage(`{"text":"Голосовой ответ"}`)}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.EnqueueOutgoing(ctx, voice); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetOutgoingState(ctx, voice.ID, "sending"); err != nil {
+		t.Fatal(err)
+	}
+	converted := voice
+	converted.ID += "-converted"
+	if err = s.EnqueueOutgoing(ctx, converted); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.FallbackVoice(ctx, converted.ID, domain.VoiceSynthesisFailed); err != nil {
+		t.Fatal(err)
+	}
 	if err = s.SetOutgoingState(ctx, id, "sending"); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +398,7 @@ func TestPostgresRestartDurability(t *testing.T) {
 	if got, ok, err := s.Incoming(ctx, in.ID); err != nil || !ok || got.Text != "durable" {
 		t.Fatalf("lost inbox: %#v %v %v", got, ok, err)
 	}
-	if messages, err := s.Messages(ctx, id); err != nil || len(messages) != 1 {
+	if messages, err := s.Messages(ctx, id); err != nil || len(messages) != 2 {
 		t.Fatalf("lost messages %v %v", messages, err)
 	}
 	if raw, ok, err := s.LoadCheckpoint(ctx, id); err != nil || !ok || !strings.Contains(string(raw), "3") {
@@ -395,6 +413,25 @@ func TestPostgresRestartDurability(t *testing.T) {
 	if state != "unknown" || jsonState != "unknown" || attempts != 1 {
 		t.Fatalf("unsafe recovery state=%s JSON=%s attempts=%d", state, jsonState, attempts)
 	}
+	pending, err := s.PendingOutgoing(ctx, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for replyID, want := range map[string]domain.VoiceFallback{voice.ID: domain.VoiceUnconfirmed, converted.ID: domain.VoiceSynthesisFailed} {
+		var found bool
+		for _, out := range pending {
+			if out.ID == replyID {
+				found = out.VoiceFallback == want && out.Text == voice.Text && out.VoiceReplyTo == voice.VoiceReplyTo
+			}
+		}
+		if !found {
+			t.Fatalf("reply %s did not recover as text (%s)", replyID, want)
+		}
+	}
+	history, err := s.ConversationHistory(ctx, conv.ID, voice.Text, 0, 10)
+	if err != nil || len(history) != 1 || history[0].Content != voice.Text || len(history[0].ToolCalls) != 1 || history[0].ToolCalls[0].Name != "send_voice" {
+		t.Fatalf("voice transcript missing from Postgres history: %+v %v", history, err)
+	}
 	analyses, err := s.PendingAnalysis(ctx, 1000)
 	if err != nil {
 		t.Fatal(err)
@@ -405,6 +442,52 @@ func TestPostgresRestartDurability(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("lost post-session analysis")
+	}
+}
+
+func TestPostgresVoiceQueueFiltersBeforeLimit(t *testing.T) {
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set OPENALBERT_TEST_DATABASE_URL")
+	}
+	ctx := t.Context()
+	s, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	nonce := fmt.Sprintf("voice-queue-%d", time.Now().UnixNano())
+	busy := domain.Conversation{ID: nonce + "-busy"}
+	other := domain.Conversation{ID: nonce + "-other"}
+	voiceID := nonce + "-voice"
+	textID := nonce + "-text"
+	enqueue := func(out domain.Outgoing) {
+		t.Helper()
+		if err := s.EnqueueOutgoing(ctx, out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	enqueue(domain.Outgoing{ID: voiceID, Conversation: busy, VoiceReplyTo: 7, Text: "Voice"})
+	for i := range 49 {
+		enqueue(domain.Outgoing{ID: fmt.Sprintf("%s-%d", nonce, i), Conversation: busy, Text: "Later in the same chat"})
+	}
+	enqueue(domain.Outgoing{ID: textID, Conversation: other, Text: "Independent"})
+	for _, readyVoiceID := range []string{"", voiceID} {
+		var voiceFound, textFound bool
+		rows, err := s.PendingDeliverableOutgoing(ctx, 50, readyVoiceID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, out := range rows {
+			voiceFound = voiceFound || out.ID == voiceID
+			textFound = textFound || out.ID == textID
+			if out.Conversation.ID == busy.ID && out.ID != voiceID {
+				t.Fatalf("delivery reordered a busy conversation: %s", out.ID)
+			}
+		}
+		if !textFound || voiceFound != (readyVoiceID != "") {
+			t.Fatalf("ready voice %q: selected voice=%t, text=%t", readyVoiceID, voiceFound, textFound)
+		}
 	}
 }
 func TestPostgresConcurrentInbox(t *testing.T) {

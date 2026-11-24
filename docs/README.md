@@ -15,7 +15,7 @@ OpenAlbert — персональный AI-агент с собственной 
 
 - [Оплата через план ChatGPT](chatgpt-plan-usage.md) — OAuth, две полосы оплаты, вход с VPS и диагностика.
 
-- [Голосовые сообщения](speech.md) — CPU-контейнер Nemotron, STT API, кэш, отмена и активация.
+- [Голосовые сообщения](speech.md) — распознавание Nemotron и голосовые ответы через Piper.
 
 - [Запуск и разработка MVP](development.md) — конфигурация, Docker Compose, проверки и резервные копии.
 - [Локальные проверки](local-checks.md) — Task, тесты, Docker Bake и отчёты прогонов.

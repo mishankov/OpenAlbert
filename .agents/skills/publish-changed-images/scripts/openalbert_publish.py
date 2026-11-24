@@ -11,12 +11,13 @@ import signal
 import subprocess
 import sys
 
-COMPONENTS = ('openalbert', 'stt', 'log-gateway', 'minio', 'minio-init', 'backup')
+COMPONENTS = ('openalbert', 'stt', 'tts', 'log-gateway', 'minio', 'minio-init', 'backup')
 ARCHES = ('amd64', 'arm64')
 INPUTS = {
     'openalbert': ('apps/backend/', 'shared/backup/'),
     'backup': ('services/backup/', 'shared/backup/'),
     'stt': ('services/stt/',),
+    'tts': ('services/tts/',),
     'log-gateway': ('services/log-gateway/',),
     'minio': ('services/minio/Dockerfile',),
     'minio-init': ('services/minio/Dockerfile', 'services/minio/init.sh'),
@@ -25,8 +26,8 @@ GLOBAL_INPUTS = ('.dockerignore', 'deploy/docker-bake.hcl')
 DEPLOYMENT = ('openalbert', 'log-gateway', 'minio', 'minio-init')
 
 
-def command(repo, args):
-    return subprocess.check_output(args, cwd=repo, text=True, timeout=120).strip()
+def command(repo, args, stderr=None):
+    return subprocess.check_output(args, cwd=repo, text=True, timeout=120, stderr=stderr).strip()
 
 
 def affects(component, path):
@@ -36,8 +37,15 @@ def affects(component, path):
 
 def published(repo, prefix, component, tag='master'):
     ref = prefix + '/' + component + ':' + tag
+    try:
+        manifest = json.loads(command(repo, ['docker', 'buildx', 'imagetools', 'inspect', ref, '--raw'],
+                                      stderr=subprocess.PIPE))
+    except subprocess.CalledProcessError as error:
+        diagnostic = (error.stderr or '').strip()
+        if component == 'tts' and tag == 'master' and diagnostic == f'ERROR: {ref}: not found':
+            return {'reference': ref, 'manifest': None, 'platforms': {}}
+        raise RuntimeError(diagnostic or f'Could not inspect {ref}') from error
     config = json.loads(command(repo, ['docker', 'buildx', 'imagetools', 'inspect', ref, '--format', '{{json .Image}}']))
-    manifest = json.loads(command(repo, ['docker', 'buildx', 'imagetools', 'inspect', ref, '--raw']))
     platforms = {}
     for arch in ARCHES:
         platform = 'linux/' + arch
@@ -61,6 +69,8 @@ def plan(repo, prefix):
     selected = []
     for name, image in images.items():
         reasons = []
+        if image['manifest'] is None:
+            reasons.append('First publication: master manifest is missing')
         for old in sorted({state['revision'] or '' for state in image['platforms'].values()}):
             if not re.fullmatch(r'[0-9a-fA-F]{40}|[0-9a-fA-F]{64}', old):
                 reasons.append('Published revision label is missing or not a full commit ID')
@@ -85,6 +95,8 @@ def plan(repo, prefix):
 def verify(repo, data):
     for name, before in data['images'].items():
         after = published(repo, data['prefix'], name)
+        if after['manifest'] is None:
+            raise RuntimeError(name + ': master manifest missing after publication')
         if name in data['selected']:
             immutable = published(repo, data['prefix'], name, 'sha-' + data['revision'])
             if after['manifest'] != immutable['manifest']:

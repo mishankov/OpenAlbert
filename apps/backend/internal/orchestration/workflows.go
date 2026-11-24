@@ -517,9 +517,9 @@ func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, codemodeTur
 			return turn, err
 		}
 	}
-	instruction := "The research step budget is exhausted. This is the single reserved finalization step. Stop researching and queue the remaining answer now from the evidence already collected. You may send multiple requested messages or artifacts in this final tool batch; do not resend parts already queued. Give a useful partial result when possible, clearly mark gaps and uncertainty, and never invent missing facts or claim unfinished work succeeded. If the evidence is insufficient, say what prevented completion. Only send_message and send_rich_message are available. Prefer send_message; choose send_rich_message only if rich formatting is needed. Do not request other tools."
+	instruction := "The research step budget is exhausted. This is the single reserved finalization step. Stop researching and queue the remaining answer now from the evidence already collected. You may send multiple requested messages or artifacts in this final tool batch; do not resend parts already queued. Give a useful partial result when possible, clearly mark gaps and uncertainty, and never invent missing facts or claim unfinished work succeeded. If the evidence is insufficient, say what prevented completion. Only reply tools are available. Prefer send_message; choose send_rich_message only if rich formatting is needed, or send_voice when available and explicitly requested. Do not request other tools."
 	if codemodeTurn {
-		instruction += " Send the remaining parts in one codemode script using await tools.send_message(...) or await tools.send_rich_message(...)."
+		instruction += " Send the remaining parts in one codemode script using the appropriate reply tools."
 	}
 	turn.Messages = append(turn.Messages, domain.Message{Role: "user", Content: instruction})
 	turn.Messages = agent.CompactContext(turn.Messages, turn.Input.Key)
@@ -560,7 +560,7 @@ func finalizeBudget(ctx workflow.Context, turn agent.Turn, step int, codemodeTur
 		// Validate even a forged model response; advertised tools are not a guard.
 		var output string
 		if !domain.IsReplyTool(call.Name) || (turn.Sent && !multiMessageTurn) {
-			output = `{"error":"Finalization only permits one successful reply via send_message or send_rich_message; no further actions are executed."}`
+			output = `{"error":"Finalization only permits one successful reply; no further actions are executed."}`
 			if multiMessageTurn {
 				output = `{"error":"Finalization only permits reply tools; no further actions are executed."}`
 			}
@@ -667,7 +667,7 @@ func InitiativeWorkflow(ctx workflow.Context, in InitiativeInput) error {
 }
 
 func toolInput(t agent.Turn, step int, call domain.ToolCall) agent.ToolInput {
-	return agent.ToolInput{RunKey: t.Input.Key, Step: step, Call: call, Conversation: t.Conversation, SessionID: t.Input.SessionID, TaskID: t.Input.TaskID, Background: t.Input.Initiative, StartedAt: t.Input.StartedAt, ReceivedAt: t.ReceivedAt}
+	return agent.ToolInput{RunKey: t.Input.Key, Step: step, Call: call, Conversation: t.Conversation, SessionID: t.Input.SessionID, TaskID: t.Input.TaskID, Background: t.Input.Initiative, StartedAt: t.Input.StartedAt, ReceivedAt: t.ReceivedAt, TelegramReply: t.TelegramReply}
 }
 func executeToolActivity(ctx workflow.Context, in agent.ToolInput) workflow.Future {
 	if strings.HasPrefix(in.Call.Name, "browser_") && (in.ParentToolCallID != "" || workflow.GetVersion(ctx, "browser-activities-v1", workflow.DefaultVersion, 1) != workflow.DefaultVersion) {
