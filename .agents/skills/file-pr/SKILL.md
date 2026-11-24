@@ -47,4 +47,4 @@ because the GraphQL rate limit is used up, open it through REST with
 to babysit it, continue with [babysit-pr](../babysit-pr/SKILL.md).
 
 Do not post a follow-up PR comment unless it serves the user's request. When a
-comment is needed, use [leaving-pr-comments](../leaving-pr-comments/SKILL.md).
+comment is needed, use [github-comments](../github-comments/SKILL.md).

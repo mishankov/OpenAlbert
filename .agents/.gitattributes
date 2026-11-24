@@ -1,0 +1,16 @@
+# BEGIN mstack managed skill attributes
+skills/babysit-pr/** linguist-vendored
+skills/capture-issue/** linguist-vendored
+skills/diagnosing-bugs/** linguist-vendored
+skills/file-pr/** linguist-vendored
+skills/github-comments/** linguist-vendored
+skills/impeccable/** linguist-vendored
+skills/implement/** linguist-vendored
+skills/manage-mstack-skills/** linguist-vendored
+skills/pick-next-work/** linguist-vendored
+skills/review-loop/** linguist-vendored
+skills/review-panel/** linguist-vendored
+skills/ship-pr/** linguist-vendored
+skills/stage-pr/** linguist-vendored
+skills/start-thread/** linguist-vendored
+# END mstack managed skill attributes
