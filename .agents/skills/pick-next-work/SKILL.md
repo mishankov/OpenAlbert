@@ -29,6 +29,6 @@ Name the item and why it should come next. Describe the intended slice, observab
 
 For prioritization, return the recommendation and alternatives that would materially change the choice. If no item is ready, report the blocker and the next useful action.
 
-For an explicit choose-and-implement request, select within the user's constraints and continue without asking for the same authorization again. When `full-send` or `full-stop` was requested, read that skill if available and pass it the selected item and handoff. If unavailable, report the missing skill instead of claiming to execute it. Leave implementation, review, and PR delivery to that workflow.
+For an explicit choose-and-implement request, select within the user's constraints and continue without asking for the same authorization again. When `ship-pr` or `stage-pr` was requested, read that skill if available and pass it the selected item and handoff. If unavailable, report the missing skill instead of claiming to execute it. Leave implementation, review, and PR delivery to that workflow.
 
 Update selection/status records only when included in the requested workflow. Never infer merge authority merely from selecting or implementing an item.

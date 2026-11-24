@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Comments"
+  short_description: "Format agent-authored GitHub comments"
+  default_prompt: "Use $github-comments when posting this comment on my behalf."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ship PR"
+  short_description: "Prove, file, babysit, and merge a PR unattended"
+  default_prompt: "Use $ship-pr to take this to a merged PR. I am not watching this thread."

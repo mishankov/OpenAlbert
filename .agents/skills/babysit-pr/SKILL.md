@@ -86,7 +86,7 @@ requires it.
 
 If a review bot leaves feedback you believe is not worth addressing, reply with
 a written reason and resolve the comment. Use
-[leaving-pr-comments](../leaving-pr-comments/SKILL.md) for comments posted on the
+[github-comments](../github-comments/SKILL.md) for comments posted on the
 user's behalf.
 
 Screenshots and videos help as well, when you have a way to upload them.
