@@ -60,9 +60,14 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("migrate postgres: %w", err)
 	}
-	// Telegram has no idempotency keys. An interrupted send has unknown delivery;
-	// never automatically send it a second time after restarting the process.
-	if _, err = pool.Exec(ctx, "UPDATE openalbert_outgoing SET state='unknown',data=jsonb_set(data,'{state}','\"unknown\"'::jsonb) WHERE state='sending'"); err != nil {
+	// Telegram has no idempotency keys. Interrupted voice uploads switch to
+	// text; any other interrupted send has an unknown outcome.
+	if _, err = pool.Exec(ctx, `UPDATE openalbert_outgoing SET
+ state=CASE WHEN (data ? 'voice_reply_to') AND NOT (data ? 'voice_fallback') THEN 'pending' ELSE 'unknown' END,
+ data=CASE WHEN (data ? 'voice_reply_to') AND NOT (data ? 'voice_fallback')
+  THEN data || jsonb_build_object('state','pending','voice_fallback',$1::text)
+  ELSE jsonb_set(data,'{state}','"unknown"'::jsonb) END
+ WHERE state='sending'`, domain.VoiceUnconfirmed); err != nil {
 		pool.Close()
 		return nil, err
 	}
@@ -202,7 +207,7 @@ func (s *Store) ListConversations(ctx context.Context) ([]domain.Conversation, e
 	return selectJSON[domain.Conversation](ctx, s.pool, "SELECT data FROM openalbert_conversations ORDER BY id")
 }
 
-// Tool-based replies are stored as assistant send_message/send_rich_message calls, not plain content.
+// Tool-based replies are stored as assistant reply tool calls, not plain content.
 // Their presence records a reply request, not proof of Telegram delivery.
 func historyContent(m domain.Message) string {
 	parts := []string{}
@@ -252,7 +257,7 @@ func (s *Store) ConversationHistory(ctx context.Context, scope, query string, be
   CASE WHEN m.data->>'role'='assistant' THEN (
    SELECT string_agg(call->'arguments'->>'text', E'\n')
    FROM jsonb_array_elements(COALESCE(m.data->'tool_calls','[]')) call
-   WHERE call->>'name' IN ('send_message','send_rich_message')
+   WHERE call->>'name' IN ('send_message','send_rich_message','send_voice')
   ) END) AS content
  FROM openalbert_messages m JOIN openalbert_sessions s ON s.id=m.session_id
  WHERE s.conversation_id=$1 AND ($3::bigint=0 OR m.seq<$3)
@@ -260,7 +265,7 @@ func (s *Store) ConversationHistory(ctx context.Context, scope, query string, be
 )
 SELECT seq,id,session_data,message_data FROM history WHERE (content<>'' OR EXISTS (
  SELECT 1 FROM jsonb_array_elements(COALESCE(message_data->'tool_calls','[]')) call
- WHERE message_data->>'role'='assistant' AND call->>'name' IN ('send_message','send_rich_message')
+ WHERE message_data->>'role'='assistant' AND call->>'name' IN ('send_message','send_rich_message','send_voice')
 ))
 AND ($2='' OR strpos(lower(content),lower($2))>0)
 ORDER BY seq DESC LIMIT $4`, scope, query, before, historyLimit(n))
@@ -468,7 +473,30 @@ func (s *Store) EnqueueOutgoing(ctx context.Context, o domain.Outgoing) error {
 }
 
 func (s *Store) PendingOutgoing(ctx context.Context, n int) ([]domain.Outgoing, error) {
-	rows, err := s.pool.Query(ctx, "SELECT data,state,attempts FROM openalbert_outgoing WHERE state='pending' ORDER BY seq LIMIT $1", limitValue(n))
+	return s.listOutgoing(ctx, "SELECT data,state,attempts FROM openalbert_outgoing WHERE state='pending' ORDER BY seq LIMIT $1", limitValue(n))
+}
+
+func (s *Store) PendingDeliverableOutgoing(ctx context.Context, n int, readyVoiceID string, startVoice bool) ([]domain.Outgoing, error) {
+	// Block only the part of each conversation's queue at or behind its first
+	// pending voice reply. Filter before LIMIT so busy chats cannot fill the batch.
+	return s.listOutgoing(ctx, `WITH first_voice AS (
+ SELECT DISTINCT ON (data->'conversation'->>'id')
+  data->'conversation'->>'id' AS scope, id, seq
+ FROM openalbert_outgoing
+ WHERE state='pending' AND (data ? 'voice_reply_to') AND NOT (data ? 'voice_fallback')
+ ORDER BY scope, seq
+)
+SELECT o.data,o.state,o.attempts FROM openalbert_outgoing o
+LEFT JOIN first_voice v ON v.scope=o.data->'conversation'->>'id'
+WHERE o.state='pending' AND (
+ v.seq IS NULL OR o.seq<v.seq OR
+ (o.seq=v.seq AND (o.id=$2 OR ($3 AND o.id=(SELECT id FROM first_voice ORDER BY seq LIMIT 1))))
+)
+ORDER BY o.seq LIMIT $1`, limitValue(n), readyVoiceID, startVoice)
+}
+
+func (s *Store) listOutgoing(ctx context.Context, query string, args ...any) ([]domain.Outgoing, error) {
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -519,6 +547,21 @@ func (s *Store) SetOutgoingState(ctx context.Context, id, state string) error {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// FallbackVoice atomically converts the same durable reply to text. An
+// interrupted update can never leave it eligible for another voice upload.
+func (s *Store) FallbackVoice(ctx context.Context, id string, reason domain.VoiceFallback) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE openalbert_outgoing SET state='pending',
+ data=data || jsonb_build_object('state','pending','voice_fallback',$2::text)
+ WHERE id=$1 AND state IN ('pending','sending') AND (data ? 'voice_reply_to') AND NOT (data ? 'voice_fallback')`, id, reason)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInvalidTransition
+	}
+	return nil
 }
 func outgoingTransition(from, to string) bool {
 	return from == "pending" && to == "sending" || from == "sending" && (to == "sent" || to == "unknown" || to == "pending" || to == "failed")

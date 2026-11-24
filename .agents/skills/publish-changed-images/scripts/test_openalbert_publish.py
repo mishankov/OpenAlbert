@@ -1,5 +1,6 @@
 import io
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -60,6 +61,71 @@ class SelectionTests(unittest.TestCase):
         self.write('services/backup/cmd/albert-backup/main.go', 'new backup CLI')
         self.commit()
         self.assertEqual(self.make_plan()['selected'], ['backup'])
+
+    def test_tts_source_selects_only_tts(self):
+        self.write('services/tts/server.py', 'new TTS service')
+        self.commit()
+        self.assertEqual(self.make_plan()['selected'], ['tts'])
+
+    def test_missing_tts_master_plans_first_publication(self):
+        command = publisher.command
+        prefix = 'registry.example/project'
+        tts = prefix + '/tts:master'
+        self.write('apps/backend/main.go', 'new backend')
+        self.commit()
+
+        def inspect(repo, args, stderr=None):
+            if args[0] == 'git':
+                return command(repo, args, stderr=stderr)
+            ref = args[4]
+            if ref == tts:
+                self.assertEqual(args[5:], ['--raw'])
+                raise subprocess.CalledProcessError(1, args, stderr=f'ERROR: {tts}: not found\n')
+            if args[-1] == '--raw':
+                return json.dumps({'manifests': [
+                    {'platform': {'os': 'linux', 'architecture': arch}, 'digest': 'sha256:synthetic'}
+                    for arch in publisher.ARCHES
+                ]})
+            return json.dumps({f'linux/{arch}': {'config': {'Labels': {
+                'org.opencontainers.image.revision': self.old}}} for arch in publisher.ARCHES})
+
+        with mock.patch.object(publisher, 'command', side_effect=inspect):
+            data = publisher.plan(self.repo, prefix)
+        self.assertEqual(data['selected'], ['openalbert', 'tts'])
+        self.assertEqual(data['images']['tts'], {
+            'reference': tts, 'manifest': None, 'platforms': {},
+            'reasons': ['First publication: master manifest is missing'],
+        })
+
+    def test_first_publication_requires_exact_tts_master_absence(self):
+        prefix = 'registry.example/project'
+        for component, tag, diagnostic in [
+            ('openalbert', 'master', 'ERROR: {ref}: not found'),
+            ('tts', 'sha-' + self.old, 'ERROR: {ref}: not found'),
+            ('tts', 'master', 'ERROR: {ref}: 403 Forbidden'),
+            ('tts', 'master', 'ERROR: {ref}: authentication required'),
+            ('tts', 'master', 'ERROR: {ref}: EOF'),
+            ('tts', 'master', 'ERROR: {ref}: credentials not found'),
+        ]:
+            with self.subTest(component=component, tag=tag, diagnostic=diagnostic):
+                ref = f'{prefix}/{component}:{tag}'
+                error = subprocess.CalledProcessError(1, 'docker', stderr=diagnostic.format(ref=ref))
+                with mock.patch.object(publisher, 'command', side_effect=error):
+                    with self.assertRaises(RuntimeError) as failure:
+                        publisher.published(self.repo, prefix, component, tag)
+                self.assertEqual(str(failure.exception), error.stderr)
+
+    def test_verification_rejects_missing_tts_master(self):
+        def inspect(repo, prefix, name):
+            result = self.inspect(repo, prefix, name)
+            if name == 'tts':
+                result.update(manifest=None, platforms={})
+            return result
+
+        data = self.make_plan(inspect)
+        with mock.patch.object(publisher, 'published', side_effect=inspect):
+            with self.assertRaisesRegex(RuntimeError, 'tts: master manifest missing after publication'):
+                publisher.verify(self.repo, data)
 
     def test_backend_wazero_upgrade_selects_only_backend(self):
         self.write('apps/backend/go.mod', 'require github.com/tetratelabs/wazero v1.12.0\n')

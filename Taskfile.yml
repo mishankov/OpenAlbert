@@ -42,7 +42,7 @@ tasks:
     desc: Build docs and test docs/inspector keyboard flows with Playwright reports
     cmds: [python3 tools/local.py test:web]
   images:
-    desc: Build and smoke-test all six images for the Docker engine architecture
+    desc: Build and smoke-test all images for the Docker engine architecture
     cmds: [python3 tools/local.py images]
   verify:
     desc: Run all checks, tests, image builds and a fresh deployment/restart test

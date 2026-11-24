@@ -4,7 +4,7 @@ variable "REVISION" { default = "dev" }
 variable "SOURCE" { default = "https://github.com/mishankov/OpenAlbert" }
 
 group "default" {
-  targets = ["openalbert", "stt", "log-gateway", "minio", "minio-init", "backup"]
+  targets = ["openalbert", "stt", "tts", "log-gateway", "minio", "minio-init", "backup"]
 }
 
 target "common" {
@@ -31,6 +31,12 @@ target "stt" {
   dockerfile = "services/stt/Dockerfile"
   tags = ["${LOCAL_REPOSITORY}:stt-${ARCH}"]
 }
+target "tts" {
+  inherits = ["common"]
+  dockerfile = "services/tts/Dockerfile"
+  tags = ["${LOCAL_REPOSITORY}:tts-${ARCH}"]
+}
+
 target "log-gateway" {
   inherits = ["common"]
   dockerfile = "services/log-gateway/Dockerfile"

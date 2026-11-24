@@ -108,6 +108,30 @@ func TestSTTConfigurationIsIndependent(t *testing.T) {
 		}
 	}
 }
+
+func TestTTSConfigurationIsIndependent(t *testing.T) {
+	env := validEnv(t)
+	get := func(k string) string { return env[k] }
+	config, err := load(get)
+	if err != nil || config.TTSBaseURL != "" || config.TTSAPIKey != "" || config.TTSModel != "piper" || config.TTSVoice != "ru_RU-dmitri-medium" {
+		t.Fatalf("unexpected TTS defaults: %v", err)
+	}
+	env["TTS_BASE_URL"] = "http://tts:8080/v1"
+	env["TTS_MODEL"] = "tts-test-model"
+	env["TTS_VOICE"] = "tts-test-voice"
+	env["TTS_API_KEY"] = "tts-test-key"
+	config, err = load(get)
+	if err != nil || config.TTSBaseURL != env["TTS_BASE_URL"] || config.TTSModel != env["TTS_MODEL"] || config.TTSVoice != env["TTS_VOICE"] || config.TTSAPIKey != env["TTS_API_KEY"] || config.STTBaseURL != "" {
+		t.Fatalf("independent TTS configuration was not applied: %v", err)
+	}
+	for _, raw := range []string{"https://user:PRIVATE@host/v1", "https://host/v1?key=PRIVATE", "https://host/v1?", "https://host/v1#", "file:///PRIVATE"} {
+		env["TTS_BASE_URL"] = raw
+		if _, err := load(get); err == nil || strings.Contains(err.Error(), "PRIVATE") {
+			t.Fatal("invalid TTS URL accepted or leaked")
+		}
+	}
+}
+
 func TestRequiredOwnerAndSecrets(t *testing.T) {
 	env := validEnv(t)
 	env["TELEGRAM_ALLOWED_USER_IDS"] = ""

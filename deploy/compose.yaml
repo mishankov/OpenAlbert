@@ -68,6 +68,30 @@ services:
     logging: *logging
     stop_grace_period: 20s
 
+  tts:
+    profiles: [local-tts]
+    labels:
+      compose_service: tts
+    image: "${OPENALBERT_IMAGE_PREFIX:?Set OPENALBERT_IMAGE_PREFIX to ghcr.io/owner/repository}/tts:${OPENALBERT_IMAGE_TAG:?Set OPENALBERT_IMAGE_TAG to a published sha tag or master}"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cpus: "${TTS_CPUS:-2}"
+    mem_limit: "${TTS_MEMORY_LIMIT:-1g}"
+    pids_limit: 128
+    environment:
+      TTS_API_KEY: "${TTS_API_KEY:-}"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+    logging: *logging
+
   log-gateway:
     labels:
       compose_service: log-gateway
@@ -255,6 +279,10 @@ services:
       STT_MODEL: "${STT_MODEL:-nemotron-3.5}"
       STT_API_KEY: "${STT_API_KEY:-}"
       STT_REVISION: "${STT_REVISION:-ea30d66d-q8-nemo2bdfb03b-ru-pcm16-v1}"
+      TTS_BASE_URL: "${TTS_BASE_URL:-}"
+      TTS_API_KEY: "${TTS_API_KEY:-}"
+      TTS_MODEL: "${TTS_MODEL:-piper}"
+      TTS_VOICE: "${TTS_VOICE:-ru_RU-dmitri-medium}"
       YANDEX_SEARCH_URL: "${YANDEX_SEARCH_URL:-}"
       YANDEX_API_KEY: "${YANDEX_API_KEY:-}"
       YANDEX_FOLDER_ID: "${YANDEX_FOLDER_ID:-}"

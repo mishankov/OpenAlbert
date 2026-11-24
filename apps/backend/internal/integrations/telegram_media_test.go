@@ -3,12 +3,15 @@ package integrations
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -80,6 +83,115 @@ func TestArtifactMediaMethodAndCaptionValidation(t *testing.T) {
 				}
 			} else if err != nil || id != "42" || calls != 1 {
 				t.Fatalf("media delivery failed: %v, calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestTelegramVoiceReplyUsesTheIncomingMessageID(t *testing.T) {
+	const replyID = 83
+	audio := testVoiceAudio(t)
+	for _, tc := range []struct {
+		name, chatType string
+		chatID         int64
+		threadID       int
+	}{
+		{"private chat", "private", 7, 0},
+		{"forum topic", "supergroup", -20, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				switch req.URL.Path {
+				case "/botsecret/getUpdates":
+					_, _ = fmt.Fprintf(w, `{"ok":true,"result":[{"update_id":10,"message":{"message_id":%d,"date":100,"from":{"id":7},"chat":{"id":%d,"type":%q},"message_thread_id":%d,"is_topic_message":%t,"text":"reply by voice","reply_to_message":{"message_id":42}}}]}`, replyID, tc.chatID, tc.chatType, tc.threadID, tc.threadID > 0)
+				case "/botsecret/sendVoice":
+					if req.Method != http.MethodPost {
+						t.Error("wrong Telegram upload method")
+					}
+					if err := req.ParseMultipartForm(1 << 20); err != nil {
+						t.Error(err)
+						return
+					}
+					defer req.MultipartForm.RemoveAll()
+					thread := ""
+					if tc.threadID > 0 {
+						thread = strconv.Itoa(tc.threadID)
+					}
+					if req.FormValue("chat_id") != strconv.FormatInt(tc.chatID, 10) || req.FormValue("message_thread_id") != thread || req.FormValue("reply_parameters") != `{"message_id":83}` {
+						t.Error("Telegram voice reply lost source message, chat or topic")
+					}
+					file, header, err := req.FormFile("voice")
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					defer file.Close()
+					data, err := io.ReadAll(file)
+					if err != nil || !bytes.Equal(data, audio) || header.Filename != "voice.ogg" || header.Header.Get("Content-Type") != "audio/ogg" {
+						t.Error("wrong voice attachment")
+					}
+					_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":123}}`)
+				default:
+					t.Error("wrong Bot API route")
+				}
+			}))
+			defer server.Close()
+			tg, err := NewTelegram(TelegramConfig{Token: "secret", BaseURL: server.URL, AllowedUserIDs: []int64{7}, AllowedGroupIDs: []int64{-20}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			updates, err := tg.Poll(context.Background(), 0)
+			if err != nil || len(updates) != 1 || updates[0].Incoming == nil {
+				t.Fatalf("missing incoming update: %v", err)
+			}
+			in := updates[0].Incoming
+			if in.ID != "telegram:10" || in.TelegramMessageID != replyID || in.ReplyTo == nil || in.ReplyTo.MessageID != 42 {
+				t.Fatal("incoming update lost identifiers")
+			}
+			if _, err := tg.SendVoice(context.Background(), in.Conversation, in.TelegramMessageID, audio[:voiceFixtureHeaderSize]); err == nil {
+				t.Fatal("voice upload accepted an identification header without audio")
+			}
+			id, err := tg.SendVoice(context.Background(), in.Conversation, in.TelegramMessageID, audio)
+			if err != nil || id != "123" {
+				t.Fatalf("voice upload failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestTelegramVoiceDeliveryFailureClassification(t *testing.T) {
+	audio := testVoiceAudio(t)
+	for _, tc := range []struct {
+		name, reply string
+		status      int
+		unknown     bool
+	}{
+		{"explicit rejection", `{"ok":false,"error_code":400,"description":"error for secret"}`, http.StatusBadRequest, false},
+		{"response lost", `{"ok":true,`, http.StatusOK, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.reply)
+			}))
+			defer server.Close()
+			tg, err := NewTelegram(TelegramConfig{Token: "secret", BaseURL: server.URL, AllowedUserIDs: []int64{7}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = tg.SendVoice(context.Background(), domain.Conversation{OwnerID: 7, ChatID: 7, Private: true}, 83, audio)
+			if err == nil || strings.Contains(err.Error(), "secret") {
+				t.Fatal("failed delivery was accepted or leaked a credential")
+			}
+			var unknown *TelegramDeliveryError
+			if (errors.As(err, &unknown) && unknown.Unknown) != tc.unknown {
+				t.Fatalf("unexpected outcome: %v", err)
+			}
+			if !tc.unknown {
+				var rejected *TelegramError
+				if !errors.As(err, &rejected) || !rejected.Rejected || strings.Contains(rejected.Description, "secret") {
+					t.Fatal("explicit Telegram failure lost or leaked diagnostics")
+				}
 			}
 		})
 	}

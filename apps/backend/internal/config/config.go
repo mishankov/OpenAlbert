@@ -28,6 +28,7 @@ type Config struct {
 	ModelsFile                                              string
 	Models                                                  domain.ModelProfiles
 	STTBaseURL, STTAPIKey, STTModel, STTRevision            string
+	TTSBaseURL, TTSAPIKey, TTSModel, TTSVoice               string
 	YandexAPIKey, YandexFolderID, YandexEndpoint            string
 	KnowledgeDir, SoulFile, HTTPAddr                        string
 	SessionIdleTimeout, TaskMinInterval, InitiativeInterval time.Duration
@@ -58,6 +59,7 @@ func load(get func(string) string) (Config, error) {
 		TelegramWidgets: value("TELEGRAM_WIDGETS", "auto"),
 		DesktopAPIToken: value("DESKTOP_API_TOKEN", ""),
 		STTBaseURL:      value("STT_BASE_URL", ""), STTAPIKey: value("STT_API_KEY", ""), STTModel: value("STT_MODEL", ""), STTRevision: value("STT_REVISION", ""),
+		TTSBaseURL: value("TTS_BASE_URL", ""), TTSAPIKey: value("TTS_API_KEY", ""), TTSModel: value("TTS_MODEL", "piper"), TTSVoice: value("TTS_VOICE", "ru_RU-dmitri-medium"),
 		DatabaseURL: value("DATABASE_URL", ""), TemporalAddress: value("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: value("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: value("TEMPORAL_TASK_QUEUE", "openalbert"),
 		TelegramBotToken: value("TELEGRAM_BOT_TOKEN", ""), TelegramBaseURL: value("TELEGRAM_BASE_URL", ""), ModelsFile: value("LLM_CONFIG_FILE", ""),
 		YandexAPIKey: value("YANDEX_API_KEY", ""), YandexEndpoint: value("YANDEX_SEARCH_URL", ""), YandexFolderID: value("YANDEX_FOLDER_ID", ""), KnowledgeDir: value("KNOWLEDGE_DIR", "./container_data/knowledge"), SoulFile: value("SOUL_FILE", ""), HTTPAddr: value("HTTP_ADDR", ":8080"),
@@ -113,6 +115,11 @@ func load(get func(string) string) (Config, error) {
 		}
 		if c.STTModel == "" || c.STTRevision == "" {
 			problems = append(problems, errors.New("STT_MODEL and STT_REVISION are required when STT_BASE_URL is set"))
+		}
+	}
+	if c.TTSBaseURL != "" {
+		if u, e := url.Parse(c.TTSBaseURL); e != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || strings.ContainsAny(c.TTSBaseURL, "?#") {
+			problems = append(problems, errors.New("TTS_BASE_URL must be an HTTP(S) URL without credentials, query or fragment"))
 		}
 	}
 	if c.OpenAIAuthMode != "profiles" && c.OpenAIAuthMode != "api_key" && c.OpenAIAuthMode != "siwc" && c.OpenAIAuthMode != "auto" {

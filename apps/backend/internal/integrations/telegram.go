@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"path"
 	"strconv"
@@ -362,7 +363,7 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 		} else {
 			conv.ID = fmt.Sprintf("telegram:group:%d:topic:%d", m.Chat.ID, threadID)
 		}
-		incoming := domain.Incoming{AuthorName: strings.TrimSpace(m.From.FirstName + " " + m.From.LastName), AuthorUsername: m.From.Username, ID: fmt.Sprintf("telegram:%d", u.ID), Conversation: conv, Text: telegramMessageText(m), CreatedAt: time.Unix(m.Date, 0).UTC()}
+		incoming := domain.Incoming{AuthorName: strings.TrimSpace(m.From.FirstName + " " + m.From.LastName), AuthorUsername: m.From.Username, ID: fmt.Sprintf("telegram:%d", u.ID), TelegramMessageID: m.ID, Conversation: conv, Text: telegramMessageText(m), CreatedAt: time.Unix(m.Date, 0).UTC()}
 		incoming.ReplyTo = telegramReplyContext(m.ReplyTo)
 		incoming.Quote = m.Quote
 		if m.ReplyTo != nil && chatGPTCommand(telegramMessageText(m.ReplyTo)) {
@@ -510,7 +511,18 @@ func (t *Telegram) Typing(ctx context.Context, c domain.Conversation) error {
 	return t.api(ctx, "sendChatAction", payload, nil)
 }
 func (t *Telegram) SendFile(ctx context.Context, c domain.Conversation, name string, data []byte) (string, error) {
-	return t.sendUpload(ctx, c, name, data, "document", messagefmt.Message{})
+	return t.sendUpload(ctx, c, name, data, "document", messagefmt.Message{}, 0)
+}
+
+// SendVoice uploads a native voice note as a reply to a message in this chat and topic.
+func (t *Telegram) SendVoice(ctx context.Context, c domain.Conversation, replyTo int64, data []byte) (string, error) {
+	if replyTo <= 0 {
+		return "", errors.New("Telegram voice reply requires a message ID")
+	}
+	if !validOggOpus(data) {
+		return "", errors.New("Telegram voice reply requires complete Ogg/Opus audio")
+	}
+	return t.sendUpload(ctx, c, "voice.ogg", data, "voice", messagefmt.Message{}, replyTo)
 }
 
 // SendArtifact sends one media message. Choose the method before attempting
@@ -526,10 +538,10 @@ func (t *Telegram) SendArtifact(ctx context.Context, c domain.Conversation, arti
 			field = "photo"
 		}
 	}
-	return t.sendUpload(ctx, c, artifact.Name, artifact.Data, field, caption)
+	return t.sendUpload(ctx, c, artifact.Name, artifact.Data, field, caption, 0)
 }
 
-func (t *Telegram) sendUpload(ctx context.Context, c domain.Conversation, name string, data []byte, field string, caption messagefmt.Message) (string, error) {
+func (t *Telegram) sendUpload(ctx context.Context, c domain.Conversation, name string, data []byte, field string, caption messagefmt.Message, replyTo int64) (string, error) {
 	if !t.allowed(c) {
 		return "", errors.New("Telegram recipient is not allowed")
 	}
@@ -542,6 +554,9 @@ func (t *Telegram) sendUpload(ctx context.Context, c domain.Conversation, name s
 	if c.ThreadID > 0 {
 		_ = w.WriteField("message_thread_id", strconv.Itoa(c.ThreadID))
 	}
+	if replyTo > 0 {
+		_ = w.WriteField("reply_parameters", fmt.Sprintf(`{"message_id":%d}`, replyTo))
+	}
 	if caption.Text != "" {
 		_ = w.WriteField("caption", caption.Text)
 	}
@@ -552,7 +567,18 @@ func (t *Telegram) sendUpload(ctx context.Context, c domain.Conversation, name s
 		}
 		_ = w.WriteField("caption_entities", string(entities))
 	}
-	part, err := w.CreateFormFile(field, path.Base(name))
+	partHeader := make(textproto.MIMEHeader)
+	partHeader.Set("Content-Disposition", multipart.FileContentDisposition(field, path.Base(name)))
+	partHeader.Set("Content-Type", "application/octet-stream")
+	method := "sendDocument"
+	switch field {
+	case "photo":
+		method = "sendPhoto"
+	case "voice":
+		method = "sendVoice"
+		partHeader.Set("Content-Type", "audio/ogg")
+	}
+	part, err := w.CreatePart(partHeader)
 	if err != nil {
 		return "", err
 	}
@@ -561,10 +587,6 @@ func (t *Telegram) sendUpload(ctx context.Context, c domain.Conversation, name s
 	}
 	if err = w.Close(); err != nil {
 		return "", err
-	}
-	method := "sendDocument"
-	if field == "photo" {
-		method = "sendPhoto"
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.config.BaseURL+"/bot"+t.config.Token+"/"+method, &body)
 	if err != nil {

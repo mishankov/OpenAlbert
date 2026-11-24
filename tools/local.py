@@ -21,7 +21,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports/local"
-COMPONENTS = ("openalbert", "stt", "log-gateway", "minio", "minio-init", "backup")
+COMPONENTS = ("openalbert", "stt", "tts", "log-gateway", "minio", "minio-init", "backup")
 COMMANDS = ("check", "test", "test:go", "test:computer", "test:backup", "test:web", "images", "verify", "publish", "reports")
 
 
@@ -236,7 +236,7 @@ class Run:
         if deployment:
             args = [sys.executable, "tools/smoke/release-smoke.py"]
             for component, image in images.items():
-                if component not in {"stt", "backup"}:
+                if component not in {"stt", "tts", "backup"}:
                     args += ["--image", component + "=" + image]
             self.command("deployment-" + arch, args, env=env, timeout=1200)
 
