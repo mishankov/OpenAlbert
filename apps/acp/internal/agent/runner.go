@@ -17,12 +17,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/mcpclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/session"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/skills"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/tools"
 	"github.com/mishankov/OpenAlbert/shared/codemode"
-	"openalbert/apps/acp/internal/mcpclient"
-	"openalbert/apps/acp/internal/serverclient"
-	"openalbert/apps/acp/internal/session"
-	"openalbert/apps/acp/internal/skills"
-	"openalbert/apps/acp/internal/tools"
 )
 
 const (

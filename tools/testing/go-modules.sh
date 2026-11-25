@@ -2,6 +2,6 @@
 set -eu
 
 export GOWORK=off
-for module in apps/acp apps/backend services/backup services/log-gateway services/stt shared/backup shared/codemode; do
+for module in . apps/backend services/backup services/log-gateway services/stt shared/backup; do
     go -C "$module" "$@"
 done

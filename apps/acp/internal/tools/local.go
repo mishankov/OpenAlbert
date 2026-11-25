@@ -22,7 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"openalbert/apps/acp/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
 )
 
 const (

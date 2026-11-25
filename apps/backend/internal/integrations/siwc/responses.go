@@ -13,19 +13,31 @@ import (
 	"openalbert/apps/backend/internal/domain"
 )
 
+type responseReasoning struct {
+	Effort string `json:"effort"`
+}
+
 // An allowlisted request shape prevents accidentally carrying Chat Completions
 // parameters (or unsupported Responses fields) into the subscription route.
 type responseRequest struct {
-	Include []string `json:"include"`
-	Model   string   `json:"model"`
-	Input   []any    `json:"input"`
-	Store   bool     `json:"store"`
-	Stream  bool     `json:"stream"`
-	Tools   []any    `json:"tools,omitempty"`
+	Include   []string           `json:"include"`
+	Model     string             `json:"model"`
+	Input     []any              `json:"input"`
+	Store     bool               `json:"store"`
+	Stream    bool               `json:"stream"`
+	Reasoning *responseReasoning `json:"reasoning,omitempty"`
+	Tools     []any              `json:"tools,omitempty"`
 }
 
 func buildRequest(model string, messages []domain.Message, tools []domain.Tool) (responseRequest, error) {
+	return buildRequestWithReasoning(model, "", messages, tools)
+}
+
+func buildRequestWithReasoning(model, reasoningEffort string, messages []domain.Message, tools []domain.Tool) (responseRequest, error) {
 	r := responseRequest{Model: model, Input: []any{}, Stream: true, Include: []string{"reasoning.encrypted_content"}}
+	if strings.TrimSpace(reasoningEffort) != "" {
+		r.Reasoning = &responseReasoning{Effort: strings.TrimSpace(reasoningEffort)}
+	}
 	for _, m := range messages {
 		if m.Role == "assistant" && len(m.ResponsesItems) > 0 {
 			for _, item := range m.ResponsesItems {
@@ -92,7 +104,13 @@ func FitsContext(ctx context.Context, model string, messages []domain.Message, t
 // conservative message/tool framing matches the profile router's local estimate;
 // this is deliberately not a provider tokenizer or a model context limit.
 func EstimateInput(model string, messages []domain.Message, tools []domain.Tool) (int, error) {
-	body, err := buildRequest(model, messages, tools)
+	return EstimateInputForProfile(domain.ModelProfile{Model: model}, messages, tools)
+}
+
+// EstimateInputForProfile measures the serialized Responses request for a model
+// profile, including optional reasoning effort settings.
+func EstimateInputForProfile(profile domain.ModelProfile, messages []domain.Message, tools []domain.Tool) (int, error) {
+	body, err := buildRequestWithReasoning(profile.Model, profile.Options.ReasoningEffort, messages, tools)
 	if err != nil {
 		return 0, err
 	}
@@ -137,7 +155,7 @@ func (c *Client) completeForModel(ctx context.Context, profile domain.ModelProfi
 	if err != nil {
 		return domain.Completion{}, err
 	}
-	body, err := buildRequest(profile.Model, messages, tools)
+	body, err := buildRequestWithReasoning(profile.Model, profile.Options.ReasoningEffort, messages, tools)
 	if err != nil {
 		return domain.Completion{}, err
 	}

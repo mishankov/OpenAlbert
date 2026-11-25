@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"openalbert/apps/acp/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
 )
 
 // Record stores the persisted state of one local ACP coding session so

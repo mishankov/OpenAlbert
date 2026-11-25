@@ -45,10 +45,44 @@ type attempt struct {
 	expires                          time.Time
 }
 type Model struct {
-	Slug        string `json:"slug"`
-	DisplayName string `json:"display_name"`
-	Visibility  string `json:"visibility,omitempty"`
+	Slug                     string   `json:"slug"`
+	DisplayName              string   `json:"display_name"`
+	Visibility               string   `json:"visibility,omitempty"`
+	SupportedReasoningLevels []string `json:"supported_reasoning_efforts,omitempty"`
 }
+
+func parseReasoningLevels(raw []json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, entry := range raw {
+		var effort string
+		if json.Unmarshal(entry, &effort) != nil {
+			var obj struct {
+				Effort string `json:"effort"`
+				Level  string `json:"level"`
+			}
+			if json.Unmarshal(entry, &obj) == nil {
+				effort = obj.Effort
+				if effort == "" {
+					effort = obj.Level
+				}
+			}
+		}
+		effort = strings.TrimSpace(effort)
+		switch effort {
+		case "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+			if !seen[effort] {
+				seen[effort] = true
+				out = append(out, effort)
+			}
+		}
+	}
+	return out
+}
+
 type Status struct {
 	Connected   bool   `json:"connected"`
 	PlanEnabled bool   `json:"plan_enabled"`
@@ -299,30 +333,95 @@ func (c *Client) get(ctx context.Context, endpoint apiEndpoint, path, token stri
 	return nil
 }
 func (c *Client) Models(ctx context.Context) ([]Model, error) {
+	return c.ModelsFresh(ctx, false)
+}
+
+func (c *Client) ModelsFresh(ctx context.Context, refresh bool) ([]Model, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	token, err := c.accessToken(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if time.Now().Before(c.catalogUntil) {
+	if !refresh && time.Now().Before(c.catalogUntil) {
 		return append([]Model{}, c.catalog...), nil
 	}
-	var response struct {
-		Models []Model `json:"models"`
-	}
-	if err = c.get(ctx, c.catalogEndpoint, "/models", token, &response); err != nil {
+	models, err := c.fetchModels(ctx, c.catalogEndpoint, token)
+	if err != nil {
 		return nil, err
-	}
-	models := []Model{}
-	for _, m := range response.Models {
-		if m.Visibility == "list" && c.catalogEndpoint.safeDiagnostic(m.Slug, token) != "" && c.catalogEndpoint.safeDiagnostic(m.DisplayName, token) != "" {
-			models = append(models, m)
-		}
 	}
 	c.catalog = models
 	c.catalogUntil = time.Now().Add(5 * time.Minute)
 	return append([]Model{}, models...), nil
+}
+
+// ModelsForProfile fetches the ChatGPT model catalog through a specific provider's
+// endpoint and headers while sharing the connection's serialized token refresh.
+func (c *Client) ModelsForProfile(ctx context.Context, profile domain.ModelProfile, refresh bool) ([]Model, error) {
+	endpoint := apiEndpoint{baseURL: profile.BaseURL, headers: maps.Clone(profile.Headers)}
+	if endpoint.baseURL == c.catalogEndpoint.baseURL && maps.Equal(endpoint.headers, c.catalogEndpoint.headers) {
+		return c.ModelsFresh(ctx, refresh)
+	}
+	if err := c.mu.LockContext(ctx); err != nil {
+		return nil, err
+	}
+	token, err := c.accessToken(ctx)
+	c.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return c.fetchModels(ctx, endpoint, token)
+}
+
+func (c *Client) fetchModels(ctx context.Context, endpoint apiEndpoint, token string) ([]Model, error) {
+	var response struct {
+		Models []struct {
+			Slug                      string            `json:"slug"`
+			ID                        string            `json:"id"`
+			DisplayName               string            `json:"display_name"`
+			Name                      string            `json:"name"`
+			Visibility                string            `json:"visibility"`
+			SupportedReasoningLevels  []json.RawMessage `json:"supported_reasoning_levels"`
+			SupportedReasoningEfforts []json.RawMessage `json:"supported_reasoning_efforts"`
+		} `json:"models"`
+	}
+	if err := c.get(ctx, endpoint, "/models", token, &response); err != nil {
+		return nil, err
+	}
+	models := []Model{}
+	for _, raw := range response.Models {
+		if raw.Visibility != "list" {
+			continue
+		}
+		slug := strings.TrimSpace(raw.Slug)
+		if slug == "" {
+			slug = strings.TrimSpace(raw.ID)
+		}
+		if slug == "" || endpoint.safeDiagnostic(slug, token) == "" {
+			continue
+		}
+		display := strings.TrimSpace(raw.DisplayName)
+		if display == "" {
+			display = strings.TrimSpace(raw.Name)
+		}
+		if display != "" && endpoint.safeDiagnostic(display, token) == "" {
+			continue
+		}
+		if display == "" {
+			display = slug
+		}
+		efforts := parseReasoningLevels(raw.SupportedReasoningLevels)
+		if len(efforts) == 0 {
+			efforts = parseReasoningLevels(raw.SupportedReasoningEfforts)
+		}
+		models = append(models, Model{
+			Slug:                     slug,
+			DisplayName:              display,
+			Visibility:               raw.Visibility,
+			SupportedReasoningLevels: efforts,
+		})
+	}
+	return models, nil
 }
 func (c *Client) SetModel(ctx context.Context, slug string) error {
 	models, err := c.Models(ctx)

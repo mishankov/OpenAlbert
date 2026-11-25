@@ -315,7 +315,42 @@ func TestModelProvidersRejectInvalidHeadersWithoutEchoingValues(t *testing.T) {
 	}
 }
 
-func TestSubscriptionProvidersRejectIncompatibleSettings(t *testing.T) {
+func TestDiscoverModelsDefaultsTrueAndCanBeDisabled(t *testing.T) {
+	omitted := strings.Replace(validModels, "discover_models = true\n", "", 1)
+	models, err := loadModelProfiles(modelFile(t, omitted), modelEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !models.Providers["primary"].DiscoverModels {
+		t.Fatal("discover_models must default to true when omitted")
+	}
+
+	disabled := strings.Replace(validModels, "discover_models = true", "discover_models = false", 1)
+	models, err = loadModelProfiles(modelFile(t, disabled), modelEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if models.Providers["primary"].DiscoverModels {
+		t.Fatal("discover_models = false must disable discovery")
+	}
+}
+
+func TestSubscriptionProvidersAllowReasoningEffortAndRejectIncompatibleSettings(t *testing.T) {
+	allowed := validModels + subscriptionProvider + `
+[providers.chatgpt.default_options]
+reasoning_effort = "medium"
+
+[models."chatgpt/codex-5".options]
+reasoning_effort = "xhigh"
+`
+	models, err := loadModelProfiles(modelFile(t, allowed), modelEnv)
+	if err != nil {
+		t.Fatalf("expected ChatGPT provider/model reasoning_effort to succeed: %v", err)
+	}
+	if models.Providers["chatgpt"].DefaultOptions.ReasoningEffort != "medium" || models.Models["chatgpt/codex-5"].Options.ReasoningEffort != "xhigh" {
+		t.Fatalf("ChatGPT reasoning_effort not preserved: prov=%+v model=%+v", models.Providers["chatgpt"].DefaultOptions, models.Models["chatgpt/codex-5"].Options)
+	}
+
 	for name, extra := range map[string]string{
 		"invalid endpoint":     `base_url = "https://private-sentinel.invalid/v1?token=PRIVATE_SENTINEL"`,
 		"empty fragment":       `base_url = "https://private-sentinel.invalid/v1#"`,
@@ -323,8 +358,10 @@ func TestSubscriptionProvidersRejectIncompatibleSettings(t *testing.T) {
 		"empty API credential": `api_key_env = ""`,
 		"empty API options":    "[providers.chatgpt.default_options]",
 		"false API option":     "[providers.chatgpt.default_options]\ninclude_reasoning_content = false",
+		"thinking option":      "[providers.chatgpt.default_options]\nreasoning_effort = \"high\"\nthinking = \"enabled\"",
+		"output field option":  "[providers.chatgpt.default_options]\nreasoning_effort = \"high\"\noutput_token_field = \"max_completion_tokens\"",
+		"model thinking opt":   "[models.\"chatgpt/codex-5\".options]\nreasoning_effort = \"high\"\nthinking = \"enabled\"",
 		"empty API pricing":    "[providers.chatgpt.default_pricing]",
-		"API option":           "[providers.chatgpt.default_options]\nreasoning_effort = \"high\"",
 		"API pricing":          "[providers.chatgpt.default_pricing]\ninput_per_million = 1\ncached_input_per_million = 0\noutput_per_million = 2",
 	} {
 		t.Run(name, func(t *testing.T) {

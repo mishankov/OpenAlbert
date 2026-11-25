@@ -25,13 +25,21 @@ OpenAlbert можно использовать как локального ко�
 
 Сессии кодинга изолированы от `personal:<owner_id>` и не отправляют сообщения в Telegram, а также исключены из фоновой инициативы (`InitiativeWorkflow`). При закрытии сессии (`POST /api/v1/coding/sessions/{id}/close`) она попадает в стандартную очередь `AnalysisWorkflow`: извлечённые устойчивые предпочтения и факты сохраняются в личной памяти владельца (`personal:<owner_id>`).
 
-## Настройка `~/.config/openalbert/acp.toml`
+## Установка и настройка `~/.config/openalbert/acp.toml`
 
-Соберите или установите `openalbert-acp`:
+Установите `openalbert-acp` напрямую через `go install` (требуется Go 1.26+):
 
 ```sh
-go -C apps/acp build -o ~/.local/bin/openalbert-acp ./cmd/openalbert-acp
+go install github.com/mishankov/OpenAlbert/apps/acp/cmd/openalbert-acp@latest
 ```
+
+Или соберите локально из клона репозитория:
+
+```sh
+go build -o ~/.local/bin/openalbert-acp ./apps/acp/cmd/openalbert-acp
+```
+
+Убедитесь, что `$(go env GOPATH)/bin` (или `~/.local/bin`) добавлен в `PATH`.
 
 Создайте `~/.config/openalbert/acp.toml` (права `0600`):
 

@@ -14,7 +14,7 @@ import sys
 COMPONENTS = ('openalbert', 'stt', 'tts', 'log-gateway', 'minio', 'minio-init', 'backup')
 ARCHES = ('amd64', 'arm64')
 INPUTS = {
-    'openalbert': ('apps/backend/', 'shared/backup/', 'shared/codemode/'),
+    'openalbert': ('go.mod', 'go.sum', 'apps/backend/', 'shared/backup/', 'shared/codemode/'),
     'backup': ('services/backup/', 'shared/backup/'),
     'stt': ('services/stt/',),
     'tts': ('services/tts/',),

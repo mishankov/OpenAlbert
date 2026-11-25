@@ -558,10 +558,20 @@ func TestSubscriptionRouterRequiresClientAndRejectsAPIOptions(t *testing.T) {
 		t.Fatal("subscription without client accepted")
 	}
 	plan := &subscriptionRouterStub{}
+	withEffort := subscriptionRouterConfig("http://localhost")
+	ep := withEffort.Profiles["chat-plan"]
+	ep.Options.ReasoningEffort = "high"
+	withEffort.Profiles["chat-plan"] = ep
+	if _, err := NewModelRouterWithPlan(withEffort, plan); err != nil {
+		t.Fatalf("subscription reasoning_effort rejected: %v", err)
+	}
 	for _, change := range []func(*domain.ModelProfile){
 		func(p *domain.ModelProfile) { p.APIKey = "secret" },
 		func(p *domain.ModelProfile) { p.APIKeyEnv = "KEY" },
-		func(p *domain.ModelProfile) { p.Options.ReasoningEffort = "high" },
+		func(p *domain.ModelProfile) { p.Options.Thinking = "enabled" },
+		func(p *domain.ModelProfile) { p.Options.IncludeReasoningContent = true },
+		func(p *domain.ModelProfile) { p.Options.SessionHeader = "x-opencode-session" },
+		func(p *domain.ModelProfile) { p.Options.OutputTokenField = "max_completion_tokens" },
 		func(p *domain.ModelProfile) { p.Pricing = &domain.ModelPricing{InputPerMillion: 1} },
 	} {
 		config := subscriptionRouterConfig("http://localhost")

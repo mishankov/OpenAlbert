@@ -10,8 +10,8 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/minio/minio-go/v7 v7.4.1
+	github.com/mishankov/OpenAlbert v0.0.0
 	github.com/mishankov/OpenAlbert/shared/backup v0.0.0
-	github.com/mishankov/OpenAlbert/shared/codemode v0.0.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.12.1
 	github.com/yuin/goldmark v1.8.7
@@ -71,6 +71,6 @@ require (
 )
 
 replace (
+	github.com/mishankov/OpenAlbert => ../..
 	github.com/mishankov/OpenAlbert/shared/backup => ../../shared/backup
-	github.com/mishankov/OpenAlbert/shared/codemode => ../../shared/codemode
 )

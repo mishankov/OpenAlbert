@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"openalbert/apps/acp/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
 )
 
 // ServerConfig matches the ACP session/new mcpServers entries (stdio or HTTP/SSE).

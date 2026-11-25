@@ -1,8 +1,8 @@
 FROM golang:1.27.4-alpine AS build
 ENV GOWORK=off
 WORKDIR /src/apps/backend
+COPY go.mod go.sum /src/
 COPY shared/backup/go.mod shared/backup/go.sum /src/shared/backup/
-COPY shared/codemode/go.mod shared/codemode/go.sum /src/shared/codemode/
 COPY apps/backend/go.mod apps/backend/go.sum ./
 RUN go mod download
 COPY shared/backup /src/shared/backup
