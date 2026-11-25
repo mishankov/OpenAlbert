@@ -16,13 +16,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/agent"
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/config"
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/mcpclient"
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/session"
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/skills"
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/tools"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/agent"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/bridge"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/config"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/mcpclient"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/session"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/skills"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/tools"
 )
 
 const (
@@ -60,6 +61,7 @@ type Server struct {
 	logger    *slog.Logger
 
 	mu            sync.Mutex
+	bridge        *bridge.Bridge
 	sessions      map[string]*agent.Session
 	sessionOps    map[string]*promptHandle // Tail of serialized per-session ops (prompts, reloads, and post-reload config).
 	activePrompts map[string]*promptHandle // Latest prompt handle per session for session/cancel.
@@ -87,11 +89,44 @@ func NewServer(cfg config.Config, in io.Reader, out io.Writer, logger *slog.Logg
 	}
 }
 
+// Bridge returns the active LAN T3 bridge if this Server acquired the singleton lock.
+func (s *Server) Bridge() *bridge.Bridge {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bridge
+}
+
 // Run serves ACP JSON-RPC messages until EOF or ctx cancellation, then closes
 // all active sessions so OpenAlbert can run post-session analysis.
 func (s *Server) Run(ctx context.Context) error {
-	defer s.closeAllSessions()
+	if s.cfg.Bridge {
+		b, acquired, err := bridge.New(s.cfg, s.client, s.logger)
+		if err != nil {
+			s.logger.Warn("failed to initialize LAN T3 bridge; continuing in interactive-only mode", "error", err)
+		} else if !acquired {
+			s.logger.Info("another openalbert instance holds the bridge lock; running in interactive-only mode")
+		} else {
+			s.mu.Lock()
+			s.bridge = b
+			s.mu.Unlock()
+			b.Start(ctx)
+		}
+	}
+	defer func() {
+		s.closeAllSessions()
+		s.closeBridge()
+	}()
 	return s.transport.ServeOrdered(ctx, s.prepareFrame, s.handle)
+}
+
+func (s *Server) closeBridge() {
+	s.mu.Lock()
+	b := s.bridge
+	s.bridge = nil
+	s.mu.Unlock()
+	if b != nil {
+		_ = b.Close()
+	}
 }
 
 type sessionLoadParams struct {
@@ -548,8 +583,12 @@ func (s *Server) closeAllSessions() {
 		delete(s.configOps, id)
 	}
 	s.sessions = map[string]*agent.Session{}
+	b := s.bridge
 	s.mu.Unlock()
 	for _, sess := range active {
+		if b != nil && sess.MCP != nil {
+			b.DetachMCP(sess.MCP)
+		}
 		sess.Close(context.Background())
 	}
 }
@@ -623,7 +662,7 @@ func (s *Server) handleInitialize(params json.RawMessage) (any, error) {
 			},
 		},
 		"agentInfo": map[string]any{
-			"name":    "openalbert-acp",
+			"name":    "openalbert",
 			"title":   "OpenAlbert",
 			"version": Version,
 		},
@@ -837,8 +876,15 @@ func (s *Server) buildSession(ctx context.Context, sessionID, cwd string, mcpCon
 	s.mu.Lock()
 	prev := s.sessions[sessionID]
 	s.sessions[sessionID] = sess
+	b := s.bridge
 	s.mu.Unlock()
+	if b != nil && bridge.HasT3Tools(sess.MCP) {
+		b.AttachMCP(sess.MCP)
+	}
 	if prev != nil && prev.MCP != nil {
+		if b != nil {
+			b.DetachMCP(prev.MCP)
+		}
 		prev.MCP.Close()
 	}
 	return sess, nil
@@ -1303,6 +1349,9 @@ func (s *Server) handlePrompt(ctx context.Context, params json.RawMessage) (any,
 	if err != nil {
 		return nil, err
 	}
+	if s.isBridgeTickPrompt(req) {
+		return s.handleBridgeTick(handle.ctx, sess)
+	}
 	cb := &acpCallbacks{
 		sessionID:      sess.ID,
 		sess:           sess,
@@ -1315,6 +1364,39 @@ func (s *Server) handlePrompt(ctx context.Context, params json.RawMessage) (any,
 		return nil, err
 	}
 	return map[string]any{"stopReason": stopReason}, nil
+}
+
+func (s *Server) isBridgeTickPrompt(req promptParams) bool {
+	if !s.cfg.Bridge || len(req.assembledImages) > 0 {
+		return false
+	}
+	tick := s.cfg.BridgeTickPrompt
+	if tick == "" {
+		tick = config.DefaultBridgeTickPrompt
+	}
+	return req.assembledText == tick
+}
+
+func (s *Server) handleBridgeTick(ctx context.Context, sess *agent.Session) (any, error) {
+	s.mu.Lock()
+	b := s.bridge
+	s.mu.Unlock()
+	replyText := "bridge ok"
+	if b != nil {
+		if err := b.Tick(ctx, sess.MCP); err != nil {
+			s.logger.Warn("bridge tick encountered error", "session_id", sess.ID, "error", err)
+		}
+	} else {
+		replyText = "bridge ok (standby)"
+	}
+	_ = s.transport.Notify("session/update", map[string]any{
+		"sessionId": sess.ID,
+		"update": map[string]any{
+			"sessionUpdate": "agent_message_chunk",
+			"content":       map[string]any{"type": "text", "text": replyText},
+		},
+	})
+	return map[string]any{"stopReason": "end_turn"}, nil
 }
 
 type acpCallbacks struct {

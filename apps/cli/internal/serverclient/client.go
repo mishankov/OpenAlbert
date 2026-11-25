@@ -207,7 +207,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, in, out any) e
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("User-Agent", "openalbert-acp/0.1")
+	req.Header.Set("User-Agent", "openalbert/0.1")
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -288,7 +288,7 @@ func (c *Client) CompleteStream(ctx context.Context, payload CompleteRequest, on
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("User-Agent", "openalbert-acp/0.1")
+	req.Header.Set("User-Agent", "openalbert/0.1")
 
 	resp, err := c.streamClient.Do(req)
 	if err != nil {

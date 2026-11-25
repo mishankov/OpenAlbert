@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/serverclient"
 )
 
 // ServerConfig matches the ACP session/new mcpServers entries (stdio or HTTP/SSE).
@@ -91,10 +91,28 @@ type BoundTool struct {
 // Manager holds connected MCP servers for one ACP session and maps their tools
 // into Codemode-safe tool names.
 type Manager struct {
-	mu    sync.Mutex
-	conns []conn
-	tools map[string]BoundTool
-	order []string
+	mu     sync.Mutex
+	closed bool
+	conns  []conn
+	tools  map[string]BoundTool
+	order  []string
+}
+
+// ErrMCPTransport indicates a transport, availability, or protocol-level MCP failure
+// (as opposed to an application-level tool error returned via isError=true).
+var ErrMCPTransport = errors.New("mcp transport unavailable")
+
+// ToolError represents an application-level error returned by an MCP tool (isError=true).
+type ToolError struct {
+	Tool    string
+	Message string
+}
+
+func (e *ToolError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("mcp tool %s error: %s", e.Tool, e.Message)
+	}
+	return fmt.Sprintf("mcp tool %s failed", e.Tool)
 }
 
 var nonIdent = regexp.MustCompile(`[^a-zA-Z0-9_]+`)
@@ -134,7 +152,7 @@ func Connect(ctx context.Context, configs []ServerConfig, reservedNames map[stri
 		err = c.Call(initCtx, "initialize", map[string]any{
 			"protocolVersion": latestMCPProtocolVersion,
 			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]string{"name": "openalbert-acp", "version": "0.1.0"},
+			"clientInfo":      map[string]string{"name": "openalbert", "version": "0.1.0"},
 		}, &initRes)
 		if err == nil {
 			negotiated, ok := supportedMCPProtocolVersion(initRes.ProtocolVersion)
@@ -333,16 +351,131 @@ func (m *Manager) Call(ctx context.Context, codemodeName string, args json.RawMe
 	return raw, false, nil
 }
 
+func (m *Manager) findRemoteTool(remoteName string) (BoundTool, bool) {
+	if m == nil {
+		return BoundTool{}, false
+	}
+	var fallback BoundTool
+	var found bool
+	for _, cmName := range m.order {
+		bt := m.tools[cmName]
+		if bt.RemoteName != remoteName {
+			continue
+		}
+		if sanitizeIdent(bt.ServerName) == "t3_code" {
+			return bt, true
+		}
+		if !found {
+			fallback = bt
+			found = true
+		}
+	}
+	return fallback, found
+}
+
+// HasRemoteTool reports whether any connected MCP server exposes the given raw tool name.
+func (m *Manager) HasRemoteTool(remoteName string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return false
+	}
+	_, ok := m.findRemoteTool(remoteName)
+	return ok
+}
+
+// CallRemote invokes an MCP tool by its raw remote name (preferring the t3-code server).
+// Transport/protocol errors wrap ErrMCPTransport; tool-level errors return *ToolError.
+func (m *Manager) CallRemote(ctx context.Context, remoteName string, args any) (json.RawMessage, error) {
+	if m == nil {
+		return nil, fmt.Errorf("%w: no MCP manager attached", ErrMCPTransport)
+	}
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return nil, fmt.Errorf("%w: MCP manager is closed", ErrMCPTransport)
+	}
+	bt, ok := m.findRemoteTool(remoteName)
+	if !ok {
+		return nil, fmt.Errorf("%w: MCP tool %q not available", ErrMCPTransport, remoteName)
+	}
+	parsed := map[string]any{}
+	if args != nil {
+		rawArgs, err := json.Marshal(args)
+		if err != nil {
+			return nil, fmt.Errorf("marshal MCP arguments for %s: %w", remoteName, err)
+		}
+		if len(rawArgs) > 0 && string(rawArgs) != "null" {
+			if err := json.Unmarshal(rawArgs, &parsed); err != nil {
+				return nil, fmt.Errorf("invalid MCP arguments for %s: %w", remoteName, err)
+			}
+		}
+	}
+	var res struct {
+		Content []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text,omitempty"`
+			Resource *struct {
+				Text string `json:"text,omitempty"`
+			} `json:"resource,omitempty"`
+		} `json:"content"`
+		StructuredContent json.RawMessage `json:"structuredContent,omitempty"`
+		IsError           bool            `json:"isError,omitempty"`
+	}
+	if err := bt.conn.Call(ctx, "tools/call", map[string]any{
+		"name":      bt.RemoteName,
+		"arguments": parsed,
+	}, &res); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMCPTransport, err)
+	}
+	var texts []string
+	for _, c := range res.Content {
+		switch c.Type {
+		case "resource":
+			if c.Resource != nil && c.Resource.Text != "" {
+				texts = append(texts, c.Resource.Text)
+			}
+		default:
+			if c.Text != "" {
+				texts = append(texts, c.Text)
+			}
+		}
+	}
+	joined := strings.TrimSpace(strings.Join(texts, "\n"))
+	if res.IsError {
+		msg := joined
+		if msg == "" && len(res.StructuredContent) > 0 {
+			msg = string(res.StructuredContent)
+		}
+		return nil, &ToolError{Tool: remoteName, Message: msg}
+	}
+	if len(res.StructuredContent) > 0 && json.Valid(res.StructuredContent) {
+		return res.StructuredContent, nil
+	}
+	if joined != "" && json.Valid([]byte(joined)) {
+		return json.RawMessage(joined), nil
+	}
+	raw, _ := json.Marshal(map[string]string{"text": joined})
+	return raw, nil
+}
+
 func (m *Manager) Close() {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, c := range m.conns {
+	m.closed = true
+	conns := m.conns
+	m.conns = nil
+	m.mu.Unlock()
+	for _, c := range conns {
 		_ = c.Close()
 	}
-	m.conns = nil
 }
 
 func dialServer(ctx context.Context, cfg ServerConfig) (conn, error) {

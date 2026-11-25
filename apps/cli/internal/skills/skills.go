@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/serverclient"
 )
 
 // Skill represents one discovered local or OpenAlbert server skill.
