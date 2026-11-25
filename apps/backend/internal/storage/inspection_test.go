@@ -237,3 +237,129 @@ func TestPendingAudioIsVisibleBeforeMessagePreparation(t *testing.T) {
 		}
 	}
 }
+
+func TestMemoryAnalyticsMetadataPostgres(t *testing.T) {
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
+	}
+	ctx := context.Background()
+	repo, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+
+	prefix := fmt.Sprintf("mem-analytics-%d", time.Now().UnixNano())
+	ownerID := time.Now().UnixNano()
+	scope := fmt.Sprintf("personal:%d", ownerID)
+	otherScope := fmt.Sprintf("personal:%d", ownerID+1)
+	codingConv := domain.Conversation{ID: "coding:" + prefix + "-mine", Title: "Coding", OwnerID: ownerID, Private: true}
+	otherCodingConv := domain.Conversation{ID: "coding:" + prefix + "-other", Title: "Other coding", OwnerID: ownerID + 1, Private: true}
+	if err := repo.SaveConversation(ctx, codingConv); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveConversation(ctx, otherCodingConv); err != nil {
+		t.Fatal(err)
+	}
+
+	originStamp := time.Date(2026, 10, 12, 9, 30, 0, 0, time.UTC)
+	for _, s := range []domain.Session{
+		{ID: prefix + "-msg", ConversationID: scope, CreatedAt: originStamp},
+		{ID: prefix + "-task-trace", ConversationID: scope, CreatedAt: originStamp.Add(time.Hour)},
+		{ID: prefix + "-task-cp", ConversationID: scope, CreatedAt: originStamp.Add(2 * time.Hour)},
+		{ID: prefix + "-init", ConversationID: scope, CreatedAt: originStamp.Add(3 * time.Hour)},
+		{ID: prefix + "-coding", ConversationID: codingConv.ID, CreatedAt: originStamp.Add(4 * time.Hour)},
+		{ID: prefix + "-other", ConversationID: otherScope},
+		{ID: prefix + "-other-coding", ConversationID: otherCodingConv.ID},
+	} {
+		if err := repo.StartSession(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repo.CreateTask(ctx, domain.Task{ID: prefix + "-t1", ConversationID: scope, Title: "Дайджест новостей", Goal: "Собрать новости", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateTask(ctx, domain.Task{ID: prefix + "-t2", ConversationID: scope, Title: "Проверка цен", Goal: "Проверить цены", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateTask(ctx, domain.Task{ID: prefix + "-t-other", ConversationID: otherScope, Title: "Чужая задача", Goal: "Секрет", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	if err := repo.SaveTrace(ctx, domain.Trace{
+		ID: prefix + "-tr-task", SessionID: prefix + "-task-trace", TurnID: "turn-1",
+		Trigger: "task", TaskID: prefix + "-t1", Kind: "model", Name: "m", Status: "completed", StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCheckpoint(ctx, "turn-done/"+prefix+"-cp-task", json.RawMessage(fmt.Sprintf(`{"Input":{"SessionID":%q,"TaskID":%q}}`, prefix+"-task-cp", prefix+"-t2"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCheckpoint(ctx, "turn-done/"+prefix+"-cp-init", json.RawMessage(fmt.Sprintf(`{"Input":{"SessionID":%q,"Initiative":true}}`, prefix+"-init"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveTrace(ctx, domain.Trace{
+		ID: prefix + "-tr-other", SessionID: prefix + "-other", TurnID: "turn-other",
+		Trigger: "task", TaskID: prefix + "-t-other", Kind: "model", Name: "m", Status: "completed", StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	origins, err := repo.InspectSessionOrigins(ctx, scope, []string{
+		prefix + "-msg",
+		prefix + "-task-trace",
+		prefix + "-task-cp",
+		prefix + "-init",
+		prefix + "-coding",
+		prefix + "-other",
+		prefix + "-other-coding",
+		prefix + "-missing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(origins) != 5 {
+		t.Fatalf("expected 5 scoped origins (including owner coding session), got %+v", origins)
+	}
+	if got := origins[prefix+"-msg"]; got.Trigger != "message" || !got.CreatedAt.Equal(originStamp) {
+		t.Fatalf("message trigger/created_at: %+v", got)
+	}
+	if got := origins[prefix+"-task-trace"]; got.Trigger != "task" || got.TaskID != prefix+"-t1" || got.TaskTitle != "Дайджест новостей" {
+		t.Fatalf("trace task origin: %+v", got)
+	}
+	if got := origins[prefix+"-task-cp"]; got.Trigger != "task" || got.TaskID != prefix+"-t2" || got.TaskTitle != "Проверка цен" {
+		t.Fatalf("checkpoint task origin: %+v", got)
+	}
+	if got := origins[prefix+"-init"]; got.Trigger != "initiative" || got.TaskID != "" {
+		t.Fatalf("initiative origin: %+v", got)
+	}
+	if got := origins[prefix+"-coding"]; got.Trigger != "coding" {
+		t.Fatalf("owner coding origin: %+v", got)
+	}
+	if _, leaked := origins[prefix+"-other"]; leaked {
+		t.Fatal("other conversation session leaked across scope")
+	}
+	if _, leaked := origins[prefix+"-other-coding"]; leaked {
+		t.Fatal("other owner coding session leaked across scope")
+	}
+
+	// Consolidation checkpoints: absent -> parsed timestamptz ordering (including fractional seconds) -> scope isolation.
+	if _, _, found, err := repo.InspectLatestConsolidation(ctx, scope); err != nil || found {
+		t.Fatalf("expected no consolidation yet: found=%v err=%v", found, err)
+	}
+	if err := repo.SaveCheckpoint(ctx, "memory-consolidation/"+prefix+"-whole-sec", json.RawMessage(fmt.Sprintf(`{"scope":%q,"completed_at":"2026-10-22T12:00:00Z","before_entries":30,"after_entries":25}`, scope))); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCheckpoint(ctx, "memory-consolidation/"+prefix+"-frac-sec", json.RawMessage(fmt.Sprintf(`{"scope":%q,"completed_at":"2026-10-22T12:00:00.500Z","before_entries":25,"after_entries":19}`, scope))); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCheckpoint(ctx, "memory-consolidation/"+prefix+"-other", json.RawMessage(fmt.Sprintf(`{"scope":%q,"completed_at":"2026-10-25T01:00:00Z","before_entries":99,"after_entries":1}`, otherScope))); err != nil {
+		t.Fatal(err)
+	}
+	cid, raw, found, err := repo.InspectLatestConsolidation(ctx, scope)
+	if err != nil || !found || cid != "memory-consolidation/"+prefix+"-frac-sec" {
+		t.Fatalf("latest consolidation (fractional timestamp order): id=%q found=%v err=%v raw=%s", cid, found, err, raw)
+	}
+}
