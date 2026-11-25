@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"openalbert/apps/acp/internal/mcpclient"
-	"openalbert/apps/acp/internal/serverclient"
-	"openalbert/apps/acp/internal/session"
-	"openalbert/apps/acp/internal/tools"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/mcpclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/session"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/tools"
 )
 
 func TestBoundHistoryForGatewayStripsOldImagesThenOldTurns(t *testing.T) {

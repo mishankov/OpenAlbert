@@ -6,7 +6,7 @@ The helper's current source-input map is:
 
 | Target | Inputs |
 | --- | --- |
-| openalbert | apps/backend/, shared/backup/, shared/codemode/ |
+| openalbert | go.mod, go.sum, apps/backend/, shared/backup/, shared/codemode/ |
 | backup | services/backup/, shared/backup/ |
 | stt | services/stt/ |
 | tts | services/tts/ |

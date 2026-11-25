@@ -9,8 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"openalbert/apps/acp/internal/acp"
-	"openalbert/apps/acp/internal/config"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/acp"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/config"
 )
 
 func main() {

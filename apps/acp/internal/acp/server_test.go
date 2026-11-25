@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"openalbert/apps/acp/internal/config"
-	"openalbert/apps/acp/internal/serverclient"
-	"openalbert/apps/acp/internal/session"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/config"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/session"
 )
 
 func TestEndToEndACPCodemodeSkillsMCPPermissionsAndInspectorSync(t *testing.T) {
@@ -291,8 +291,8 @@ return { skill: sk.name, mcp, mem, out: sh.stdout };
 	if err := json.Unmarshal(newResp.Result, &newOut); err != nil || newOut.SessionID == "" || len(newOut.Models.AvailableModels) != 2 {
 		t.Fatalf("unexpected session/new result: %s", newResp.Result)
 	}
-	if !strings.Contains(string(newResp.Result), `"xhigh"`) {
-		t.Fatalf("expected xhigh reasoning_effort option for proxy/gpt-5.4: %s", newResp.Result)
+	if !strings.Contains(string(newResp.Result), `"xhigh"`) || !strings.Contains(string(newResp.Result), `"Extra High"`) {
+		t.Fatalf("expected xhigh (Extra High) reasoning_effort option for proxy/gpt-5.4: %s", newResp.Result)
 	}
 
 	// 3. Switch to chatgpt/codex-5 (no reasoning_effort option), verify omission, then switch back to proxy/gpt-5.4 with xhigh.

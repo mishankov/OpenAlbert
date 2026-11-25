@@ -12,8 +12,8 @@ analysis = "openai/SET_MODEL_ID"
 adapter = "openai_chat_completions"
 base_url = "https://api.openai.com/v1"
 api_key_env = "LLM_API_KEY"
-discover_models = true
-# Optional glob allowlist/denylist for GET /models discovery:
+# Automatic model discovery via GET /models is enabled by default (set discover_models = false to disable).
+# Optional glob allowlist/denylist for discovered models:
 # include_models = ["gpt-5*", "claude-*"]
 # exclude_models = ["*embedding*", "*audio*"]
 default_capabilities = ["tools", "vision", "structured_output"]
@@ -51,11 +51,15 @@ default_timeout = "120s"
 # [providers.chatgpt]
 # adapter = "openai_chatgpt"
 # base_url = "https://proxy.example.com/v1" # Optional. Default: https://api.openai.com/v1.
-# discover_models = true
+# # discover_models defaults to true; set discover_models = false to disable catalog discovery.
 # default_capabilities = ["tools", "vision", "structured_output"]
 # default_context_window_tokens = 128000
 # default_max_output_tokens = 8192 # LOCAL input reserve only; does not cap provider output.
 # default_timeout = "120s"
+#
+# # Optional default reasoning effort for ChatGPT subscription models:
+# # [providers.chatgpt.default_options]
+# # reasoning_effort = "high"
 #
 # [providers.chatgpt.headers_env]
 # "X-LLM-Proxy-Key" = "OPENALBERT_PROXY_KEY"

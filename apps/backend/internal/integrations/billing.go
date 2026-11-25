@@ -160,11 +160,81 @@ func (b *BillingModel) Complete(ctx context.Context, messages []domain.Message, 
 	return b.API.Complete(ctx, messages, tools)
 }
 
+func (b *BillingModel) planCatalogModels(ctx context.Context, refresh bool) ([]siwc.Model, error) {
+	if b.Plan == nil {
+		return nil, siwc.ErrDisconnected
+	}
+	if refresher, ok := b.Plan.(catalogRefreshSubscriptionModel); ok {
+		return refresher.ModelsFresh(ctx, refresh)
+	}
+	return b.Plan.Models(ctx)
+}
+
+func effortsForPlanSlug(models []siwc.Model, slug string) []string {
+	for _, m := range models {
+		if m.Slug == slug && len(m.SupportedReasoningLevels) > 0 {
+			return append([]string(nil), m.SupportedReasoningLevels...)
+		}
+	}
+	return append([]string(nil), defaultAPIReasoningEfforts...)
+}
+
+func (b *BillingModel) planModelEfforts(ctx context.Context, slug string, refresh bool) []string {
+	if b.Plan == nil {
+		return nil
+	}
+	models, err := b.planCatalogModels(ctx, refresh)
+	if err != nil {
+		return append([]string(nil), defaultAPIReasoningEfforts...)
+	}
+	return effortsForPlanSlug(models, slug)
+}
+
+func intersectEfforts(a, b []string) []string {
+	if len(a) == 0 || len(b) == 0 {
+		return nil
+	}
+	allowed := make(map[string]bool, len(b))
+	for _, v := range b {
+		allowed[v] = true
+	}
+	var out []string
+	for _, v := range a {
+		if allowed[v] {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func effortAllowed(efforts []string, target string) bool {
+	for _, e := range efforts {
+		if e == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *BillingModel) resolvePlanSlug(modelID string) string {
+	slug := b.Plan.Status().Model
+	if prefix, s, ok := strings.Cut(modelID, "/"); ok && prefix == "chatgpt" && s != "" {
+		slug = s
+	} else if slug == "" {
+		if _, s, ok := strings.Cut(modelID, "/"); ok && s != "" {
+			slug = s
+		} else {
+			slug = modelID
+		}
+	}
+	return slug
+}
+
 // Catalog exposes selectable models from the configured billing mode/router for coding clients.
 func (b *BillingModel) Catalog(ctx context.Context, refresh bool) (string, []domain.CatalogModel, error) {
 	if b.Mode == "siwc" && b.Plan != nil {
 		defSlug := b.Plan.Status().Model
-		models, err := b.Plan.Models(ctx)
+		models, err := b.planCatalogModels(ctx, refresh)
 		if err != nil && defSlug == "" {
 			return "", nil, err
 		}
@@ -183,15 +253,20 @@ func (b *BillingModel) Catalog(ctx context.Context, refresh bool) (string, []dom
 			if name == "" {
 				name = m.Slug
 			}
+			efforts := supportedReasoningEffortsForProfile(domain.ModelProfile{
+				Adapter:                   "openai_chatgpt",
+				SupportedReasoningEfforts: m.SupportedReasoningLevels,
+			})
 			out = append(out, domain.CatalogModel{
-				ID:                  id,
-				Provider:            "chatgpt",
-				Model:               m.Slug,
-				DisplayName:         name,
-				Capabilities:        []string{"tools", "vision", "structured_output"},
-				ContextWindowTokens: 128000,
-				MaxOutputTokens:     8192,
-				Default:             m.Slug == defSlug,
+				ID:                        id,
+				Provider:                  "chatgpt",
+				Model:                     m.Slug,
+				DisplayName:               name,
+				Capabilities:              []string{"tools", "vision", "structured_output"},
+				ContextWindowTokens:       128000,
+				MaxOutputTokens:           8192,
+				SupportedReasoningEfforts: efforts,
+				Default:                   m.Slug == defSlug,
 			})
 		}
 		defaultID := ""
@@ -199,14 +274,15 @@ func (b *BillingModel) Catalog(ctx context.Context, refresh bool) (string, []dom
 			defaultID = "chatgpt/" + defSlug
 			if !seen[defaultID] {
 				out = append([]domain.CatalogModel{{
-					ID:                  defaultID,
-					Provider:            "chatgpt",
-					Model:               defSlug,
-					DisplayName:         defSlug,
-					Capabilities:        []string{"tools", "vision", "structured_output"},
-					ContextWindowTokens: 128000,
-					MaxOutputTokens:     8192,
-					Default:             true,
+					ID:                        defaultID,
+					Provider:                  "chatgpt",
+					Model:                     defSlug,
+					DisplayName:               defSlug,
+					Capabilities:              []string{"tools", "vision", "structured_output"},
+					ContextWindowTokens:       128000,
+					MaxOutputTokens:           8192,
+					SupportedReasoningEfforts: append([]string(nil), defaultAPIReasoningEfforts...),
+					Default:                   true,
 				}}, out...)
 			}
 		} else if len(out) > 0 {
@@ -222,15 +298,15 @@ func (b *BillingModel) Catalog(ctx context.Context, refresh bool) (string, []dom
 		if err != nil {
 			return def, models, err
 		}
-		// In auto mode while the ChatGPT plan lane is active, strip reasoning_effort
-		// options because the plan lane cannot honor per-request reasoning overrides.
-		if b.Mode == "auto" && b.Plan != nil {
+		if b.Mode == "auto" && b.Plan != nil && b.Plan.Status().PlanEnabled {
 			b.mu.Lock()
 			planActive := !b.ineligible && !time.Now().Before(b.retryAt)
 			b.mu.Unlock()
 			if planActive {
+				planModels, _ := b.planCatalogModels(ctx, refresh)
 				for i := range models {
-					models[i].SupportedReasoningEfforts = nil
+					planEfforts := effortsForPlanSlug(planModels, b.resolvePlanSlug(models[i].ID))
+					models[i].SupportedReasoningEfforts = intersectEfforts(models[i].SupportedReasoningEfforts, planEfforts)
 				}
 			}
 		}
@@ -283,6 +359,7 @@ func (b *BillingModel) CompleteModelStream(ctx context.Context, modelID string, 
 		}
 	}
 
+	planEnabled := b.Plan != nil && b.Plan.Status().PlanEnabled
 	b.mu.Lock()
 	if b.Mode == "siwc" && (b.ineligible || time.Now().Before(b.retryAt)) {
 		err := b.lastErr
@@ -292,15 +369,19 @@ func (b *BillingModel) CompleteModelStream(ctx context.Context, modelID string, 
 		}
 		return domain.Completion{}, err
 	}
-	usePlan := b.Mode == "siwc" || (b.Mode == "auto" && !b.ineligible && !time.Now().Before(b.retryAt))
-	if usePlan && opts.ReasoningEffort != "" {
-		b.mu.Unlock()
-		return domain.Completion{}, errors.New("reasoning_effort override is not supported while the ChatGPT plan lane is active")
+	usePlan := b.Mode == "siwc" || (b.Mode == "auto" && planEnabled && !b.ineligible && !time.Now().Before(b.retryAt))
+	b.mu.Unlock()
+
+	if usePlan && b.Plan != nil && opts.ReasoningEffort != "" {
+		if !effortAllowed(b.planModelEfforts(ctx, b.resolvePlanSlug(modelID), false), opts.ReasoningEffort) {
+			return domain.Completion{}, errors.New("unsupported reasoning_effort override for selected model")
+		}
 	}
 	if usePlan {
+		b.mu.Lock()
 		b.siwcRequests++
+		b.mu.Unlock()
 	}
-	b.mu.Unlock()
 
 	if usePlan {
 		if b.Plan == nil {
@@ -317,7 +398,7 @@ func (b *BillingModel) CompleteModelStream(ctx context.Context, modelID string, 
 				}
 				return nil
 			}
-			result, err := b.streamViaPlan(ctx, modelID, messages, tools, wrappedOnEvent)
+			result, err := b.streamViaPlan(ctx, modelID, opts.ReasoningEffort, messages, tools, wrappedOnEvent)
 			if err == nil {
 				return result, nil
 			}
@@ -354,7 +435,7 @@ func (b *BillingModel) CompleteModelStream(ctx context.Context, modelID string, 
 	return router.CompleteModelStream(ctx, modelID, opts, messages, tools, onEvent)
 }
 
-func (b *BillingModel) streamViaPlan(ctx context.Context, modelID string, messages []domain.Message, tools []domain.Tool, onEvent domain.StreamFunc) (domain.Completion, error) {
+func (b *BillingModel) streamViaPlan(ctx context.Context, modelID, reasoningEffort string, messages []domain.Message, tools []domain.Tool, onEvent domain.StreamFunc) (domain.Completion, error) {
 	timeout := b.StreamTimeout
 	if timeout <= 0 {
 		timeout = domain.MaxModelTimeout
@@ -364,20 +445,14 @@ func (b *BillingModel) streamViaPlan(ctx context.Context, modelID string, messag
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	slug := b.Plan.Status().Model
-	if prefix, s, ok := strings.Cut(modelID, "/"); ok && prefix == "chatgpt" && s != "" {
-		slug = s
-	} else if slug == "" {
-		if _, s, ok := strings.Cut(modelID, "/"); ok && s != "" {
-			slug = s
-		} else {
-			slug = modelID
-		}
-	}
+	slug := b.resolvePlanSlug(modelID)
 	if streamer, ok := b.Plan.(interface {
 		CompleteForProfileStream(context.Context, domain.ModelProfile, []domain.Message, []domain.Tool, domain.StreamFunc) (domain.Completion, error)
 	}); ok {
-		return streamer.CompleteForProfileStream(ctx, domain.ModelProfile{Model: slug}, messages, tools, onEvent)
+		return streamer.CompleteForProfileStream(ctx, domain.ModelProfile{
+			Model:   slug,
+			Options: domain.ModelOptions{ReasoningEffort: reasoningEffort},
+		}, messages, tools, onEvent)
 	}
 	res, err := b.Plan.Complete(ctx, messages, tools)
 	if err != nil {

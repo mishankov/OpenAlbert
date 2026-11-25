@@ -56,12 +56,12 @@ output_per_million = 2.19
 
 ## Обнаружение моделей (`/models`) и выбор в T3 Code
 
-Когда у провайдера задано `discover_models = true`, сервер опрашивает:
+По умолчанию для каждого подключённого провайдера включено автоматическое обнаружение моделей (`discover_models = true`; чтобы отключить, явно задайте `discover_models = false`). Сервер опрашивает:
 
 - `GET {base_url}/models` для адаптера `openai_chat_completions` (с кэшированием на 5 минут и фильтрацией по `include_models` / `exclude_models`);
 - каталог подписки ChatGPT (`Plan.Models`) для адаптера `openai_chatgpt`.
 
-Если ответ `/models` не содержит лимитов контекста или возможностей, применяются значения `default_*` провайдера, а поверх них — явные переопределения из `[models."<provider>/<model>"]`.
+Перечислять конкретные модели в `[models."..."]` не требуется — любые модели подключённых провайдеров становятся доступны сразу (включая выбор уровня рассуждений `reasoning_effort` для обоих адаптеров). Если ответ `/models` не содержит лимитов контекста или возможностей, применяются значения `default_*` провайдера, а поверх них — необязательные переопределения из `[models."<provider>/<model>"]`.
 
 Авторизованный клиент (`openalbert-acp`) получает итоговый список `tools`-моделей через `GET /api/v1/llm/models` и запускает потоковые запросы к выбранной модели через `POST /api/v1/llm/complete` (SSE).
 
@@ -69,7 +69,7 @@ output_per_million = 2.19
 
 - `api_key_env` и `headers_env` ссылаются на имена переменных окружения (значения задаются в `.env` или `models.env`), а не на сами ключи.
 - При наличии `headers_env` требуется явный `base_url`. Служебные HTTP-заголовки (`Authorization`, `Host`, и т. п.) зарезервированы.
-- Для `openai_chatgpt` запрещены `api_key_env`, `default_options`/`options` и `default_pricing`/`pricing`: все подписочные модели используют единый вход `/chatgpt login`.
+- Для `openai_chatgpt` запрещены `api_key_env`, `default_pricing`/`pricing` и Chat Completions-опции (`thinking`, `include_reasoning_content`, `session_header`, `output_token_field`); в `default_options`/`options` поддерживается `reasoning_effort`. Все подписочные модели используют единый вход `/chatgpt login`.
 
 ## Валидация и лимиты
 

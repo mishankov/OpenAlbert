@@ -587,6 +587,110 @@ func TestRequestAllowlistAndToolHistory(t *testing.T) {
 	if len(body.Input) != 4 {
 		t.Fatal("lost history")
 	}
+
+	bodyWithEffort, err := buildRequestWithReasoning("model", "xhigh", messages, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawEffort, _ := json.Marshal(bodyWithEffort)
+	var ve map[string]json.RawMessage
+	_ = json.Unmarshal(rawEffort, &ve)
+	for key := range ve {
+		switch key {
+		case "model", "input", "store", "stream", "include", "reasoning":
+		default:
+			t.Fatalf("unapproved field with reasoning: %s", key)
+		}
+	}
+	if string(ve["reasoning"]) != `{"effort":"xhigh"}` {
+		t.Fatalf("expected reasoning effort object, got %s", string(ve["reasoning"]))
+	}
+}
+
+func TestModelsFreshAndReasoningLevels(t *testing.T) {
+	f := newFixture(t)
+	f.login(t)
+	var hits atomic.Int32
+	var lastReasoning string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			hits.Add(1)
+			io.WriteString(w, `{"models":[
+				{"slug":"gpt-6.2-sol","display_name":"GPT-6.2-Sol","visibility":"list","default_reasoning_level":"access-secret","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]},
+				{"slug":"gpt-6.1-terra","visibility":"list","supported_reasoning_efforts":["low","high"]}
+			]}`)
+		case "/responses":
+			var req responseRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			mu.Lock()
+			if req.Reasoning != nil {
+				lastReasoning = req.Reasoning.Effort
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, `data: {"type":"response.completed","response":{"status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":2}}}`+"\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	f.c.apiURL = srv.URL
+
+	models, err := f.c.ModelsFresh(context.Background(), false)
+	if err != nil || len(models) != 2 {
+		t.Fatalf("expected 2 models, got %+v %v", models, err)
+	}
+	if strings.Join(models[0].SupportedReasoningLevels, ",") != "low,medium,high,xhigh" {
+		t.Fatalf("unexpected reasoning levels on model 0: %+v", models[0])
+	}
+	if raw, _ := json.Marshal(models); strings.Contains(string(raw), "access-secret") {
+		t.Fatalf("serialized models leaked upstream field: %s", raw)
+	}
+	if models[1].DisplayName != "gpt-6.1-terra" || strings.Join(models[1].SupportedReasoningLevels, ",") != "low,high" {
+		t.Fatalf("unexpected fallback display_name/efforts on model 1: %+v", models[1])
+	}
+	// Cached call does not re-fetch; refresh=true does.
+	if _, err := f.c.ModelsFresh(context.Background(), false); err != nil || hits.Load() != 1 {
+		t.Fatalf("expected cached /models call, hits=%d err=%v", hits.Load(), err)
+	}
+	if _, err := f.c.ModelsFresh(context.Background(), true); err != nil || hits.Load() != 2 {
+		t.Fatalf("expected refreshed /models call, hits=%d err=%v", hits.Load(), err)
+	}
+	// ModelsForProfile uses the provider's own proxy endpoint and headers.
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" || r.Header.Get("X-Proxy-Key") != "proxy-b-secret" {
+			http.Error(w, "wrong proxy request", http.StatusForbidden)
+			return
+		}
+		io.WriteString(w, `{"models":[{"slug":"proxy-b-model","display_name":"Proxy B Model","visibility":"list"}]}`)
+	}))
+	defer proxySrv.Close()
+	proxyModels, err := f.c.ModelsForProfile(context.Background(), domain.ModelProfile{
+		BaseURL: proxySrv.URL,
+		Headers: map[string]string{"X-Proxy-Key": "proxy-b-secret"},
+	}, false)
+	if err != nil || len(proxyModels) != 1 || proxyModels[0].Slug != "proxy-b-model" {
+		t.Fatalf("ModelsForProfile did not query provider endpoint: %+v %v", proxyModels, err)
+	}
+	// CompleteForProfileStream sends reasoning effort.
+	_, err = f.c.CompleteForProfileStream(context.Background(), domain.ModelProfile{
+		Model:   "gpt-6.2-sol",
+		Options: domain.ModelOptions{ReasoningEffort: "high"},
+	}, []domain.Message{{Role: "user", Content: "hi"}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gotEffort := lastReasoning
+	mu.Unlock()
+	if gotEffort != "high" {
+		t.Fatalf("expected reasoning.effort=high sent to /responses, got %q", gotEffort)
+	}
 }
 func TestStreamTerminalEventsAndDiagnostics(t *testing.T) {
 	for _, event := range []string{`{"type":"response.output_text.delta","delta":"partial"}`, `{"type":"response.incomplete"}`, `{"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded","param":"model"}}}`, `{"type":"error","code":"failure"}`} {

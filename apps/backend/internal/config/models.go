@@ -34,7 +34,7 @@ type modelProviderConfig struct {
 	BaseURL                    string             `toml:"base_url"`
 	HeadersEnv                 map[string]string  `toml:"headers_env"`
 	APIKeyEnv                  string             `toml:"api_key_env"`
-	DiscoverModels             bool               `toml:"discover_models"`
+	DiscoverModels             *bool              `toml:"discover_models"`
 	IncludeModels              []string           `toml:"include_models"`
 	ExcludeModels              []string           `toml:"exclude_models"`
 	DefaultCapabilities        []string           `toml:"default_capabilities"`
@@ -124,9 +124,19 @@ func loadModelProfilesForAuth(filePath string, get func(string) string, authMode
 			return empty, errors.New("openai_chatgpt providers require OPENAI_AUTH_MODE=profiles")
 		}
 		if provider.Adapter == "openai_chatgpt" {
-			for _, field := range []string{"api_key_env", "default_options", "default_pricing"} {
+			for _, field := range []string{"api_key_env", "default_pricing"} {
 				if meta.IsDefined("providers", name, field) {
-					return empty, errors.New("ChatGPT subscription providers do not accept API keys, provider options or per-token pricing")
+					return empty, errors.New("ChatGPT subscription providers do not accept API keys or per-token pricing")
+				}
+			}
+			if meta.IsDefined("providers", name, "default_options") {
+				if !meta.IsDefined("providers", name, "default_options", "reasoning_effort") {
+					return empty, errors.New("ChatGPT subscription providers only support reasoning_effort in default_options")
+				}
+				for _, field := range []string{"thinking", "include_reasoning_content", "session_header", "output_token_field"} {
+					if meta.IsDefined("providers", name, "default_options", field) {
+						return empty, errors.New("ChatGPT subscription providers only support reasoning_effort in default_options")
+					}
 				}
 			}
 		}
@@ -146,9 +156,17 @@ func loadModelProfilesForAuth(filePath string, get func(string) string, authMode
 			return empty, errors.New("model entry references an undefined provider")
 		}
 		if provider.Adapter == "openai_chatgpt" {
-			for _, field := range []string{"options", "pricing"} {
-				if meta.IsDefined("models", key, field) {
-					return empty, errors.New("ChatGPT subscription models do not accept API provider options or per-token pricing")
+			if meta.IsDefined("models", key, "pricing") {
+				return empty, errors.New("ChatGPT subscription models do not accept per-token pricing")
+			}
+			if meta.IsDefined("models", key, "options") {
+				if !meta.IsDefined("models", key, "options", "reasoning_effort") {
+					return empty, errors.New("ChatGPT subscription models only support reasoning_effort in options")
+				}
+				for _, field := range []string{"thinking", "include_reasoning_content", "session_header", "output_token_field"} {
+					if meta.IsDefined("models", key, "options", field) {
+						return empty, errors.New("ChatGPT subscription models only support reasoning_effort in options")
+					}
 				}
 			}
 		}
@@ -312,6 +330,10 @@ func validateModelProvider(name string, raw modelProviderConfig, get func(string
 	if err != nil {
 		return empty, err
 	}
+	discoverModels := true
+	if raw.DiscoverModels != nil {
+		discoverModels = *raw.DiscoverModels
+	}
 	return domain.ModelProvider{
 		Name:                       name,
 		Adapter:                    raw.Adapter,
@@ -319,7 +341,7 @@ func validateModelProvider(name string, raw modelProviderConfig, get func(string
 		Headers:                    headers,
 		APIKeyEnv:                  raw.APIKeyEnv,
 		APIKey:                     key,
-		DiscoverModels:             raw.DiscoverModels,
+		DiscoverModels:             discoverModels,
 		IncludeModels:              append([]string(nil), raw.IncludeModels...),
 		ExcludeModels:              append([]string(nil), raw.ExcludeModels...),
 		DefaultCapabilities:        caps,
@@ -456,6 +478,12 @@ func validReasoningEffort(effort string) bool {
 func validateModelOptions(adapter string, o modelOptionsConfig) (domain.ModelOptions, error) {
 	if !validReasoningEffort(o.ReasoningEffort) {
 		return domain.ModelOptions{}, errors.New("model reasoning_effort is unsupported")
+	}
+	if adapter == "openai_chatgpt" {
+		if o.Thinking != "" || o.IncludeReasoningContent || o.SessionHeader != "" || o.OutputTokenField != "" {
+			return domain.ModelOptions{}, errors.New("ChatGPT subscription models only support reasoning_effort option")
+		}
+		return domain.ModelOptions{ReasoningEffort: o.ReasoningEffort}, nil
 	}
 	if o.Thinking != "" && o.Thinking != "enabled" && o.Thinking != "disabled" {
 		return domain.ModelOptions{}, errors.New("model thinking must be enabled or disabled")

@@ -30,6 +30,14 @@ type catalogSubscriptionModel interface {
 	Models(context.Context) ([]siwc.Model, error)
 }
 
+type catalogRefreshSubscriptionModel interface {
+	ModelsFresh(context.Context, bool) ([]siwc.Model, error)
+}
+
+type catalogProfileSubscriptionModel interface {
+	ModelsForProfile(context.Context, domain.ModelProfile, bool) ([]siwc.Model, error)
+}
+
 type ProfileRouteStatus struct {
 	Profile  string `json:"profile"`
 	Model    string `json:"model"`
@@ -157,8 +165,9 @@ func buildRoutedModel(p domain.ModelProfile, plan SubscriptionModel) (routedMode
 		if plan == nil {
 			return routedModel{}, errors.New("ChatGPT model profiles require a subscription client")
 		}
-		if p.APIKey != "" || p.APIKeyEnv != "" || p.Options != (domain.ModelOptions{}) || p.Pricing != nil {
-			return routedModel{}, errors.New("ChatGPT model profiles do not support API fields, options or pricing")
+		if p.APIKey != "" || p.APIKeyEnv != "" || p.Pricing != nil ||
+			p.Options.Thinking != "" || p.Options.IncludeReasoningContent || p.Options.SessionHeader != "" || p.Options.OutputTokenField != "" {
+			return routedModel{}, errors.New("ChatGPT model profiles do not support API fields, Chat Completions options or pricing")
 		}
 	} else {
 		var err error
@@ -212,9 +221,6 @@ func (r *ModelRouter) CompleteModelStream(ctx context.Context, modelID string, o
 var defaultAPIReasoningEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 
 func supportedReasoningEffortsForProfile(p domain.ModelProfile) []string {
-	if p.Adapter == "openai_chatgpt" {
-		return nil
-	}
 	if len(p.SupportedReasoningEfforts) > 0 {
 		return append([]string(nil), p.SupportedReasoningEfforts...)
 	}
@@ -311,12 +317,22 @@ func (r *ModelRouter) resolveDynamicModel(modelID string, optOverrides domain.Mo
 				if discovered.MaxOutputTokens > 0 && discovered.MaxOutputTokens < profile.ContextWindowTokens {
 					profile.MaxOutputTokens = discovered.MaxOutputTokens
 				}
+				if len(discovered.SupportedReasoningEfforts) > 0 {
+					profile.SupportedReasoningEfforts = append([]string(nil), discovered.SupportedReasoningEfforts...)
+				}
 			}
 			found = true
 		}
 	}
 	if !found {
 		return routedModel{}, errors.New("requested model is not configured or allowed")
+	}
+	if len(profile.SupportedReasoningEfforts) == 0 {
+		if providerName, slug, ok := strings.Cut(modelID, "/"); ok && providerName != "" && slug != "" {
+			if discovered := r.findCachedDiscovered(providerName, slug); discovered != nil && len(discovered.SupportedReasoningEfforts) > 0 {
+				profile.SupportedReasoningEfforts = append([]string(nil), discovered.SupportedReasoningEfforts...)
+			}
+		}
 	}
 	if optOverrides.ReasoningEffort != "" {
 		allowed := supportedReasoningEffortsForProfile(profile)
@@ -384,8 +400,14 @@ func (r *ModelRouter) Catalog(ctx context.Context, refresh bool) (string, []doma
 	}
 	byID := map[string]domain.CatalogModel{}
 	configuredIDs := map[string]bool{}
+	explicitEfforts := map[string]bool{}
+	profileOptions := map[string]domain.ModelOptions{}
 	addProfile := func(id string, p domain.ModelProfile) {
 		configuredIDs[id] = true
+		if len(p.SupportedReasoningEfforts) > 0 {
+			explicitEfforts[id] = true
+		}
+		profileOptions[id] = p.Options
 		if !hasCapability(p, "tools") {
 			delete(byID, id)
 			return
@@ -448,6 +470,13 @@ func (r *ModelRouter) Catalog(ctx context.Context, refresh bool) (string, []doma
 				if existing.DisplayName == existing.Model && item.DisplayName != "" {
 					existing.DisplayName = item.DisplayName
 				}
+				if !explicitEfforts[fullID] && len(item.SupportedReasoningEfforts) > 0 {
+					existing.SupportedReasoningEfforts = supportedReasoningEffortsForProfile(domain.ModelProfile{
+						Adapter:                   prov.Adapter,
+						Options:                   profileOptions[fullID],
+						SupportedReasoningEfforts: item.SupportedReasoningEfforts,
+					})
+				}
 				byID[fullID] = existing
 				continue
 			}
@@ -471,8 +500,9 @@ func (r *ModelRouter) Catalog(ctx context.Context, refresh bool) (string, []doma
 				display = item.ID
 			}
 			efforts := supportedReasoningEffortsForProfile(domain.ModelProfile{
-				Adapter: prov.Adapter,
-				Options: prov.DefaultOptions,
+				Adapter:                   prov.Adapter,
+				Options:                   prov.DefaultOptions,
+				SupportedReasoningEfforts: item.SupportedReasoningEfforts,
 			})
 			byID[fullID] = domain.CatalogModel{
 				ID:                        fullID,
@@ -516,16 +546,36 @@ func (r *ModelRouter) discoverProviderModels(ctx context.Context, prov domain.Mo
 	defer cancel()
 	var list []DiscoveredModel
 	if prov.Adapter == "openai_chatgpt" {
-		cataloger, ok := r.plan.(catalogSubscriptionModel)
-		if !ok || r.plan == nil {
+		if r.plan == nil {
 			return nil, errors.New("ChatGPT catalog client unavailable")
 		}
-		models, err := cataloger.Models(fetchCtx)
+		var (
+			models []siwc.Model
+			err    error
+		)
+		if perProfile, ok := r.plan.(catalogProfileSubscriptionModel); ok {
+			models, err = perProfile.ModelsForProfile(fetchCtx, domain.ModelProfile{
+				Provider: prov.Name,
+				Adapter:  prov.Adapter,
+				BaseURL:  prov.BaseURL,
+				Headers:  maps.Clone(prov.Headers),
+			}, refresh)
+		} else if refresher, ok := r.plan.(catalogRefreshSubscriptionModel); ok {
+			models, err = refresher.ModelsFresh(fetchCtx, refresh)
+		} else if cataloger, ok := r.plan.(catalogSubscriptionModel); ok {
+			models, err = cataloger.Models(fetchCtx)
+		} else {
+			return nil, errors.New("ChatGPT catalog client unavailable")
+		}
 		if err != nil {
 			return nil, err
 		}
 		for _, m := range models {
-			list = append(list, DiscoveredModel{ID: m.Slug, DisplayName: m.DisplayName})
+			list = append(list, DiscoveredModel{
+				ID:                        m.Slug,
+				DisplayName:               m.DisplayName,
+				SupportedReasoningEfforts: append([]string(nil), m.SupportedReasoningLevels...),
+			})
 		}
 	} else {
 		client, err := NewOpenAI(OpenAIConfig{
@@ -686,7 +736,7 @@ func (r *ModelRouter) FitsContext(ctx context.Context, messages []domain.Message
 func (r *ModelRouter) request(model routedModel, role domain.ModelRole, onEvent domain.StreamFunc) (inputEstimator, func(context.Context, []domain.Message, []domain.Tool) (domain.Completion, error)) {
 	if model.profile.Adapter == "openai_chatgpt" {
 		return func(messages []domain.Message, tools []domain.Tool) (int, error) {
-				return siwc.EstimateInput(model.profile.Model, messages, tools)
+				return siwc.EstimateInputForProfile(model.profile, messages, tools)
 			}, func(ctx context.Context, messages []domain.Message, tools []domain.Tool) (domain.Completion, error) {
 				if onEvent != nil {
 					if streamer, ok := r.plan.(streamingSubscriptionModel); ok {

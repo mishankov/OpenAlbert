@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"openalbert/apps/acp/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
 )
 
 func TestDiscoverPrecedenceAndInvoke(t *testing.T) {

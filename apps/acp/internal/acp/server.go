@@ -16,13 +16,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"openalbert/apps/acp/internal/agent"
-	"openalbert/apps/acp/internal/config"
-	"openalbert/apps/acp/internal/mcpclient"
-	"openalbert/apps/acp/internal/serverclient"
-	"openalbert/apps/acp/internal/session"
-	"openalbert/apps/acp/internal/skills"
-	"openalbert/apps/acp/internal/tools"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/agent"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/config"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/mcpclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/session"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/skills"
+	"github.com/mishankov/OpenAlbert/apps/acp/internal/tools"
 )
 
 const (
@@ -855,6 +855,18 @@ func (s *Server) modelEfforts(modelID string) []string {
 	return nil
 }
 
+func formatReasoningEffortName(effort string) string {
+	switch effort {
+	case "xhigh":
+		return "Extra High"
+	default:
+		if effort == "" {
+			return ""
+		}
+		return strings.ToUpper(effort[:1]) + effort[1:]
+	}
+}
+
 func (s *Server) supportsReasoningEffort(modelID, effort string) bool {
 	if effort == "" || effort == "default" {
 		return true
@@ -926,7 +938,7 @@ func (s *Server) sessionMetadata(sess *agent.Session) map[string]any {
 		}
 		effortOpts := []map[string]any{{"value": "default", "name": "Default"}}
 		for _, e := range supported {
-			effortOpts = append(effortOpts, map[string]any{"value": e, "name": strings.ToUpper(e[:1]) + e[1:]})
+			effortOpts = append(effortOpts, map[string]any{"value": e, "name": formatReasoningEffortName(e)})
 		}
 		configOptions = append(configOptions, map[string]any{
 			"id":           "reasoning_effort",

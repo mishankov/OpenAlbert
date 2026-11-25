@@ -35,10 +35,11 @@ type OpenAI struct {
 
 // DiscoveredModel holds optional metadata parsed from GET /models responses.
 type DiscoveredModel struct {
-	ID                  string
-	DisplayName         string
-	ContextWindowTokens int
-	MaxOutputTokens     int
+	ID                        string
+	DisplayName               string
+	ContextWindowTokens       int
+	MaxOutputTokens           int
+	SupportedReasoningEfforts []string
 }
 
 func NewOpenAI(c OpenAIConfig) (*OpenAI, error) {
@@ -175,6 +176,54 @@ func (o *OpenAI) prepareRequest(ctx context.Context, method, endpoint string, bo
 	return req, nil
 }
 
+type discoveredModelItem struct {
+	ID                        string            `json:"id"`
+	Slug                      string            `json:"slug"`
+	Name                      string            `json:"name"`
+	DisplayName               string            `json:"display_name"`
+	ContextLength             int               `json:"context_length"`
+	ContextWindow             int               `json:"context_window"`
+	MaxOutput                 int               `json:"max_output_tokens"`
+	SupportedReasoningEfforts []json.RawMessage `json:"supported_reasoning_efforts"`
+	SupportedReasoningLevels  []json.RawMessage `json:"supported_reasoning_levels"`
+	TopProvider               *struct {
+		ContextLength       int `json:"context_length"`
+		MaxCompletionTokens int `json:"max_completion_tokens"`
+	} `json:"top_provider"`
+}
+
+func parseDiscoveredReasoningEfforts(raw []json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, entry := range raw {
+		var effort string
+		if json.Unmarshal(entry, &effort) != nil {
+			var obj struct {
+				Effort string `json:"effort"`
+				Level  string `json:"level"`
+			}
+			if json.Unmarshal(entry, &obj) == nil {
+				effort = obj.Effort
+				if effort == "" {
+					effort = obj.Level
+				}
+			}
+		}
+		effort = strings.TrimSpace(effort)
+		switch effort {
+		case "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+			if !seen[effort] {
+				seen[effort] = true
+				out = append(out, effort)
+			}
+		}
+	}
+	return out
+}
+
 // ListModels fetches the OpenAI-compatible GET /models catalog from this provider.
 func (o *OpenAI) ListModels(ctx context.Context) ([]DiscoveredModel, error) {
 	req, err := o.prepareRequest(ctx, http.MethodGet, "/models", nil)
@@ -182,27 +231,31 @@ func (o *OpenAI) ListModels(ctx context.Context) ([]DiscoveredModel, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	var response struct {
-		Data []struct {
-			ID            string `json:"id"`
-			Name          string `json:"name"`
-			DisplayName   string `json:"display_name"`
-			ContextLength int    `json:"context_length"`
-			ContextWindow int    `json:"context_window"`
-			MaxOutput     int    `json:"max_output_tokens"`
-			TopProvider   *struct {
-				ContextLength       int `json:"context_length"`
-				MaxCompletionTokens int `json:"max_completion_tokens"`
-			} `json:"top_provider"`
-		} `json:"data"`
-	}
-	if err := request(ctx, o.client, req, &response, 4<<20); err != nil {
+	var raw json.RawMessage
+	if err := request(ctx, o.client, req, &raw, 4<<20); err != nil {
 		return nil, err
 	}
+	var items []discoveredModelItem
+	var envelope struct {
+		Data   []discoveredModelItem `json:"data"`
+		Models []discoveredModelItem `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err == nil && (envelope.Data != nil || envelope.Models != nil) {
+		items = envelope.Data
+		if len(items) == 0 {
+			items = envelope.Models
+		}
+	} else if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, errors.New("invalid model catalog response")
+	}
 	seen := map[string]bool{}
-	out := make([]DiscoveredModel, 0, len(response.Data))
-	for _, item := range response.Data {
-		id := strings.TrimSpace(o.sanitizeModel(item.ID))
+	out := make([]DiscoveredModel, 0, len(items))
+	for _, item := range items {
+		rawID := item.ID
+		if strings.TrimSpace(rawID) == "" {
+			rawID = item.Slug
+		}
+		id := strings.TrimSpace(o.sanitizeModel(rawID))
 		if id == "" || seen[id] || strings.ContainsAny(id, "\r\n\x00") {
 			continue
 		}
@@ -227,11 +280,16 @@ func (o *OpenAI) ListModels(ctx context.Context) ([]DiscoveredModel, error) {
 				maxOut = item.TopProvider.MaxCompletionTokens
 			}
 		}
+		efforts := parseDiscoveredReasoningEfforts(item.SupportedReasoningEfforts)
+		if len(efforts) == 0 {
+			efforts = parseDiscoveredReasoningEfforts(item.SupportedReasoningLevels)
+		}
 		out = append(out, DiscoveredModel{
-			ID:                  id,
-			DisplayName:         display,
-			ContextWindowTokens: ctxLen,
-			MaxOutputTokens:     maxOut,
+			ID:                        id,
+			DisplayName:               display,
+			ContextWindowTokens:       ctxLen,
+			MaxOutputTokens:           maxOut,
+			SupportedReasoningEfforts: efforts,
 		})
 	}
 	return out, nil
