@@ -316,7 +316,7 @@ def smoke(args, settings_directory):
     env.update(TELEGRAM_BOT_TOKEN="smoke-token", TELEGRAM_ALLOWED_USER_IDS="42", TELEGRAM_OWNER_USER_ID="42",
                TELEGRAM_ALLOWED_GROUP_IDS="", LLM_API_KEY="smoke-key",
                YANDEX_API_KEY="smoke-key", YANDEX_FOLDER_ID="smoke-folder",
-               SESSION_IDLE_TIMEOUT="2s", INITIATIVE_INTERVAL="0", TASK_MIN_INTERVAL="1s",
+               SESSION_IDLE_TIMEOUT="2s", INITIATIVE_INTERVAL="0", MEMORY_CONSOLIDATION_INTERVAL="0", TASK_MIN_INTERVAL="1s",
                MAX_AGENT_STEPS="12", TELEGRAM_BASE_URL=f"http://{args.host_address}:{args.port}",
                YANDEX_SEARCH_URL=f"http://{args.host_address}:{args.port}/search",
                TEMPORAL_TASK_QUEUE=marker)

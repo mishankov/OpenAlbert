@@ -76,6 +76,7 @@ def main():
                 "TELEGRAM_OWNER_USER_ID": "42", "TELEGRAM_BASE_URL": api_url,
                 "LLM_API_KEY": "smoke-key",
                 "SESSION_IDLE_TIMEOUT": "2s", "TASK_MIN_INTERVAL": "1s", "INITIATIVE_INTERVAL": "0",
+                "MEMORY_CONSOLIDATION_INTERVAL": "0",
                 "MAX_AGENT_STEPS": "12", "TEMPORAL_TASK_QUEUE": project,
             }
             (folder / ".env").write_text("".join(f"{key}={value}\n" for key, value in settings.items()))
