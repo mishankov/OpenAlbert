@@ -21,7 +21,7 @@ cp .env.example .env
 cp deploy/models.example.toml models.toml
 ```
 
-Заполни `.env`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, `LLM_API_KEY`. В `models.toml` задай модель, endpoint, возможности и лимиты выбранного профиля; пример направляет все три роли на одну модель. Дополнительные ключи профилей можно задать в необязательном `models.env` рядом с `.env` (`chmod 600 models.env`); Compose загрузит его автоматически. Подробности — [маршрутизация моделей](model-routing.md). Для старта Яндекс не требуется: оставь `YANDEX_API_KEY` и `YANDEX_FOLDER_ID` пустыми. Без них агент читает публичные ссылки через `web_read`, а `web_search` отсутствует в доступных инструментах. Для подключения поиска позже заполни обе настройки. Файл игнорируется Git. После этого:
+Заполни `.env`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, `LLM_API_KEY`. В `models.toml` задай модель, endpoint, возможности и лимиты выбранного профиля; пример направляет все три роли на одну модель. Дополнительные ключи профилей можно задать в необязательном `models.env` рядом с `.env` (`chmod 600 models.env`); Compose загрузит его автоматически. Подробности — [маршрутизация моделей](model-routing.md). Для старта API-поиск не требуется: оставь `EXA_API_KEY`, `YANDEX_API_KEY` и `YANDEX_FOLDER_ID` пустыми. Без них агент читает публичные ссылки через `web_read` и браузерные инструменты, а `web_search` отсутствует в доступных инструментах. Чтобы подключить поиск позже, заполни `EXA_API_KEY` (для Exa Search, по умолчанию `EXA_MONTHLY_BUDGET_USD=10`) или обе переменные `YANDEX_API_KEY` и `YANDEX_FOLDER_ID` (для Yandex); если заданы ключи обоих провайдеров, явно укажи `WEB_SEARCH_PROVIDER=exa` или `WEB_SEARCH_PROVIDER=yandex`. Файл игнорируется Git. После этого:
 
 ```sh
 docker compose --project-directory . -f deploy/compose.local.yaml up -d --build
@@ -72,6 +72,9 @@ HTTP-журнал UI сохраняется полностью; ссылка «�
 | `LLM_CONFIG_HOST_FILE` | Путь к TOML на хосте для Compose, по умолчанию `./models.toml`; внутри контейнера всегда `/etc/openalbert/models.toml` |
 | `LLM_API_KEY` | Пример переменной ключа, передаваемой Compose; имя выбирается в `api_key_env` профиля |
 | `STT_BASE_URL`, `STT_MODEL`, `STT_REVISION`, `STT_API_KEY` | Независимый файловый STT; Compose подключает контейнер Nemotron. [Настройки и активация](speech.md). |
+| `WEB_SEARCH_PROVIDER` | Необязательный выбор провайдера поиска (`exa` или `yandex`); пусто — автовыбор единственного настроенного провайдера |
+| `EXA_API_KEY`, `EXA_SEARCH_URL` | Необязательный доступ к Exa Search API (`EXA_SEARCH_URL` пусто — `https://api.exa.ai/search`) |
+| `EXA_MONTHLY_BUDGET_USD` | Месячный бюджет Exa в USD для дашборда лимитов в инспекторе, по умолчанию `10` |
 | `YANDEX_SEARCH_URL` | Необязательный endpoint поиска для тестового HTTP-сервера или прокси; пусто — Yandex API v2 |
 | `YANDEX_API_KEY`, `YANDEX_FOLDER_ID` | Необязательный доступ к Yandex Search API; обе настройки заполняются вместе или остаются пустыми |
 | `KNOWLEDGE_DIR` | Постоянный каталог skills и памяти |
@@ -152,11 +155,13 @@ OPENALBERT_LIVE_DELIVERY_EVAL=1 go test ./apps/backend/internal/agent -run '^Tes
 ```sh
 docker compose --project-directory . -f deploy/compose.local.yaml build openalbert
 python3 tools/smoke/mvp-smoke.py
-# Проверка запуска и работы без Яндекса:
+# Проверка с Yandex Search вместо Exa по умолчанию:
+python3 tools/smoke/mvp-smoke.py --search-provider yandex
+# Проверка запуска и работы без API-поиска (без Exa и без Yandex):
 python3 tools/smoke/mvp-smoke.py --without-search
 ```
 
-Требуется Python 3 и свободный порт 18089. Harness поднимает локальные имитаторы Telegram, OpenAI-совместимого API и Yandex, затем запускает настоящий контейнер OpenAlbert через временный Compose override. В Docker Desktop контейнер обращается к ним через `host.docker.internal`; для другого Docker Engine передай `--host-address` с доступным из контейнера адресом хоста.
+Требуется Python 3 и свободный порт 18089. Harness поднимает локальные имитаторы Telegram, OpenAI-совместимого API и поискового провайдера (по умолчанию Exa; `--search-provider yandex` переключает на Yandex, `--without-search` отключает оба провайдера), затем запускает настоящий контейнер OpenAlbert через временный Compose override. В Docker Desktop контейнер обращается к ним через `host.docker.internal`; для другого Docker Engine передай `--host-address` с доступным из контейнера адресом хоста.
 
 С флагом `--with-browser` smoke дополнительно открывает публичный `https://example.com` в настоящем Chromium, сохраняет скриншот через S3 и проверяет освобождение процесса после закрытия сессии. Telegram и модель остаются локальными имитациями.
 

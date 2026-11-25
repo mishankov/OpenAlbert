@@ -5,6 +5,20 @@ import (
 	"time"
 )
 
+// SearchTrace records safe operational metadata for one web_search attempt.
+// Never store API keys, raw queries, domain filters, or upstream error bodies.
+type SearchTrace struct {
+	Provider     string     `json:"provider"`
+	Mode         string     `json:"mode,omitempty"`
+	ResolvedMode string     `json:"resolved_mode,omitempty"`
+	CostUSD      *float64   `json:"cost_usd,omitempty"`
+	HTTPStatus   int        `json:"http_status,omitempty"`
+	RateLimited  bool       `json:"rate_limited,omitempty"`
+	ResultCount  int        `json:"result_count,omitempty"`
+	RequestID    string     `json:"request_id,omitempty"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+}
+
 // Trace records a single real activity attempt. Input/output contain application
 // payloads, never HTTP credentials or provider headers.
 type Trace struct {
@@ -17,6 +31,7 @@ type Trace struct {
 	Name       string          `json:"name"`
 	ModelRole  ModelRole       `json:"model_role,omitempty"`
 	Profile    string          `json:"profile,omitempty"`
+	Search     *SearchTrace    `json:"search,omitempty"`
 	Step       int             `json:"step"`
 	CallID     string          `json:"call_id,omitempty"`
 	Attempt    int             `json:"attempt"`

@@ -183,10 +183,11 @@ func (a *Activities) ExecuteCodingTool(ctx context.Context, req CodingToolReques
 	if req.ParentToolCallID != "" {
 		ev.Set("parent_tool_call_id", req.ParentToolCallID)
 	}
-	toolMetadata(ev, in)
+	a.toolMetadata(ev, in)
 
 	var traceOut string
 	var traceErr error
+	var searchMeta *domain.SearchTrace
 	finishTrace := func(any, error, string) {}
 	if req.SessionID != "" && a.Repo != nil {
 		finishTrace = a.startTrace(ctx, domain.Trace{
@@ -200,7 +201,7 @@ func (a *Activities) ExecuteCodingTool(ctx context.Context, req CodingToolReques
 		}, args, ev)
 	}
 	defer func() {
-		finishTrace(traceOut, traceErr, "")
+		finishTrace(toolTraceOutput{output: traceOut, search: searchMeta}, traceErr, "")
 		ev.Set("activity_result", "success")
 		if traceErr != nil {
 			ev.Set("activity_result", "error")
@@ -230,6 +231,37 @@ func (a *Activities) ExecuteCodingTool(ctx context.Context, req CodingToolReques
 	}
 
 	result, execErr := a.execute(ctx, in)
+	if req.Name == "web_search" {
+		searchMeta = a.buildSearchTrace(args, result, execErr)
+		if searchMeta != nil && searchMeta.RateLimited {
+			ev.Set("search_rate_limited", true)
+		}
+		if req.SessionID == "" && searchMeta != nil && a.Repo != nil {
+			now := time.Now().UTC()
+			status := "completed"
+			if execErr != nil {
+				status = "failed"
+				if errors.Is(execErr, context.Canceled) || ctx.Err() != nil {
+					status = "cancelled"
+				}
+			}
+			anon := domain.Trace{
+				ID:        ID("search-usage", fmt.Sprint(in.StartedAt.UnixNano()), callID),
+				Trigger:   "coding",
+				Kind:      "tool",
+				Name:      "web_search",
+				Status:    status,
+				StartedAt: in.StartedAt,
+				EndedAt:   &now,
+				Search:    searchMeta,
+			}
+			c, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			if err := a.Repo.SaveTrace(c, anon); err != nil && a.Logger != nil {
+				a.Logger.Warn("Anonymous search usage metric could not be saved", "operation", "inspection.trace", "trace_id", anon.ID)
+			}
+			cancel()
+		}
+	}
 	if errors.Is(execErr, domain.ErrBrowserCapacity) {
 		ev.Fail(diagnosticError("browser_capacity"))
 		raw, _ := json.Marshal(map[string]string{"error": "browser capacity reached", "error_code": "browser_capacity"})
@@ -241,18 +273,30 @@ func (a *Activities) ExecuteCodingTool(ctx context.Context, req CodingToolReques
 		failed = true
 		ev.Fail(execErr)
 		ev.Set("tool_outcome", "error")
-		errResult := map[string]string{"error": execErr.Error(), "error_code": telemetry.Classify(execErr).Code}
+		diag := telemetry.Classify(execErr)
+		errResult := map[string]string{"error": execErr.Error(), "error_code": diag.Code}
 		var uncertain *computerExecutionError
 		if errors.As(execErr, &uncertain) {
 			errResult["execution_id"] = uncertain.id
 			errResult["state"] = "unknown"
 			errResult["note"] = "Inspect this execution ID; do not blindly repeat the command."
+			result = errResult
+		} else if req.Name == "web_search" {
+			if enriched := a.webSearchErrorResult(execErr, diag); enriched != nil {
+				result = enriched
+			} else {
+				result = errResult
+			}
+		} else {
+			result = errResult
 		}
-		result = errResult
 	} else {
 		ev.Set("tool_outcome", "success")
 	}
 	toolResultMetadata(ev, result)
+	if resp, ok := result.(domain.SearchResponse); ok {
+		result = fitSearchResponseBytes(resp, codemodeResultBytes)
+	}
 	raw, marshalErr := json.Marshal(result)
 	if marshalErr != nil {
 		traceErr = marshalErr

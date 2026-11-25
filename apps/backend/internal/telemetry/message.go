@@ -61,6 +61,8 @@ func readableMessage(operation, result string, elapsed time.Duration, fields map
 			switch name {
 			case "web_read":
 				action = "Ошибка чтения веб-страницы"
+			case "web_search":
+				action = "Ошибка поиска в интернете"
 			case "logs_search":
 				action = "Ошибка чтения операционных логов"
 			case "browser_open", "browser_navigate":

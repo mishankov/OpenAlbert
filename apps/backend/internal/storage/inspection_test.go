@@ -581,4 +581,111 @@ func TestInspectSessionOriginsSchemaIndexesAndQueryContract(t *testing.T) {
 	if !strings.Contains(inspectLatestConsolidationSQL, "consolidation_scope=$1") || !strings.Contains(inspectLatestConsolidationSQL, "ORDER BY consolidation_completed_at DESC NULLS LAST, id DESC") {
 		t.Fatalf("inspectLatestConsolidationSQL does not use indexed consolidation ordering:\n%s", inspectLatestConsolidationSQL)
 	}
+	for _, want := range []string{
+		"ADD COLUMN IF NOT EXISTS search_provider text GENERATED ALWAYS AS",
+		"ADD COLUMN IF NOT EXISTS search_cost_usd double precision GENERATED ALWAYS AS",
+		"ADD COLUMN IF NOT EXISTS search_rate_limited boolean GENERATED ALWAYS AS",
+		"ADD COLUMN IF NOT EXISTS search_completed_at timestamptz GENERATED ALWAYS AS",
+		"ADD COLUMN IF NOT EXISTS search_outcome_at timestamptz GENERATED ALWAYS AS",
+		"CREATE INDEX IF NOT EXISTS openalbert_traces_search_usage",
+	} {
+		if !strings.Contains(schema, want) {
+			t.Fatalf("schema.sql missing search usage index clause %q", want)
+		}
+	}
+	if strings.Contains(inspectSearchUsageSQL, "data") {
+		t.Fatalf("inspectSearchUsageSQL must read generated scalar columns, not JSONB data:\n%s", inspectSearchUsageSQL)
+	}
+}
+
+func TestInspectSearchUsagePostgres(t *testing.T) {
+	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
+	}
+	ctx := context.Background()
+	repo, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+
+	base := time.Date(2031, 4, 1, 0, 0, 0, 0, time.UTC)
+	cost := 0.007
+	okCompleted := base.Add(48*time.Hour + 3*time.Second)
+	boundaryCompleted := base.Add(time.Second)
+	idPrefix := fmt.Sprintf("search-usage-%d", time.Now().UnixNano())
+	for _, tr := range []domain.Trace{
+		{
+			ID: idPrefix + "-ok", SessionID: idPrefix, TurnID: "t1", Trigger: "message",
+			Kind: "tool", Name: "web_search", Status: "completed",
+			StartedAt: base.Add(48 * time.Hour),
+			Search:    &domain.SearchTrace{Provider: "exa", Mode: "auto", ResolvedMode: "auto", CostUSD: &cost, HTTPStatus: 200, RateLimited: true, ResultCount: 5, CompletedAt: &okCompleted},
+		},
+		{
+			ID: idPrefix + "-402", SessionID: idPrefix, TurnID: "t2", Trigger: "task", TaskID: "task-1",
+			Kind: "tool", Name: "web_search", Status: "failed",
+			StartedAt: base.Add(72 * time.Hour),
+			Search:    &domain.SearchTrace{Provider: "exa", Mode: "lite", HTTPStatus: 402},
+		},
+		{
+			ID: idPrefix + "-boundary-402", SessionID: idPrefix, TurnID: "t4", Trigger: "message",
+			Kind: "tool", Name: "web_search", Status: "failed",
+			StartedAt: base.Add(-time.Second),
+			Search:    &domain.SearchTrace{Provider: "exa", Mode: "auto", HTTPStatus: 402, CompletedAt: &boundaryCompleted},
+		},
+		{
+			ID: idPrefix + "-outside", SessionID: idPrefix, TurnID: "t3", Trigger: "message",
+			Kind: "tool", Name: "web_search", Status: "completed",
+			StartedAt: base.Add(-24 * time.Hour),
+			Search:    &domain.SearchTrace{Provider: "exa", Mode: "auto", CostUSD: &cost, HTTPStatus: 200, ResultCount: 3},
+		},
+	} {
+		if err := repo.SaveTrace(ctx, tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rows, err := repo.InspectSearchUsage(ctx, base, base.AddDate(0, 1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var matched []inspector.SearchUsageRecord
+	for _, r := range rows {
+		if strings.HasPrefix(r.TraceID, idPrefix) {
+			matched = append(matched, r)
+		}
+	}
+	if len(matched) != 3 {
+		t.Fatalf("expected 3 in-window search traces (including UTC month-boundary outcome), got %+v", matched)
+	}
+	if matched[0].TraceID != idPrefix+"-402" || matched[0].HTTPStatus != 402 || matched[0].Trigger != "task" {
+		t.Fatalf("unexpected newest record: %+v", matched[0])
+	}
+	if matched[1].TraceID != idPrefix+"-ok" || matched[1].CostUSD == nil || *matched[1].CostUSD != 0.007 || matched[1].ResultCount != 5 || !matched[1].RateLimited || !matched[1].CompletedAt.Equal(okCompleted) {
+		t.Fatalf("unexpected ok record: %+v", matched[1])
+	}
+	if matched[2].TraceID != idPrefix+"-boundary-402" || matched[2].HTTPStatus != 402 || !matched[2].CompletedAt.Equal(boundaryCompleted) {
+		t.Fatalf("UTC month-boundary 402 outcome missing or misordered: %+v", matched[2])
+	}
+
+	// Verify historical model/<turn>/<step> InspectTrace redacts web_search and codemode tool calls.
+	turnKey := idPrefix + "-hist-turn"
+	if err := repo.SaveCheckpoint(ctx, "turn-done/"+turnKey, json.RawMessage(`{"Input":{"Key":"`+turnKey+`","SessionID":"`+idPrefix+`"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	modelCheckpoint := json.RawMessage(`{"Message":{"role":"assistant","tool_calls":[{"id":"c1","name":"web_search","arguments":{"query":"HIST_SECRET_QUERY","include_domains":["hist.example"]}},{"id":"c2","name":"codemode","arguments":{"code":"searchTools('exa'); 'HIST_CM_SECRET'"}}]}}`)
+	if err := repo.SaveCheckpoint(ctx, "model/"+turnKey+"/1", modelCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	histTrace, found, err := repo.InspectTrace(ctx, idPrefix, "model/"+turnKey+"/1")
+	if err != nil || !found {
+		t.Fatalf("InspectTrace historical model lookup failed: found=%v err=%v", found, err)
+	}
+	histJSON := string(histTrace.Output)
+	for _, forbidden := range []string{"HIST_SECRET_QUERY", "hist.example", "HIST_CM_SECRET"} {
+		if strings.Contains(histJSON, forbidden) {
+			t.Fatalf("historical InspectTrace leaked %q: %s", forbidden, histJSON)
+		}
+	}
 }

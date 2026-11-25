@@ -43,14 +43,26 @@ func NewYandex(c YandexConfig) (*Yandex, error) {
 	return &Yandex{config: c, client: httpClient(c.HTTPClient, 30*time.Second), reader: NewWebReader(c.Web)}, nil
 }
 func (y *Yandex) Read(ctx context.Context, u string) (string, error) { return y.reader.Read(ctx, u) }
-func (y *Yandex) Search(ctx context.Context, query string) ([]domain.SearchResult, error) {
+func (y *Yandex) SearchProvider() string                             { return "yandex" }
+func (y *Yandex) SearchRuntimeStatus() domain.SearchRuntimeStatus {
+	return domain.SearchRuntimeStatus{
+		Provider:          "yandex",
+		Enabled:           true,
+		MaxResultsPerCall: 10,
+	}
+}
+func (y *Yandex) Search(ctx context.Context, q domain.SearchQuery) (domain.SearchResponse, error) {
+	if q.Mode != "" || q.NumResults != nil || len(q.IncludeDomains) > 0 || len(q.ExcludeDomains) > 0 || q.StartPublishedDate != "" || q.EndPublishedDate != "" {
+		return domain.SearchResponse{}, errors.New("Yandex web_search accepts only query")
+	}
+	query := q.Query
 	if strings.TrimSpace(query) == "" || utf8.RuneCountInString(query) > 400 {
-		return nil, errors.New("search query must contain 1 to 400 characters")
+		return domain.SearchResponse{}, errors.New("search query must contain 1 to 400 characters")
 	}
 	body, _ := json.Marshal(map[string]any{"query": map[string]string{"searchType": "SEARCH_TYPE_RU", "queryText": query, "familyMode": "FAMILY_MODE_MODERATE"}, "folderId": y.config.FolderID, "responseFormat": "FORMAT_XML", "groupSpec": map[string]string{"groupMode": "GROUP_MODE_FLAT", "groupsOnPage": "10", "docsInGroup": "1"}, "maxPassages": "3"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, y.config.Endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, errors.New("invalid search request")
+		return domain.SearchResponse{}, errors.New("invalid search request")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Api-Key "+y.config.APIKey)
@@ -58,11 +70,11 @@ func (y *Yandex) Search(ctx context.Context, query string) ([]domain.SearchResul
 		RawData string `json:"rawData"`
 	}
 	if err := request(ctx, y.client, req, &out, 4<<20); err != nil {
-		return nil, err
+		return domain.SearchResponse{}, err
 	}
 	raw, err := base64.StdEncoding.DecodeString(out.RawData)
 	if err != nil {
-		return nil, errors.New("invalid Yandex result encoding")
+		return domain.SearchResponse{}, errors.New("invalid Yandex result encoding")
 	}
 	var result struct {
 		Response struct {
@@ -85,10 +97,10 @@ func (y *Yandex) Search(ctx context.Context, query string) ([]domain.SearchResul
 		} `xml:"response"`
 	}
 	if xml.Unmarshal(raw, &result) != nil {
-		return nil, errors.New("invalid Yandex XML response")
+		return domain.SearchResponse{}, errors.New("invalid Yandex XML response")
 	}
 	if result.Response.Error != nil {
-		return nil, errors.New("Yandex search returned an error")
+		return domain.SearchResponse{}, errors.New("Yandex search returned an error")
 	}
 	results := []domain.SearchResult{}
 	for _, g := range result.Response.Results.Groups {
@@ -102,7 +114,7 @@ func (y *Yandex) Search(ctx context.Context, query string) ([]domain.SearchResul
 			}
 		}
 	}
-	return results, nil
+	return domain.SearchResponse{Provider: "yandex", Results: results}, nil
 }
 
 var _ domain.Search = (*Yandex)(nil)

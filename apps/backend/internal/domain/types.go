@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -108,13 +109,100 @@ type Completion struct {
 type Model interface {
 	Complete(context.Context, []Message, []Tool) (Completion, error)
 }
+type SearchQuery struct {
+	Query              string   `json:"query"`
+	Mode               string   `json:"mode,omitempty"`
+	NumResults         *int     `json:"num_results,omitempty"`
+	IncludeDomains     []string `json:"include_domains,omitempty"`
+	ExcludeDomains     []string `json:"exclude_domains,omitempty"`
+	StartPublishedDate string   `json:"start_published_date,omitempty"`
+	EndPublishedDate   string   `json:"end_published_date,omitempty"`
+}
+
+// UnmarshalJSON rejects an explicitly supplied null num_results so callers
+// cannot bypass validation with {"num_results":null} and silently default to 5.
+func (q *SearchQuery) UnmarshalJSON(data []byte) error {
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawFields); err != nil {
+		return err
+	}
+	if rawNum, ok := rawFields["num_results"]; ok {
+		if strings.TrimSpace(string(rawNum)) == "null" {
+			return errors.New("num_results must be between 1 and 10")
+		}
+	}
+	type alias SearchQuery
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*q = SearchQuery(decoded)
+	return nil
+}
+
 type SearchResult struct {
+	Title         string   `json:"title"`
+	URL           string   `json:"url"`
+	PublishedDate string   `json:"published_date,omitempty"`
+	Snippet       string   `json:"snippet,omitempty"`
+	Highlights    []string `json:"highlights,omitempty"`
+}
+
+type yandexWireSearchResult struct {
 	Title   string `json:"title"`
 	URL     string `json:"url"`
 	Snippet string `json:"snippet"`
 }
+
+type SearchResponse struct {
+	Provider     string         `json:"-"`
+	ResolvedMode string         `json:"-"`
+	RequestID    string         `json:"-"`
+	CostUSD      *float64       `json:"-"`
+	RateLimited  bool           `json:"-"`
+	CompletedAt  time.Time      `json:"-"`
+	Results      []SearchResult `json:"results"`
+}
+
+// MarshalJSON preserves the array wire shape expected by existing web_search
+// callers and Codemode scripts while keeping telemetry metadata out of model context.
+// Yandex results preserve an explicit "snippet" string even when empty.
+func (r SearchResponse) MarshalJSON() ([]byte, error) {
+	if len(r.Results) == 0 {
+		return []byte("[]"), nil
+	}
+	if r.Provider == "yandex" {
+		out := make([]yandexWireSearchResult, len(r.Results))
+		for i, item := range r.Results {
+			out[i] = yandexWireSearchResult{
+				Title:   item.Title,
+				URL:     item.URL,
+				Snippet: item.Snippet,
+			}
+		}
+		return json.Marshal(out)
+	}
+	return json.Marshal(r.Results)
+}
+
+type SearchRuntimeStatus struct {
+	Provider              string     `json:"provider"`
+	Enabled               bool       `json:"enabled"`
+	MonthlyBudgetUSD      float64    `json:"monthly_budget_usd,omitempty"`
+	RateLimitQPS          int        `json:"rate_limit_qps,omitempty"`
+	MaxResultsPerCall     int        `json:"max_results_per_call,omitempty"`
+	DefaultNumResults     int        `json:"default_num_results,omitempty"`
+	AllowedModes          []string   `json:"allowed_modes,omitempty"`
+	SummaryDisabled       bool       `json:"summary_disabled,omitempty"`
+	BillingURL            string     `json:"billing_url,omitempty"`
+	LastSuccessAt         *time.Time `json:"last_success_at,omitempty"`
+	LastQuotaErrorAt      *time.Time `json:"last_quota_error_at,omitempty"`
+	LastRateLimitAt       *time.Time `json:"last_rate_limit_at,omitempty"`
+	LastRetryAfterSeconds int        `json:"last_retry_after_seconds,omitempty"`
+}
+
 type Search interface {
-	Search(context.Context, string) ([]SearchResult, error)
+	Search(context.Context, SearchQuery) (SearchResponse, error)
 	Read(context.Context, string) (string, error)
 }
 type Messenger interface {

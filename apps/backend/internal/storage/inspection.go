@@ -223,11 +223,60 @@ func (s *Store) InspectTrace(ctx context.Context, session, id string) (tr domain
 	}
 	var step int
 	_, _ = fmt.Sscan(parts[2], &step)
-	tr = domain.Trace{ID: id, SessionID: session, TurnID: parts[1], Kind: "model", Step: step, Status: "completed", Historical: true, Output: raw}
+	tr = domain.Trace{ID: id, SessionID: session, TurnID: parts[1], Kind: "model", Step: step, Status: "completed", Historical: true, Output: domain.SanitizeModelCheckpointJSON(raw)}
 	return
 }
 
 var _ inspector.MemoryMetadataStore = (*Store)(nil)
+var _ inspector.SearchUsageStore = (*Store)(nil)
+
+const inspectSearchUsageSQL = `SELECT id, session_id, started_at,
+ search_outcome_at,
+ COALESCE(trace_status, ''), COALESCE(trigger_kind, ''), COALESCE(task_id, ''),
+ search_provider, COALESCE(search_mode, ''), COALESCE(search_resolved_mode, ''),
+ search_cost_usd, COALESCE(search_http_status, 0), COALESCE(search_results, 0),
+ COALESCE(search_rate_limited, false)
+FROM openalbert_traces
+WHERE search_provider IS NOT NULL
+ AND search_outcome_at >= $1
+ AND search_outcome_at < $2
+ORDER BY search_outcome_at DESC, id DESC`
+
+// InspectSearchUsage reads scalar web_search trace metrics over [from, to) using
+// the partial covering index without detoasting full JSONB trace payloads.
+func (s *Store) InspectSearchUsage(ctx context.Context, from, to time.Time) ([]inspector.SearchUsageRecord, error) {
+	rows, err := s.pool.Query(ctx, inspectSearchUsageSQL, from.UTC(), to.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []inspector.SearchUsageRecord{}
+	for rows.Next() {
+		var r inspector.SearchUsageRecord
+		if err := rows.Scan(
+			&r.TraceID,
+			&r.SessionID,
+			&r.StartedAt,
+			&r.CompletedAt,
+			&r.Status,
+			&r.Trigger,
+			&r.TaskID,
+			&r.Provider,
+			&r.Mode,
+			&r.ResolvedMode,
+			&r.CostUSD,
+			&r.HTTPStatus,
+			&r.ResultCount,
+			&r.RateLimited,
+		); err != nil {
+			return nil, err
+		}
+		r.StartedAt = r.StartedAt.UTC()
+		r.CompletedAt = r.CompletedAt.UTC()
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
 
 const inspectSessionOriginsSQL = `WITH scoped AS (
  SELECT s.id AS session_id, s.conversation_id,

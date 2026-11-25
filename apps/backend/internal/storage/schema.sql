@@ -139,6 +139,45 @@ ALTER TABLE openalbert_traces
     ) STORED,
     ADD COLUMN IF NOT EXISTS task_id text GENERATED ALWAYS AS (
         NULLIF(data->>'task_id', '')
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS search_provider text GENERATED ALWAYS AS (
+        NULLIF(data->'search'->>'provider', '')
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS search_mode text GENERATED ALWAYS AS (
+        NULLIF(data->'search'->>'mode', '')
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS search_resolved_mode text GENERATED ALWAYS AS (
+        NULLIF(data->'search'->>'resolved_mode', '')
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS search_cost_usd double precision GENERATED ALWAYS AS (
+        CASE
+            WHEN (data->'search'->>'cost_usd') ~ '^[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$'
+            THEN (data->'search'->>'cost_usd')::double precision
+        END
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS search_http_status integer GENERATED ALWAYS AS (
+        CASE
+            WHEN (data->'search'->>'http_status') ~ '^[0-9]+$'
+            THEN (data->'search'->>'http_status')::integer
+        END
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS search_results integer GENERATED ALWAYS AS (
+        CASE
+            WHEN (data->'search'->>'result_count') ~ '^[0-9]+$'
+            THEN (data->'search'->>'result_count')::integer
+        END
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS search_rate_limited boolean GENERATED ALWAYS AS (
+        COALESCE(data->'search'->>'rate_limited', '') = 'true'
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS search_completed_at timestamptz GENERATED ALWAYS AS (
+        openalbert_rfc3339_timestamptz(data->'search'->>'completed_at')
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS search_outcome_at timestamptz GENERATED ALWAYS AS (
+        COALESCE(openalbert_rfc3339_timestamptz(data->'search'->>'completed_at'), started_at)
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS trace_status text GENERATED ALWAYS AS (
+        NULLIF(data->>'status', '')
     ) STORED;
 CREATE INDEX IF NOT EXISTS openalbert_traces_session_trigger
     ON openalbert_traces(session_id, started_at)
@@ -148,6 +187,10 @@ CREATE INDEX IF NOT EXISTS openalbert_traces_session_task
     ON openalbert_traces(session_id, started_at)
     INCLUDE (task_id)
     WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS openalbert_traces_search_usage
+    ON openalbert_traces(search_outcome_at DESC, id)
+    INCLUDE (session_id, started_at, trace_status, trigger_kind, task_id, search_provider, search_mode, search_resolved_mode, search_cost_usd, search_http_status, search_results, search_rate_limited)
+    WHERE search_provider IS NOT NULL;
 
 ALTER TABLE openalbert_checkpoints
     ADD COLUMN IF NOT EXISTS turn_session_id text GENERATED ALWAYS AS (

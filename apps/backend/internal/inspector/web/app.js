@@ -110,6 +110,12 @@ const state = {
   soulBusy: false,
   soulToken: 0,
   drawerConsolidation: false,
+  searchMonth: "",
+  searchTab: "current",
+  searchReport: null,
+  searchReportMonth: null,
+  searchToken: 0,
+  searchBusy: false,
 };
 const main = $("#main");
 const logsURL = new URL(location.href);
@@ -148,7 +154,12 @@ function sessionName(s) {
 function setBusy(value) {
   state.busy = value;
   const anyBusy =
-    value || state.fileBusy || state.memoryBusy || state.memoryStatsBusy || state.soulBusy;
+    value ||
+    state.fileBusy ||
+    state.memoryBusy ||
+    state.memoryStatsBusy ||
+    state.soulBusy ||
+    state.searchBusy;
   $("#refresh").disabled = anyBusy;
   $("#refresh").setAttribute("aria-busy", String(anyBusy));
   $("#nav-logs").setAttribute("aria-disabled", String(anyBusy));
@@ -541,6 +552,7 @@ async function refresh() {
     state.memoryBusy ||
     state.memoryStatsBusy ||
     state.soulBusy ||
+    state.searchBusy ||
     !$("#drawer").classList.contains("hidden")
   )
     return;
@@ -559,6 +571,7 @@ async function refresh() {
         await Promise.all([loadMemory(), loadSoul()]);
       }
     } else if (state.view === "files") await loadFiles();
+    else if (state.view === "search") await loadSearchLimits();
     else
       await Promise.all([
         loadList(false, true),
@@ -572,11 +585,14 @@ async function refresh() {
 function route() {
   const view = /^#\/memory(?:\?|$)/.test(location.hash)
     ? "memory"
-    : location.hash === "#/files" ? "files" : "sessions";
+    : /^#\/search(?:\?|$)/.test(location.hash)
+      ? "search"
+      : location.hash === "#/files" ? "files" : "sessions";
   const changedView = view !== state.view;
   state.view = view;
   document.body.classList.toggle("has-files", view === "files");
   document.body.classList.toggle("has-memory", view === "memory");
+  document.body.classList.toggle("has-search", view === "search");
   if (changedView) {
     clearTimeout(fileDebounce);
     clearTimeout(memoryDebounce);
@@ -585,13 +601,30 @@ function route() {
     ++state.memoryToken;
     ++state.memoryStatsToken;
     ++state.soulToken;
-    state.fileBusy = state.memoryBusy = state.memoryStatsBusy = state.soulBusy = false;
+    ++state.searchToken;
+    state.fileBusy = state.memoryBusy = state.memoryStatsBusy = state.soulBusy = state.searchBusy = false;
     setBusy(false);
   }
-  for (const name of ["sessions", "memory", "files"]) {
+  for (const name of ["sessions", "memory", "files", "search"]) {
     const link = $("#nav-" + name);
     if (view === name) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
+  }
+  if (view === "search") {
+    ++state.detailToken;
+    ++state.refreshToken;
+    ++state.searchToken;
+    state.searchBusy = false;
+    setBusy(false);
+    closeDrawer(false);
+    state.routeTrace = "";
+    const params = new URLSearchParams(location.hash.split("?")[1] || "");
+    const monthParam = params.get("month") || "";
+    state.searchMonth = monthParam;
+    state.searchTab = monthParam ? "previous" : "current";
+    searchShell();
+    loadSearchLimits();
+    return;
   }
   if (view === "memory") {
     clearTimeout(memoryDebounce);
@@ -1379,6 +1412,495 @@ function fileShell() {
   main.innerHTML = `<div class="session-toolbar files-toolbar"><div class="session-heading"><h2>Файлы MinIO</h2><span id="file-bucket" class="mono muted"></span><span class="files-order">По дате изменения ↓ · сначала новые</span></div><label for="file-prefix">Префикс ключа</label><div class="search-wrap"><input id="file-prefix" type="search" placeholder="Например, artifacts/" autocomplete="off" value="${esc(state.filePrefix)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></div><div id="files-error" role="alert" class="error hidden"></div><div id="files-list" aria-busy="true"><div class="loading-line" role="status">Загружаем файлы…</div></div><div class="pagination"><span id="files-count" role="status"></span><button id="more-files" class="button hidden" title="Загрузить ещё файлы · Enter" aria-keyshortcuts="Enter">Ещё файлы</button></div>`;
   if (state.files.length) renderFiles();
 }
+
+const searchTabs = ["current", "previous"];
+const searchModeLabels = {
+  auto: "auto ($7/1k)",
+  lite: "lite ($4/1k)",
+  other: "прочее",
+};
+const fmtUSD = (v) => {
+  const n = Number(v || 0);
+  if (n > 0 && n < 0.01) return "$" + n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  return "$" + n.toFixed(2);
+};
+const fmtMonthLabel = (ym) => {
+  if (!ym || !/^\d{4}-\d{2}$/.test(ym)) return ym || "";
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("ru-RU", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+};
+const fmtResetCountdown = (iso) => {
+  if (!iso) return "";
+  const target = new Date(iso);
+  if (Number.isNaN(target.getTime())) return "";
+  const diffMs = target.getTime() - Date.now();
+  const formatted = target.toLocaleDateString("ru-RU", {
+    day: "numeric",
+    month: "short",
+    timeZone: "UTC",
+  });
+  if (diffMs <= 0) return `Сброс ${formatted} 00:00 UTC`;
+  const hours = Math.ceil(diffMs / 3600000);
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  const tail = days > 0 ? `через ${days} дн.${remHours ? ` ${remHours} ч` : ""}` : `через ${hours} ч`;
+  return `Сброс ${formatted} 00:00 UTC (${tail})`;
+};
+
+function searchHash(month = state.searchMonth) {
+  return month ? "#/search?" + new URLSearchParams({ month }) : "#/search";
+}
+
+function syncSearchTabUI() {
+  if (state.view !== "search") return;
+  const isCurrent = state.searchTab === "current";
+  const curTab = $("#search-tab-current");
+  const prevTab = $("#search-tab-previous");
+  if (!curTab || !prevTab) return;
+  curTab.setAttribute("aria-selected", String(isCurrent));
+  curTab.tabIndex = isCurrent ? 0 : -1;
+  prevTab.setAttribute("aria-selected", String(!isCurrent));
+  prevTab.tabIndex = isCurrent ? -1 : 0;
+  $("#search-limits-body")?.setAttribute(
+    "aria-labelledby",
+    isCurrent ? "search-tab-current" : "search-tab-previous",
+  );
+}
+
+function setSearchTab(tab, { focusTab = false } = {}) {
+  if (state.view !== "search" || !searchTabs.includes(tab)) return;
+  const changed = state.searchTab !== tab;
+  state.searchTab = tab;
+  const available = state.searchReport?.available_months || [];
+  if (tab === "current") {
+    state.searchMonth = "";
+  } else {
+    state.searchMonth = available[1] || previousMonthUTC();
+  }
+  if (changed) {
+    state.searchReport = null;
+    state.searchReportMonth = null;
+  }
+  history.replaceState(null, "", searchHash(state.searchMonth));
+  syncSearchTabUI();
+  if (focusTab) $(`#search-tab-${tab}`)?.focus();
+  loadSearchLimits();
+  if (changed) {
+    announce(tab === "current" ? "Открыт текущий месяц" : "Открыт прошлый месяц");
+  }
+}
+
+function previousMonthUTC() {
+  const now = new Date();
+  const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  return `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function searchShell() {
+  state.searchReport = null;
+  state.searchReportMonth = null;
+  document.title = "Поиск и лимиты · OpenAlbert Inspector";
+  const altPrefix = isMac ? "⌥" : "Alt";
+  main.innerHTML = `<div class="session-toolbar search-toolbar"><div class="search-toolbar-top"><div class="session-heading"><h2>Поиск и лимиты</h2><span id="search-provider-badge" class="search-provider-pill search-provider-disabled">Загрузка…</span></div><div class="search-toolbar-actions"><a id="search-billing-link" class="button hidden" href="https://dashboard.exa.ai/billing" target="_blank" rel="noopener noreferrer" title="Открыть биллинг Exa в новой вкладке · Enter" aria-keyshortcuts="Enter">Биллинг Exa ↗</a></div></div><div id="search-period-meta" class="search-period-meta"></div><nav class="tabs" role="tablist" aria-label="Период расхода поиска"><button class="tab" id="search-tab-current" role="tab" data-search-tab="current" aria-controls="search-limits-body" aria-selected="true" tabindex="0" title="Текущий месяц (Alt+1)" aria-keyshortcuts="Alt+1">Текущий месяц <kbd>${altPrefix} 1</kbd></button><button class="tab" id="search-tab-previous" role="tab" data-search-tab="previous" aria-controls="search-limits-body" aria-selected="false" tabindex="-1" title="Прошлый месяц (Alt+2)" aria-keyshortcuts="Alt+2">Прошлый месяц <kbd>${altPrefix} 2</kbd></button></nav></div><div id="search-limits-error" class="error hidden" role="alert"></div><div id="search-limits-body" role="tabpanel" aria-labelledby="search-tab-current" aria-busy="true"><div class="loading-line" role="status">Загружаем лимиты и статистику поиска…</div></div>`;
+  syncSearchTabUI();
+}
+
+async function loadSearchLimits() {
+  if (state.view !== "search") return;
+  const token = ++state.searchToken;
+  const requestedMonth = state.searchMonth;
+  state.searchBusy = true;
+  setBusy(state.busy);
+  const body = $("#search-limits-body");
+  const errBox = $("#search-limits-error");
+  if (!body || !errBox) return;
+  errBox.classList.add("hidden");
+  body.setAttribute("aria-busy", "true");
+  const samePeriodLoaded = Boolean(
+    state.searchReport && state.searchReportMonth === requestedMonth,
+  );
+  const periodMeta = $("#search-period-meta");
+  if (!samePeriodLoaded) {
+    if (periodMeta) periodMeta.innerHTML = "";
+    body.innerHTML = '<div class="loading-line" role="status">Загружаем лимиты и статистику поиска…</div>';
+  }
+  try {
+    const qs = requestedMonth ? "?" + new URLSearchParams({ month: requestedMonth }) : "";
+    const report = await api("search/limits" + qs);
+    if (token !== state.searchToken || state.view !== "search") return;
+    const prevRenderedMonth = state.searchReport?.month || "";
+    state.searchReport = report;
+    state.searchReportMonth = requestedMonth;
+    state.searchTab = report.is_current_month ? "current" : "previous";
+    syncSearchTabUI();
+    renderSearchLimits(report, prevRenderedMonth === report.month);
+  } catch (error) {
+    if (token !== state.searchToken || state.view !== "search") return;
+    errBox.textContent = error.message;
+    errBox.classList.remove("hidden");
+    if (!samePeriodLoaded) {
+      state.searchReport = null;
+      state.searchReportMonth = null;
+      if (periodMeta) periodMeta.innerHTML = "";
+      const badge = $("#search-provider-badge");
+      if (badge && badge.textContent === "Загрузка…") {
+        badge.textContent = "Статус неизвестен";
+        badge.className = "search-provider-pill search-provider-disabled";
+      }
+      body.innerHTML =
+        '<div class="empty-panel">Не удалось загрузить статистику поиска. Нажмите «Обновить» (Alt+R).</div>';
+    }
+  } finally {
+    if (token === state.searchToken && state.view === "search") {
+      state.searchBusy = false;
+      setBusy(state.busy);
+      body.setAttribute("aria-busy", "false");
+    }
+  }
+}
+
+function renderSearchDailyChart(report) {
+  const series = report.daily || [];
+  const legend = `<div class="analytics-legend" aria-label="Легенда режимов"><span class="legend-item"><svg class="legend-swatch" viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" class="bar-auto"></rect></svg>auto</span><span class="legend-item"><svg class="legend-swatch" viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" class="bar-lite"></rect></svg>lite</span><span class="legend-item"><svg class="legend-swatch" viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" class="bar-error"></rect></svg>ошибки</span></div>`;
+  if (!series.length) {
+    return `<section class="analytics-panel"><div class="analytics-panel-header"><h3>Запросы и расход по дням</h3>${legend}</div><p class="analytics-empty">Нет данных за выбранный месяц.</p></section>`;
+  }
+  const width = 960,
+    height = 200,
+    padLeft = 38,
+    padRight = 14,
+    padTop = 14,
+    padBottom = 28;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+  const maxVal = Math.max(1, ...series.map((d) => d.total || 0));
+  const uniqueTicks = [...new Set([0, Math.ceil(maxVal / 2), maxVal])];
+  const slot = plotW / series.length;
+  const barW = Math.max(4, Math.min(34, slot * 0.62));
+  const labelStep = Math.max(1, Math.ceil(series.length / 10));
+
+  const gridMarkup = uniqueTicks
+    .map((tick) => {
+      const y = padTop + plotH - (tick / maxVal) * plotH;
+      return `<line x1="${padLeft}" y1="${y.toFixed(1)}" x2="${width - padRight}" y2="${y.toFixed(1)}" class="chart-grid"></line><text x="${padLeft - 6}" y="${(y + 4).toFixed(1)}" text-anchor="end" class="chart-axis-text">${tick}</text>`;
+    })
+    .join("");
+
+  const barsMarkup = series
+    .map((day, idx) => {
+      const cx = padLeft + slot * idx + slot / 2;
+      const x = cx - barW / 2;
+      let cursorY = padTop + plotH;
+      const parts = [
+        ["auto", day.auto || 0],
+        ["lite", day.lite || 0],
+        ["other", day.other || 0],
+        ["error", day.errors || 0],
+      ];
+      const tip = `${day.date} — запросов: ${day.total} (auto: ${day.auto || 0}, lite: ${day.lite || 0}${day.errors ? `, ошибок: ${day.errors}` : ""}), расход: ${fmtUSD(day.cost_usd)}`;
+      const rects = parts
+        .map(([cls, val]) => {
+          if (!val) return "";
+          const h = Math.max(1, (val / maxVal) * plotH);
+          cursorY -= h;
+          return `<rect x="${x.toFixed(1)}" y="${cursorY.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" class="bar-${cls}"><title>${esc(tip)}</title></rect>`;
+        })
+        .join("");
+      const lastIdx = series.length - 1;
+      const showLabel =
+        idx === 0 ||
+        idx === lastIdx ||
+        (idx % labelStep === 0 && lastIdx - idx >= Math.ceil(labelStep * 0.6));
+      const xLabel = showLabel
+        ? `<text x="${cx.toFixed(1)}" y="${height - 8}" text-anchor="middle" class="chart-axis-text">${esc(fmtDayShort(day.date))}</text>`
+        : "";
+      return `<g class="chart-day" data-date="${esc(day.date)}">${rects}${xLabel}</g>`;
+    })
+    .join("");
+
+  const activeRows = series.filter((d) => d.total > 0);
+  const tableRows = (activeRows.length ? activeRows : series)
+    .map(
+      (d) =>
+        `<tr><td class="mono nowrap">${esc(d.date)}</td><td class="mono">${fmtNum(d.total)}</td><td class="mono">${fmtNum(d.auto)}</td><td class="mono">${fmtNum(d.lite)}</td><td class="mono">${esc(fmtUSD(d.cost_usd))}</td><td class="mono">${fmtNum(d.errors)}</td></tr>`,
+    )
+    .join("");
+  const dataTable = `<details id="search-daily-table" class="chart-table-details"><summary title="Таблица по дням · Enter / Пробел" aria-keyshortcuts="Enter Space">Таблица по дням (${activeRows.length || series.length})</summary><div class="table-scroll"><table class="data-table chart-data-table"><thead><tr><th>Дата</th><th>Всего</th><th>auto (успешно)</th><th>lite (успешно)</th><th>Расход</th><th>Ошибки</th></tr></thead><tbody>${tableRows}</tbody></table></div></details>`;
+  const summaryLabel = `Запросы поиска по дням: ${series.length} дн., максимум ${maxVal} за день.`;
+  return `<section class="analytics-panel"><div class="analytics-panel-header"><h3>Запросы и расход по дням</h3>${legend}</div><div class="chart-wrap" tabindex="0" aria-label="График запросов поиска по дням"><svg class="growth-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(summaryLabel)}">${gridMarkup}${barsMarkup}</svg></div>${dataTable}</section>`;
+}
+
+function renderSearchBudgetPanel(report) {
+  const b = report.budget || {};
+  const rt = report.runtime || {};
+  const limit = b.monthly_budget_usd || 0;
+  const barW = 400,
+    barH = 16;
+  let barContent = "";
+  const statusClass = b.status === "exhausted" ? "over" : b.status === "warning" ? "warning" : "ok";
+  if (limit > 0 && b.spent_usd > 0) {
+    const pct = Math.min(1, b.spent_usd / limit);
+    const fillW = Math.max(2, pct * barW);
+    const fillClass =
+      b.status === "exhausted"
+        ? "bar-truncated"
+        : b.status === "warning"
+          ? "bar-warning"
+          : "bar-included";
+    barContent = `<rect x="0" y="0" width="${fillW.toFixed(1)}" height="${barH}" rx="3" class="${fillClass}"></rect>`;
+  } else if (b.exhausted_by_402) {
+    barContent = `<rect x="0" y="0" width="${barW}" height="${barH}" rx="3" class="bar-truncated"></rect>`;
+  }
+  const guardrails = [];
+  if (rt.provider === "exa") {
+    guardrails.push(`Режимы: ${(rt.allowed_modes || ["auto", "lite"]).join(", ")} (deep выкл.)`);
+    guardrails.push(`Лимит результатов: ≤ ${rt.max_results_per_call || 10} (по умолч. ${rt.default_num_results || 5})`);
+    if (rt.summary_disabled) guardrails.push("Контент: highlights (AI summary выкл.)");
+    if (rt.rate_limit_qps) guardrails.push(`Rate limit: ${rt.rate_limit_qps} QPS (до 4 параллельно в Codemode)`);
+  } else if (rt.provider === "yandex") {
+    guardrails.push("Провайдер: Yandex Search API v2");
+    guardrails.push(`Лимит результатов: ≤ ${rt.max_results_per_call || 10}`);
+  }
+  const barAria =
+    limit > 0
+      ? `Месячный бюджет Exa: ${fmtUSD(b.spent_usd)} из ${fmtUSD(limit)} (${fmtPct(b.usage_percent)}%).`
+      : "Бюджет поиска не задан.";
+  return `<section class="analytics-panel budget-panel budget-${esc(statusClass)}"><div class="analytics-panel-header"><h3>Месячный лимит кредитов и ограничения</h3><span class="budget-badge budget-badge-${esc(statusClass)}">${limit > 0 ? `${esc(fmtUSD(b.spent_usd))} / ${esc(fmtUSD(limit))} (${fmtPct(b.usage_percent)}%)` : esc(rt.provider || "Отключён")}</span></div>${limit > 0 ? `<svg class="budget-bar-svg" viewBox="0 0 ${barW} ${barH}" preserveAspectRatio="none" role="img" aria-label="${esc(barAria)}"><rect x="0" y="0" width="${barW}" height="${barH}" rx="3" class="bar-track"></rect>${barContent}</svg><div class="budget-stats"><span>Израсходовано: <strong>${esc(fmtUSD(b.spent_usd))}</strong></span><span>Осталось: <strong>${b.exhausted_by_402 ? "$0.00 (402)" : esc(fmtUSD(b.remaining_usd))}</strong></span><span>Оценка остатка: <strong>~${fmtNum(b.est_remaining_auto)} auto</strong> / <strong>~${fmtNum(b.est_remaining_lite)} lite</strong></span></div>` : ""}${guardrails.length ? `<div class="search-guardrails">${guardrails.map((g) => `<span class="guardrail-pill">${esc(g)}</span>`).join("")}</div>` : ""}</section>`;
+}
+
+function renderSearchModePanel(report) {
+  const modes = (report.by_mode || []).filter((m) => m.calls > 0 || m.mode === "auto" || m.mode === "lite");
+  const maxCalls = Math.max(1, ...modes.map((m) => m.calls || 0));
+  const barW = 200,
+    barH = 10;
+  const rows = modes
+    .map((m) => {
+      const w = m.calls ? Math.max(3, (m.calls / maxCalls) * barW) : 0;
+      const cls = m.mode === "auto" ? "bar-auto" : m.mode === "lite" ? "bar-lite" : "bar-other";
+      return `<div class="search-mode-row"><span class="search-mode-name">${esc(searchModeLabels[m.mode] || m.mode)}</span><svg class="kind-bar-svg" viewBox="0 0 ${barW} ${barH}" preserveAspectRatio="none" aria-hidden="true"><rect x="0" y="0" width="${barW}" height="${barH}" rx="2" class="bar-track"></rect>${w ? `<rect x="0" y="0" width="${w.toFixed(1)}" height="${barH}" rx="2" class="${cls}"></rect>` : ""}</svg><span class="search-mode-calls">${fmtNum(m.calls)}</span><span class="search-mode-cost">${esc(fmtUSD(m.cost_usd))}</span></div>`;
+    })
+    .join("");
+  return `<section class="analytics-panel"><div class="analytics-panel-header"><h3>По режимам поиска</h3><span class="muted analytics-sub">Запросы и расход</span></div>${rows || '<p class="analytics-empty">Поисковых запросов пока нет.</p>'}</section>`;
+}
+
+function renderSearchTriggerPanel(report) {
+  const triggers = report.by_trigger || [];
+  const maxCalls = Math.max(1, ...triggers.map((t) => t.calls || 0));
+  const barW = 200,
+    barH = 10;
+  const rows = triggers
+    .map((t) => {
+      const w = t.calls ? Math.max(3, (t.calls / maxCalls) * barW) : 0;
+      return `<div class="search-mode-row"><span class="kind-bar-name">${esc(triggerLabels[t.trigger] || t.trigger)}</span><svg class="kind-bar-svg" viewBox="0 0 ${barW} ${barH}" preserveAspectRatio="none" aria-hidden="true"><rect x="0" y="0" width="${barW}" height="${barH}" rx="2" class="bar-track"></rect>${w ? `<rect x="0" y="0" width="${w.toFixed(1)}" height="${barH}" rx="2" class="bar-${esc(t.trigger)}"></rect>` : ""}</svg><span class="search-mode-calls">${fmtNum(t.calls)}</span><span class="search-mode-cost">${fmtPct(t.share_percent)}% · ${esc(fmtUSD(t.cost_usd))}</span></div>`;
+    })
+    .join("");
+  return `<section class="analytics-panel"><div class="analytics-panel-header"><h3>По источникам</h3><span class="muted analytics-sub">Интерактивные и фоновые</span></div>${rows || '<p class="analytics-empty">Поисковых запросов пока нет.</p>'}</section>`;
+}
+
+function renderSearchErrorsPanel(report) {
+  const errs = report.recent_errors || [];
+  if (!errs.length) return "";
+  const rows = errs
+    .map((e) => {
+      const statusLabel =
+        e.http_status === 402
+          ? "HTTP 402 · Кредиты"
+          : e.http_status === 429 && e.recovered
+            ? "HTTP 429 · Повтор успешен"
+            : e.http_status === 429
+              ? "HTTP 429 · Rate limit"
+              : e.http_status
+                ? `HTTP ${e.http_status}`
+                : "Ошибка";
+      const pillClass = e.recovered ? "pending" : "failed";
+      const href =
+        e.session_id && e.trace_id
+          ? `#/session/${encodeURIComponent(e.session_id)}?${new URLSearchParams({ trace: e.trace_id })}`
+          : "";
+      return `<tr><td class="mono nowrap">${esc(date(e.started_at))}</td><td><span class="state ${pillClass}">${esc(statusLabel)}</span></td><td class="mono">${esc(e.mode || "—")}</td><td>${esc(triggerLabels[e.trigger] || e.trigger || "—")}</td><td>${href ? `<a data-search-trace="${esc(e.trace_id)}" href="${esc(href)}" title="Открыть трассировку вызова · Enter" aria-keyshortcuts="Enter">Открыть trace</a>` : "—"}</td></tr>`;
+    })
+    .join("");
+  return `<section class="analytics-panel"><div class="analytics-panel-header"><h3>Последние срабатывания лимитов (402 / 429)</h3><span class="muted analytics-sub">Последние ${errs.length}</span></div><div class="table-scroll"><table class="data-table search-errors-table"><thead><tr><th>Время</th><th>Статус</th><th>Режим</th><th>Источник</th><th>Трассировка</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+}
+
+function inSearchReportPeriod(iso, report) {
+  if (!iso || !report?.period_start || !report?.period_end) return false;
+  const ts = Date.parse(iso);
+  const start = Date.parse(report.period_start);
+  const end = Date.parse(report.period_end);
+  return Number.isFinite(ts) && Number.isFinite(start) && Number.isFinite(end) && ts >= start && ts < end;
+}
+
+function renderSearchLimits(report, preserveUI = false) {
+  const body = $("#search-limits-body");
+  if (!body) return;
+  const dailyTableOpen = preserveUI && Boolean($("#search-daily-table")?.open);
+  const active = preserveUI && body.contains(document.activeElement) ? document.activeElement : null;
+  const focusedDailySummary = Boolean(active?.matches("#search-daily-table > summary"));
+  const focusedTrace = active?.dataset?.searchTrace || "";
+  const focusedKey = active?.dataset?.searchFocus || "";
+  const focusedChartWrap = Boolean(active?.classList?.contains("chart-wrap"));
+
+  const rt = report.runtime || {};
+  const b = report.budget || {};
+  const t = report.totals || {};
+
+  const badge = $("#search-provider-badge");
+  if (badge) {
+    if (rt.provider === "exa") {
+      badge.textContent = "Exa Search";
+      badge.className = "search-provider-pill search-provider-exa";
+    } else if (rt.provider === "yandex") {
+      badge.textContent = "Yandex Search";
+      badge.className = "search-provider-pill";
+    } else {
+      badge.textContent = "Поиск отключён";
+      badge.className = "search-provider-pill search-provider-disabled";
+    }
+  }
+  const billingLink = $("#search-billing-link");
+  if (billingLink) {
+    const showBilling = Boolean(rt.billing_url) || rt.provider === "exa";
+    billingLink.classList.toggle("hidden", !showBilling);
+    if (rt.billing_url) billingLink.href = rt.billing_url;
+  }
+  const meta = $("#search-period-meta");
+  if (meta) {
+    const pieces = [`Месяц: ${fmtMonthLabel(report.month)} (UTC)`];
+    if (report.is_current_month && report.reset_at) {
+      pieces.push(fmtResetCountdown(report.reset_at));
+    }
+    if (report.previous_month) {
+      pieces.push(
+        `Прошлый месяц (${report.previous_month.month}): ${fmtNum(report.previous_month.total_calls)} зап. · ${fmtUSD(report.previous_month.spent_usd)}`,
+      );
+    }
+    meta.innerHTML = pieces.map((p) => `<span>${esc(p)}</span>`).join("");
+  }
+
+  const curTab = $("#search-tab-current");
+  const prevTab = $("#search-tab-previous");
+  const altPrefix = isMac ? "⌥" : "Alt";
+  if (curTab && report.available_months?.[0]) {
+    curTab.innerHTML = `Текущий месяц <small>${esc(report.available_months[0])}</small> <kbd>${altPrefix} 1</kbd>`;
+  }
+  if (prevTab && report.available_months?.[1]) {
+    prevTab.innerHTML = `Прошлый месяц <small>${esc(report.available_months[1])}</small> <kbd>${altPrefix} 2</kbd>`;
+  }
+
+  if (!rt.enabled && t.total_calls === 0) {
+    body.innerHTML = `<div class="analytics-root"><div class="empty-panel"><p>API-поиск <code>web_search</code> сейчас отключён; доступно чтение публичных URL через <code>web_read</code> и браузерные инструменты.</p><p class="muted">Чтобы подключить Exa Search, задайте <code>EXA_API_KEY</code> (и при необходимости <code>EXA_MONTHLY_BUDGET_USD</code>, по умолчанию 10). Для Yandex задайте <code>YANDEX_API_KEY</code> и <code>YANDEX_FOLDER_ID</code>.</p></div></div>`;
+    return;
+  }
+
+  const lastQuotaInPeriod = inSearchReportPeriod(rt.last_quota_error_at, report) ? rt.last_quota_error_at : "";
+  const lastRateLimitInPeriod = inSearchReportPeriod(rt.last_rate_limit_at, report) ? rt.last_rate_limit_at : "";
+
+  const alertBanner = b.exhausted_by_402
+    ? `<div class="search-alert-banner" role="alert"><strong>Кредиты Exa исчерпаны (получен HTTP 402 Payment Required)</strong><span>Агент автоматически переключается на браузерные инструменты и <code>web_read</code>. Бесплатные кредиты Starter обновляются 1-го числа каждого месяца в 00:00 UTC.${lastQuotaInPeriod ? ` Последний 402: ${esc(date(lastQuotaInPeriod))}.` : ""}</span></div>`
+    : b.status === "exhausted"
+      ? `<div class="search-alert-banner search-alert-warning" role="status"><strong>Достигнут локальный порог бюджета Exa (${esc(fmtUSD(b.spent_usd))} / ${esc(fmtUSD(b.monthly_budget_usd))})</strong><span><code>EXA_MONTHLY_BUDGET_USD</code> — это ориентир отчётности, а не жёсткая блокировка: запросы <code>web_search</code> продолжатся, пока Exa не вернёт <code>HTTP 402</code>. Проверьте фактический остаток в <a data-search-focus="billing-warning" href="${esc(rt.billing_url || "https://dashboard.exa.ai/billing")}" target="_blank" rel="noopener noreferrer">Exa Billing Dashboard</a>.</span></div>`
+      : "";
+
+  const kpiBudgetClass =
+    b.status === "exhausted"
+      ? "kpi-budget-over"
+      : b.status === "warning"
+        ? "kpi-budget-warning"
+        : "";
+  const kpiBudgetSubClass =
+    b.status === "exhausted"
+      ? "kpi-sub-danger"
+      : b.status === "warning"
+        ? "kpi-sub-warning"
+        : "muted";
+
+  const projectionValue =
+    b.projected_month_end_usd !== undefined && b.projected_month_end_usd !== null
+      ? fmtUSD(b.projected_month_end_usd)
+      : "—";
+  const projectionSub =
+    b.projected_month_end_usd !== undefined && b.projected_month_end_usd !== null
+      ? `~${fmtUSD(b.avg_daily_usd)}/день${b.monthly_budget_usd > 0 && b.projected_month_end_usd > b.monthly_budget_usd ? " · выше лимита" : " · в рамках бюджета"}`
+      : report.is_current_month
+        ? "Прогноз появится после 24 ч месяца"
+        : `Среднее: ${fmtUSD(b.avg_daily_usd)}/день`;
+
+  const limitSubParts = [];
+  if (rt.rate_limit_qps) limitSubParts.push(`Лимит ${rt.rate_limit_qps} QPS`);
+  const limitHits = (t.quota_402_calls || 0) + (t.rate_limit_429_calls || 0);
+  if (limitHits === 0) {
+    limitSubParts.push("Срабатываний 402/429 не было");
+  } else if (lastRateLimitInPeriod) {
+    limitSubParts.push(
+      `Последний 429: ${shortDate(lastRateLimitInPeriod)}${rt.last_retry_after_seconds ? ` (Retry-After ${rt.last_retry_after_seconds}с)` : ""}`,
+    );
+  } else if (report.recent_errors?.[0]?.started_at) {
+    limitSubParts.push(`Последнее срабатывание: ${shortDate(report.recent_errors[0].started_at)}`);
+  } else {
+    limitSubParts.push("Зафиксированы срабатывания 402/429");
+  }
+
+  const kpis = `<div class="analytics-kpis">
+    <div class="kpi-card ${kpiBudgetClass}">
+      <div class="kpi-label">Месячный бюджет</div>
+      <div class="kpi-value">${b.monthly_budget_usd > 0 ? `${esc(fmtUSD(b.spent_usd))} / ${esc(fmtUSD(b.monthly_budget_usd))}` : esc(fmtUSD(b.spent_usd))}</div>
+      <div class="kpi-sub ${kpiBudgetSubClass}">${b.monthly_budget_usd > 0 ? `${fmtPct(b.usage_percent)}% · ${b.exhausted_by_402 ? "Кредиты исчерпаны (402)" : `Осталось ${fmtUSD(b.remaining_usd)}`}` : "Учёт расхода в USD только для Exa"}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Поисков за месяц</div>
+      <div class="kpi-value">${fmtNum(t.total_calls)}</div>
+      <div class="kpi-sub muted">Успешно: ${fmtNum(t.succeeded_calls)} · Среднее результатов: ${fmtPct(t.avg_results_per_call)}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">${report.is_current_month ? "Прогноз на месяц" : "Итог месяца"}</div>
+      <div class="kpi-value">${report.is_current_month ? esc(projectionValue) : esc(fmtUSD(b.spent_usd))}</div>
+      <div class="kpi-sub ${b.projected_month_end_usd > b.monthly_budget_usd && b.monthly_budget_usd > 0 ? "kpi-sub-warning" : "muted"}">${esc(projectionSub)}</div>
+    </div>
+    <div class="kpi-card ${t.quota_402_calls > 0 ? "kpi-budget-over" : t.rate_limit_429_calls > 0 ? "kpi-budget-warning" : ""}">
+      <div class="kpi-label">Лимиты и ошибки</div>
+      <div class="kpi-value">402: ${fmtNum(t.quota_402_calls)} · 429: ${fmtNum(t.rate_limit_429_calls)}</div>
+      <div class="kpi-sub ${t.quota_402_calls > 0 ? "kpi-sub-danger" : "muted"}">${esc(limitSubParts.join(" · "))}${t.other_error_calls > 0 ? ` · прочие: ${fmtNum(t.other_error_calls)}` : ""}</div>
+    </div>
+  </div>`;
+
+  const footnote = `<p class="search-footnote">Расход рассчитывается локально по полю <code>costDollars.total</code> из ответов Exa, сохранённых этой инсталляцией OpenAlbert в PostgreSQL (кэшированные повторы Temporal не дублируются). Запросы тем же API-ключом вне OpenAlbert и разовый бонус регистрации ($10) здесь не учитываются — точный остаток аккаунта доступен в <a data-search-focus="billing-footnote" href="${esc(rt.billing_url || "https://dashboard.exa.ai/billing")}" target="_blank" rel="noopener noreferrer">Exa Billing Dashboard</a>.</p>`;
+
+  body.innerHTML = `<div class="analytics-root">
+    ${alertBanner}
+    ${kpis}
+    ${renderSearchBudgetPanel(report)}
+    ${renderSearchDailyChart(report)}
+    <div class="analytics-grid">
+      ${renderSearchModePanel(report)}
+      ${renderSearchTriggerPanel(report)}
+    </div>
+    ${renderSearchErrorsPanel(report)}
+    ${footnote}
+  </div>`;
+
+  if (dailyTableOpen) {
+    const details = $("#search-daily-table");
+    if (details) details.open = true;
+  }
+  if (focusedDailySummary) {
+    $("#search-daily-table > summary")?.focus({ preventScroll: true });
+  } else if (focusedKey) {
+    [...body.querySelectorAll("[data-search-focus]")]
+      .find((el) => el.dataset.searchFocus === focusedKey)
+      ?.focus({ preventScroll: true });
+  } else if (focusedTrace) {
+    [...body.querySelectorAll("[data-search-trace]")]
+      .find((el) => el.dataset.searchTrace === focusedTrace)
+      ?.focus({ preventScroll: true });
+  } else if (focusedChartWrap) {
+    $(".chart-wrap", body)?.focus({ preventScroll: true });
+  }
+}
 function renderFiles() {
   const focusedKey = document.activeElement?.dataset.file;
   $("#files-list").innerHTML = state.files.length
@@ -1594,7 +2116,14 @@ function closeDrawer(clearRoute = true) {
 }
 $("#refresh").addEventListener("click", refresh);
 $("#nav-logs").addEventListener("click", (event) => {
-  if (state.busy || state.fileBusy || state.memoryBusy || state.memoryStatsBusy || state.soulBusy)
+  if (
+    state.busy ||
+    state.fileBusy ||
+    state.memoryBusy ||
+    state.memoryStatsBusy ||
+    state.soulBusy ||
+    state.searchBusy
+  )
     event.preventDefault();
 });
 $("#more-sessions").addEventListener("click", () => loadList(true));
@@ -1622,6 +2151,11 @@ main.addEventListener("toggle", async (event) => {
 }, true);
 
 main.addEventListener("click", (event) => {
+  const searchTab = event.target.closest("[data-search-tab]");
+  if (searchTab) {
+    setSearchTab(searchTab.dataset.searchTab);
+    return;
+  }
   const memoryTab = event.target.closest("[data-memory-tab]");
   if (memoryTab) {
     setMemoryTab(memoryTab.dataset.memoryTab);
@@ -1740,6 +2274,18 @@ main.addEventListener("keydown", (event) => {
   )
     return;
   event.preventDefault();
+  if (event.target.dataset.searchTab) {
+    let index = searchTabs.indexOf(state.searchTab);
+    index =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? searchTabs.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + searchTabs.length) %
+            searchTabs.length;
+    setSearchTab(searchTabs[index], { focusTab: true });
+    return;
+  }
   if (event.target.dataset.memoryTab) {
     let index = memoryTabs.indexOf(state.memoryTab);
     index =
@@ -1770,7 +2316,7 @@ document.addEventListener("keydown", (event) => {
   if (event.isComposing || event.keyCode === 229 || event.repeat) {
     if (
       (event.key === "Enter" || event.key === " ") &&
-      event.target.closest("button,summary,#download-file,#nav-logs,#nav-memory,#show-other-tools")
+      event.target.closest("button,summary,#download-file,#nav-logs,#nav-memory,#nav-search,#show-other-tools")
     )
       event.preventDefault();
     return;
@@ -1845,8 +2391,27 @@ document.addEventListener("keydown", (event) => {
     event.code === "KeyL"
   ) {
     event.preventDefault();
-    if (!state.busy && !state.fileBusy && !state.memoryBusy && !state.memoryStatsBusy && !state.soulBusy)
+    if (
+      !state.busy &&
+      !state.fileBusy &&
+      !state.memoryBusy &&
+      !state.memoryStatsBusy &&
+      !state.soulBusy &&
+      !state.searchBusy
+    )
       $("#nav-logs").click();
+  }
+  if (
+    state.view === "search" &&
+    event.altKey &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    (event.code === "Digit1" || event.code === "Digit2") &&
+    !event.target.closest("input, textarea, select, [contenteditable]")
+  ) {
+    event.preventDefault();
+    setSearchTab(event.code === "Digit1" ? "current" : "previous", { focusTab: true });
   }
   if (
     state.view === "memory" &&

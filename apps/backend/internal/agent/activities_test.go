@@ -32,8 +32,8 @@ func (m *testModel) Complete(ctx context.Context, msg []domain.Message, _ []doma
 
 type testSearch struct{}
 
-func (testSearch) Search(context.Context, string) ([]domain.SearchResult, error) {
-	return []domain.SearchResult{{Title: "Official docs", URL: "https://example.com", Snippet: "result"}}, nil
+func (testSearch) Search(context.Context, domain.SearchQuery) (domain.SearchResponse, error) {
+	return domain.SearchResponse{Provider: "yandex", Results: []domain.SearchResult{{Title: "Official docs", URL: "https://example.com", Snippet: "result"}}}, nil
 }
 func (testSearch) Read(context.Context, string) (string, error) { return "Public page", nil }
 
