@@ -401,3 +401,402 @@ test("GROUP.md: поздний ответ не попадает в другой 
   await expect(page.locator("#memory-group")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
+
+const statsPersonal = {
+  scope: "personal:7",
+  total_entries: 12,
+  total_chars: 9420,
+  total_bytes: 16840,
+  oldest_at: "2026-10-12T10:00:00Z",
+  newest_at: "2026-10-23T12:00:00Z",
+  span_days: 12,
+  triggers: { message: 4, task: 5, initiative: 3, coding: 0, unknown: 0 },
+  background_entries: 8,
+  background_share_percent: 66.7,
+  trend: { last_7_days: 7, prev_7_days: 5, delta: 2, delta_percent: 40, avg_per_day: 1 },
+  daily_growth: [
+    { date: "2026-10-19", total: 2, message: 1, task: 1, initiative: 0, coding: 0, unknown: 0 },
+    { date: "2026-10-20", total: 0, message: 0, task: 0, initiative: 0, coding: 0, unknown: 0 },
+    { date: "2026-10-21", total: 3, message: 1, task: 1, initiative: 1, coding: 0, unknown: 0 },
+    { date: "2026-10-22", total: 4, message: 1, task: 2, initiative: 1, coding: 0, unknown: 0 },
+    { date: "2026-10-23", total: 3, message: 1, task: 1, initiative: 1, coding: 0, unknown: 0 },
+  ],
+  profile_budget: {
+    limit: 8000,
+    total_chars: 8640,
+    included_chars: 8000,
+    truncated_chars: 640,
+    usage_percent: 108,
+    status: "over",
+    total_entries: 3,
+    included_entries: 1,
+    truncated_entries: 2,
+    truncated_items: [
+      {
+        id: "pref <script>",
+        kind: "preference",
+        content: "Предпочитает короткие ответы <script>window.XSS=true</script>",
+        chars: 420,
+        start_char: 7800,
+        end_char: 8220,
+        partial: true,
+        updated_at: "2026-10-23T12:00:00Z",
+      },
+      {
+        id: "place",
+        kind: "profile",
+        content: "Живёт в Москве",
+        chars: 220,
+        start_char: 8221,
+        end_char: 8441,
+        partial: false,
+        updated_at: "2026-10-22T12:00:00Z",
+      },
+    ],
+  },
+  kinds: [
+    { kind: "profile", total: 2, chars: 2100, message: 2, task: 0, initiative: 0, coding: 0, unknown: 0 },
+    { kind: "preference", total: 3, chars: 2800, message: 1, task: 1, initiative: 1, coding: 0, unknown: 0 },
+    { kind: "fact", total: 4, chars: 2900, message: 1, task: 2, initiative: 1, coding: 0, unknown: 0 },
+    { kind: "episode", total: 2, chars: 1200, message: 0, task: 2, initiative: 0, coding: 0, unknown: 0 },
+    { kind: "hypothesis", total: 1, chars: 420, message: 0, task: 0, initiative: 1, coding: 0, unknown: 0 },
+  ],
+  top_generators: [
+    { trigger: "task", task_id: "task-digest", title: "Утренний дайджест <img src=x onerror=window.GEN_XSS=true>", count: 5, chars: 4100, latest_at: "2026-10-23T08:00:00Z" },
+    { trigger: "initiative", count: 3, chars: 1900, latest_at: "2026-10-22T20:00:00Z" },
+  ],
+  latest_consolidation: {
+    id: "memory-consolidation/personal:7/2026-10-23",
+    completed_at: "2026-10-23T06:00:00Z",
+    before_entries: 18,
+    after_entries: 12,
+    before_profile_chars: 10200,
+    after_profile_chars: 8640,
+    profile_chars_delta: -1560,
+    operations: { merged: 3, reclassified: 1, deleted: 2, kept: 6, updated: 0, skipped: 0 },
+    log: {
+      scope: "personal:7",
+      operations: [
+        { op: "merge", ids: ["a", "b"], reason: "Объединены дубликаты <script>window.LOG_XSS=true</script>" },
+        { op: "delete", ids: ["c"], reason: "Устаревшее напоминание" },
+      ],
+    },
+  },
+};
+
+const statsEmpty = {
+  scope: "group:empty",
+  total_entries: 0,
+  total_chars: 0,
+  total_bytes: 0,
+  span_days: 0,
+  triggers: { message: 0, task: 0, initiative: 0, coding: 0, unknown: 0 },
+  background_entries: 0,
+  background_share_percent: 0,
+  trend: { last_7_days: 0, prev_7_days: 0, delta: 0, avg_per_day: 0 },
+  daily_growth: [],
+  profile_budget: {
+    limit: 8000,
+    total_chars: 0,
+    included_chars: 0,
+    truncated_chars: 0,
+    usage_percent: 0,
+    status: "ok",
+    total_entries: 0,
+    included_entries: 0,
+    truncated_entries: 0,
+    truncated_items: [],
+  },
+  kinds: [
+    { kind: "profile", total: 0, chars: 0, message: 0, task: 0, initiative: 0, coding: 0, unknown: 0 },
+    { kind: "preference", total: 0, chars: 0, message: 0, task: 0, initiative: 0, coding: 0, unknown: 0 },
+    { kind: "fact", total: 0, chars: 0, message: 0, task: 0, initiative: 0, coding: 0, unknown: 0 },
+    { kind: "episode", total: 0, chars: 0, message: 0, task: 0, initiative: 0, coding: 0, unknown: 0 },
+    { kind: "hypothesis", total: 0, chars: 0, message: 0, task: 0, initiative: 0, coding: 0, unknown: 0 },
+  ],
+  top_generators: [],
+};
+
+test("аналитика памяти: вкладки, KPI, графики, бюджет USER.md, переходы и клавиатура", async ({ page }, testInfo) => {
+  const errors = [];
+  const consoleErrors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (msg) => {
+    if (msg.type() === "error") consoleErrors.push(msg.text());
+  });
+  await fixture(page);
+  await page.route("**/api/inspect/memory/stats?*", (route) => {
+    const scope = new URL(route.request().url()).searchParams.get("conversation_id");
+    return route.fulfill({ json: scope === "group:empty" ? statsEmpty : statsPersonal });
+  });
+
+  // Switch to Analytics via WAI-ARIA tab keyboard navigation and verify tab state.
+  const entriesTab = page.locator("#memory-tab-entries");
+  const analyticsTab = page.locator("#memory-tab-analytics");
+  await expect(entriesTab).toHaveAttribute("aria-selected", "true");
+  await expect(analyticsTab).toHaveAttribute("aria-keyshortcuts", "Alt+2");
+  await entriesTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(analyticsTab).toBeFocused();
+  await expect(analyticsTab).toHaveAttribute("aria-selected", "true");
+  await expect(page).toHaveURL(/tab=analytics/);
+  await expect(page.locator("#memory-analytics")).toHaveAttribute("aria-busy", "false");
+
+  // KPIs, daily SVG chart, USER.md truncation, kind breakdown, generators, consolidation.
+  await expect(page.locator(".kpi-card")).toHaveCount(4);
+  await expect(page.locator(".kpi-card").nth(0)).toContainText("12");
+  await expect(page.locator(".kpi-card").nth(1)).toContainText("66,7%");
+  await expect(page.locator(".kpi-card").nth(2)).toContainText("8\u00a0640 / 8\u00a0000");
+  await expect(page.locator(".kpi-card").nth(2)).toHaveClass(/kpi-budget-over/);
+  await expect(page.locator(".growth-chart .chart-day")).toHaveCount(5);
+  await expect(page.locator(".truncated-row")).toHaveCount(2);
+  await expect(page.locator(".generator-row")).toHaveCount(2);
+  await expect(page.locator(".consolidation-panel")).toBeVisible();
+
+  // Clicking a truncated USER.md item opens the existing Inspector entry detail drawer.
+  const firstTruncated = page.locator(".truncated-row").first();
+  await firstTruncated.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toContainText(entries[0].content);
+  await expect(page.locator("#close-drawer")).toBeFocused();
+  // Shortcuts must be ignored while the drawer is open.
+  await page.keyboard.press("Alt+1");
+  await expect(analyticsTab).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(firstTruncated).toBeFocused();
+
+  // Opening the consolidation operation log in the detail drawer + Escape focus return.
+  const logBtn = page.locator("#open-consolidation-log");
+  await logBtn.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toContainText("Объединены дубликаты");
+  await expect(page.getByRole("dialog")).toContainText("Устаревшее напоминание");
+  await page.keyboard.press("Escape");
+  await expect(logBtn).toBeFocused();
+
+  // Verify no XSS executed and no CSP/console errors occurred.
+  expect(await page.evaluate(() => window.XSS || window.GEN_XSS || window.LOG_XSS)).toBeUndefined();
+  expect(errors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+
+  // Verify keyboard-accessible daily data table exposes per-day trigger counts.
+  const chartTableSummary = page.locator(".chart-table-details > summary");
+  await chartTableSummary.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".chart-data-table")).toContainText("2026-10-22");
+  await page.keyboard.press("Space");
+  await expect(page.locator(".chart-table-details")).not.toHaveAttribute("open", "");
+
+  // Capture desktop & mobile screenshots, verifying zero overflow and legible SVG labels at 390px.
+  await page.screenshot({ path: testInfo.outputPath("memory-analytics-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const mobileLabelPx = await page.locator(".growth-chart .chart-axis-text").first().evaluate((el) => el.getBoundingClientRect().height);
+  expect(mobileLabelPx).toBeGreaterThanOrEqual(8);
+  await page.screenshot({ path: testInfo.outputPath("memory-analytics-mobile.png"), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  // Pressing Enter on a kind breakdown bar switches to Entries pre-filtered and moves focus to #memory-kind.
+  const factBar = page.locator('.kind-bar-row[data-filter-kind="fact"]');
+  await factBar.focus();
+  await page.keyboard.press("Enter");
+  await expect(entriesTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#memory-kind")).toHaveValue("fact");
+  await expect(page.locator("#memory-kind")).toBeFocused();
+  await expect(page.locator(".memory-row")).toHaveCount(1);
+  await expect(page.locator(".memory-row")).toContainText("Разрабатывает OpenAlbert");
+
+  // Alt+2 / Alt+1 shortcuts respect IME composition, repeat, and non-English layout.
+  for (const extra of [{ isComposing: true }, { repeat: true }, { keyCode: 229 }]) {
+    await page.locator("body").dispatchEvent("keydown", { key: "2", code: "Digit2", altKey: true, bubbles: true, ...extra });
+    await expect(entriesTab).toHaveAttribute("aria-selected", "true");
+  }
+  await page.locator("body").dispatchEvent("keydown", { key: "@", code: "Digit2", altKey: true, bubbles: true });
+  await expect(analyticsTab).toHaveAttribute("aria-selected", "true");
+
+  // Ctrl+K from Analytics switches to Entries and focuses #memory-search.
+  await page.locator("body").dispatchEvent("keydown", { key: "л", code: "KeyK", ctrlKey: true, bubbles: true });
+  await expect(entriesTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#memory-search")).toBeFocused();
+
+  // Alt+2 back to Analytics, switch to empty scope, verify clean empty state without consolidation card.
+  await page.locator("#memory-tab-analytics").click();
+  await page.locator("#memory-scope").selectOption("group:empty");
+  await expect(page.locator("#memory-analytics")).toContainText("В этом разговоре пока нет записей памяти");
+  await expect(page.locator(".consolidation-panel")).toHaveCount(0);
+});
+
+test("аналитика памяти: ошибки, повтор по Alt R и отбрасывание позднего ответа", async ({ page }) => {
+  await fixture(page);
+  let failOnce = true;
+  await page.route("**/api/inspect/memory/stats?*", (route) => {
+    if (failOnce) {
+      failOnce = false;
+      return route.fulfill({ status: 500, json: {} });
+    }
+    return route.fulfill({ json: statsPersonal });
+  });
+  await page.locator("#memory-tab-analytics").click();
+  await expect(page.locator("#memory-analytics-error")).toBeVisible();
+  await expect(page.locator("#refresh")).toBeEnabled();
+  await page.keyboard.press("Alt+r");
+  await expect(page.locator("#memory-analytics-error")).toBeHidden();
+  await expect(page.locator(".kpi-card")).toHaveCount(4);
+
+  // Late response from previous scope must not overwrite the newly selected scope.
+  let releaseOld, oldStarted = false;
+  const oldPending = new Promise((resolve) => { releaseOld = resolve; });
+  await page.route("**/api/inspect/memory/stats?*", async (route) => {
+    const scope = new URL(route.request().url()).searchParams.get("conversation_id");
+    if (scope === "group:8") {
+      oldStarted = true;
+      await oldPending;
+      return route.fulfill({ json: { ...statsPersonal, scope: "group:8", total_entries: 999 } });
+    }
+    return route.fulfill({ json: statsEmpty });
+  });
+  await page.locator("#memory-scope").selectOption("group:8");
+  await expect.poll(() => oldStarted).toBe(true);
+  await page.locator("#memory-scope").selectOption("group:empty");
+  await expect(page.locator("#memory-analytics")).toContainText("В этом разговоре пока нет записей памяти");
+  const late = page.waitForResponse((r) => new URL(r.url()).searchParams.get("conversation_id") === "group:8");
+  releaseOld();
+  await late;
+  await expect(page.locator("#memory-analytics")).toContainText("В этом разговоре пока нет записей памяти");
+  await expect(page.locator("#memory-analytics")).not.toContainText("999");
+});
+
+test("аналитика памяти: переключение разговора между вкладками, занятость и пустая установка", async ({ page }) => {
+  await fixture(page);
+  // S1: Delayed personal stats must not be cached under group:8 after switching tabs and scope.
+  let releasePersonalStats;
+  const personalPending = new Promise((resolve) => { releasePersonalStats = resolve; });
+  await page.route("**/api/inspect/memory/stats?*", async (route) => {
+    const scope = new URL(route.request().url()).searchParams.get("conversation_id");
+    if (scope === "personal:7") {
+      await personalPending;
+      return route.fulfill({ json: statsPersonal });
+    }
+    return route.fulfill({ json: { ...statsEmpty, scope } });
+  });
+  await page.locator("#memory-tab-analytics").click();
+  await page.locator("#memory-tab-entries").click();
+  await page.locator("#memory-scope").selectOption("group:8");
+  const personalResp = page.waitForResponse((r) => r.url().includes("/memory/stats") && r.url().includes("personal%3A7"));
+  releasePersonalStats();
+  await personalResp;
+  await page.locator("#memory-tab-analytics").click();
+  await expect(page.locator("#memory-analytics")).toContainText("В этом разговоре пока нет записей памяти");
+  await expect(page.locator(".consolidation-panel")).toHaveCount(0);
+
+  // S2 + S3: Pending Entries request invalidated by scope change in Analytics must not leak old rows/USER.md or leave #refresh disabled.
+  await page.locator("#memory-tab-entries").click();
+  await page.locator("#memory-scope").selectOption("personal:7");
+  await expect(page.locator("#memory-profile")).toBeVisible();
+  let releasePendingEntries;
+  const entriesPending = new Promise((resolve) => { releasePendingEntries = resolve; });
+  await page.route("**/api/inspect/memory?*", async (route) => {
+    const scope = new URL(route.request().url()).searchParams.get("conversation_id");
+    if (scope === "personal:7") {
+      await entriesPending;
+      return route.fulfill({ json: { entries: entries.slice(0, 2), total: 2, next_after: 0, profile: "# User\n\nPersonal" } });
+    }
+    return route.fulfill({ status: 500, json: {} });
+  });
+  await page.keyboard.press("Alt+r");
+  await expect(page.locator("#refresh")).toBeDisabled();
+  await page.locator("#memory-tab-analytics").click();
+  await page.locator("#memory-scope").selectOption("group:8");
+  await expect(page.locator("#memory-analytics")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator("#refresh")).toBeEnabled();
+  releasePendingEntries();
+  await page.locator("#memory-tab-entries").click();
+  await expect(page.locator("#memory-error")).toBeVisible();
+  await expect(page.locator("#memory-profile")).toBeHidden();
+  await expect(page.locator(".memory-row")).toHaveCount(0);
+
+  // S6: Empty installation opened directly on Analytics loads Entries cleanly on tab switch.
+  await page.unroute("**/api/inspect/**");
+  await page.goto("about:blank");
+  await page.route("**/api/inspect/**", (route) => {
+    const u = new URL(route.request().url());
+    if (u.pathname.endsWith("/soul")) return route.fulfill({ json: { soul: "# OpenAlbert" } });
+    if (u.pathname.endsWith("/conversations")) return route.fulfill({ json: { conversations: [] } });
+    if (u.pathname.endsWith("/sessions")) return route.fulfill({ json: { sessions: [], next_before: 0 } });
+    return route.fulfill({ json: {} });
+  });
+  await page.goto("/inspect/#/memory?tab=analytics");
+  await expect(page.locator("#memory-analytics")).toContainText("Разговоров пока нет");
+  await page.locator("#memory-tab-entries").click();
+  await expect(page.locator("#memory-list")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator("#memory-list")).toContainText("Разговоров пока нет");
+});
+
+test("аналитика памяти: закладка другого разговора, сброс счётчика вкладки и подписи длинной серии", async ({ page }) => {
+  await fixture(page);
+  // S2: Same-view hash navigation to group Analytics while personal Entries is pending must drop stale personal data.
+  let releasePersonalEntries, personalEntriesStarted = false;
+  const personalEntriesPending = new Promise((resolve) => { releasePersonalEntries = resolve; });
+  await page.route("**/api/inspect/memory?*", async (route) => {
+    const scope = new URL(route.request().url()).searchParams.get("conversation_id");
+    if (scope === "personal:7") {
+      personalEntriesStarted = true;
+      await personalEntriesPending;
+      return route.fulfill({ json: { entries: entries.slice(0, 2), total: 2, next_after: 0, profile: "# User\n\nPERSONAL_ONLY" } });
+    }
+    return route.fulfill({ json: { entries: [entries[3]], total: 1, next_after: 0, profile: "" } });
+  });
+  await page.route("**/api/inspect/memory/stats?*", (route) => {
+    const scope = new URL(route.request().url()).searchParams.get("conversation_id");
+    if (scope === "group:8") {
+      // S8: 83-day series to verify adjacent X-axis labels never overlap at 390px.
+      const base = new Date("2026-08-01T00:00:00Z");
+      const longSeries = Array.from({ length: 83 }, (_, i) => {
+        const d = new Date(base.getTime() + i * 86400000).toISOString().slice(0, 10);
+        return { date: d, total: i % 3 === 0 ? 2 : 0, message: i % 3 === 0 ? 1 : 0, task: i % 3 === 0 ? 1 : 0, initiative: 0, coding: 0, unknown: 0 };
+      });
+      return route.fulfill({ json: { ...statsPersonal, scope: "group:8", daily_growth: longSeries } });
+    }
+    return route.fulfill({ json: { ...statsEmpty, scope } });
+  });
+  await page.keyboard.press("Alt+r");
+  await expect.poll(() => personalEntriesStarted).toBe(true);
+  await page.evaluate(() => { location.hash = "#/memory?conversation_id=group:8&tab=analytics"; });
+  await expect(page.locator("#memory-scope")).toHaveValue("group:8");
+  const stalePersonalResp = page.waitForResponse((r) => r.url().includes("/api/inspect/memory?") && r.url().includes("personal%3A7"));
+  releasePersonalEntries();
+  await stalePersonalResp;
+  // Stale personal response must not populate the hidden Entries panel before switching tabs.
+  await expect(page.locator("#memory-profile pre")).toHaveText("");
+  await expect(page.locator("#memory-list")).not.toContainText("Предпочитает короткие ответы");
+  await page.locator("#memory-tab-entries").click();
+  await expect(page.locator("#memory-profile")).toBeHidden();
+  await expect(page.locator("#memory-list")).toContainText("Любит пончики");
+  await expect(page.locator("#memory-list")).not.toContainText("Предпочитает короткие ответы");
+
+  // S8: Verify 83-day series X-axis labels do not overlap at 390px viewport.
+  await page.locator("#memory-tab-analytics").click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const labelBoxes = await page.locator(".growth-chart .chart-day text.chart-axis-text").evaluateAll((nodes) =>
+    nodes.map((n) => {
+      const r = n.getBoundingClientRect();
+      return { left: r.left, right: r.right, height: r.height };
+    }),
+  );
+  expect(labelBoxes.length).toBeGreaterThanOrEqual(2);
+  for (let i = 0; i < labelBoxes.length; i++) {
+    expect(labelBoxes[i].height).toBeGreaterThanOrEqual(8);
+    if (i > 0) expect(labelBoxes[i - 1].right).toBeLessThan(labelBoxes[i].left);
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  // S14: Filtering Entries to a kind, switching to Analytics, then choosing an empty scope must clear the Entries badge.
+  await page.locator("#memory-tab-entries").click();
+  await page.locator("#memory-kind").selectOption("preference");
+  await expect(page.locator("#memory-tab-entries-count")).toHaveText("1");
+  await page.locator("#memory-tab-analytics").click();
+  await page.locator("#memory-scope").selectOption("group:empty");
+  await expect(page.locator("#memory-analytics")).toContainText("В этом разговоре пока нет записей памяти");
+  await expect(page.locator("#memory-tab-entries-count")).toHaveText("");
+});

@@ -51,7 +51,9 @@ func TestAnalysisDeduplicatesOnlineAndExtractedMemories(t *testing.T) {
 		t.Fatalf("duplicates retained %#v %v", entries, err)
 	}
 	read, _ := k.Read(ctx, conv.ID, original.ID)
-	if read != original {
+	want := original
+	want.CreatedAt = original.UpdatedAt
+	if read != want {
 		t.Fatal("existing online memory rewritten")
 	}
 }

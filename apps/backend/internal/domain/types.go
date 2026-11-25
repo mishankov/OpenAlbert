@@ -303,6 +303,8 @@ type MemoryEntry struct {
 	SubjectUserID   int64     `json:"subject_user_id,omitempty"`
 	SourceMessageID string    `json:"source_message_id,omitempty"`
 	Evidence        string    `json:"evidence,omitempty"`
+	OriginSource    string    `json:"origin_source,omitempty"`
+	CreatedAt       time.Time `json:"created_at,omitzero"`
 	ID              string    `json:"id"`
 	Scope           string    `json:"scope"`
 	Content         string    `json:"content"`

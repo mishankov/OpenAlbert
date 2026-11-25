@@ -3,9 +3,12 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/inspector"
 )
@@ -26,12 +29,14 @@ func (s *Store) SaveTrace(ctx context.Context, tr domain.Trace) error {
 	return nil
 }
 
+const sessionTriggerSQL = `COALESCE((SELECT tr.data->>'trigger' FROM openalbert_traces tr WHERE tr.session_id=s.id AND tr.data->>'trigger' IN ('message','task','initiative','coding') ORDER BY tr.started_at LIMIT 1),
+ CASE WHEN s.conversation_id LIKE 'coding:%' THEN 'coding' ELSE COALESCE((SELECT CASE WHEN COALESCE(cp.data->'Input'->>'TaskID','')<>'' THEN 'task' WHEN cp.data->'Input'->>'Initiative'='true' THEN 'initiative' ELSE 'message' END FROM openalbert_checkpoints cp WHERE cp.id LIKE 'turn-done/%' AND cp.data->'Input'->>'SessionID'=s.id LIMIT 1),'message') END)`
+
 const sessionColumns = `s.seq,s.data,COALESCE(c.data,'{}'),s.analyzed,
  (SELECT count(*) FROM openalbert_messages m WHERE m.session_id=s.id),
  (SELECT COALESCE(sum(jsonb_array_length(COALESCE(m.data->'tool_calls','[]'))),0) FROM openalbert_messages m WHERE m.session_id=s.id),
  (SELECT count(*) FROM openalbert_traces tr WHERE tr.session_id=s.id),
- COALESCE((SELECT tr.data->>'trigger' FROM openalbert_traces tr WHERE tr.session_id=s.id AND tr.data->>'trigger' IN ('message','task','initiative','coding') ORDER BY tr.started_at LIMIT 1),
- CASE WHEN s.conversation_id LIKE 'coding:%' THEN 'coding' ELSE COALESCE((SELECT CASE WHEN COALESCE(cp.data->'Input'->>'TaskID','')<>'' THEN 'task' WHEN cp.data->'Input'->>'Initiative'='true' THEN 'initiative' ELSE 'message' END FROM openalbert_checkpoints cp WHERE cp.id LIKE 'turn-done/%' AND cp.data->'Input'->>'SessionID'=s.id LIMIT 1),'message') END),
+ ` + sessionTriggerSQL + `,
  COALESCE((SELECT left(m.data->>'content',180) FROM openalbert_messages m WHERE m.session_id=s.id AND m.data->>'role'='user' ORDER BY m.seq LIMIT 1),left(s.data->>'summary',180),'')`
 
 type scanner interface{ Scan(...any) error }
@@ -58,8 +63,7 @@ func (s *Store) InspectSessions(ctx context.Context, f inspector.Filter) ([]insp
  WHERE ($1::bigint=0 OR s.seq<$1) AND ($2='' OR s.data->>'status'=$2) AND ($3='' OR s.conversation_id=$3)
  AND ($4='' OR strpos(lower(s.id||' '||s.conversation_id||' '||COALESCE(c.data->>'title','')||' '||COALESCE(s.data->>'summary','')),lower($4))>0
  OR EXISTS(SELECT 1 FROM openalbert_messages m WHERE m.session_id=s.id AND strpos(lower(m.data::text),lower($4))>0))
- AND ($5='' OR COALESCE((SELECT tr.data->>'trigger' FROM openalbert_traces tr WHERE tr.session_id=s.id AND tr.data->>'trigger' IN ('message','task','initiative','coding') ORDER BY tr.started_at LIMIT 1),
- CASE WHEN s.conversation_id LIKE 'coding:%' THEN 'coding' ELSE COALESCE((SELECT CASE WHEN COALESCE(cp.data->'Input'->>'TaskID','')<>'' THEN 'task' WHEN cp.data->'Input'->>'Initiative'='true' THEN 'initiative' ELSE 'message' END FROM openalbert_checkpoints cp WHERE cp.id LIKE 'turn-done/%' AND cp.data->'Input'->>'SessionID'=s.id LIMIT 1),'message') END)=$5)
+ AND ($5='' OR `+sessionTriggerSQL+`=$5)
  ORDER BY s.seq DESC LIMIT $6`, f.Before, f.Status, f.Conversation, f.Query, f.Trigger, f.Limit)
 	if err != nil {
 		return nil, err
@@ -221,4 +225,77 @@ func (s *Store) InspectTrace(ctx context.Context, session, id string) (tr domain
 	_, _ = fmt.Sscan(parts[2], &step)
 	tr = domain.Trace{ID: id, SessionID: session, TurnID: parts[1], Kind: "model", Step: step, Status: "completed", Historical: true, Output: raw}
 	return
+}
+
+var _ inspector.MemoryMetadataStore = (*Store)(nil)
+
+// InspectSessionOrigins resolves session triggers, creation timestamps, and
+// originating task metadata for a scope's memory entries in a single batched
+// query, including owner-matched coding sessions for personal scopes while
+// enforcing scope isolation across conversations and owners.
+func (s *Store) InspectSessionOrigins(ctx context.Context, scope string, sessionIDs []string) (map[string]inspector.SessionOrigin, error) {
+	out := make(map[string]inspector.SessionOrigin, len(sessionIDs))
+	if len(sessionIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `WITH resolved AS (
+ SELECT s.id AS session_id, s.conversation_id, `+sessionTriggerSQL+` AS trigger,
+  COALESCE(
+   (SELECT NULLIF(tr.data->>'task_id','') FROM openalbert_traces tr WHERE tr.session_id=s.id AND COALESCE(tr.data->>'task_id','')<>'' ORDER BY tr.started_at LIMIT 1),
+   (SELECT NULLIF(cp.data->'Input'->>'TaskID','') FROM openalbert_checkpoints cp WHERE cp.id LIKE 'turn-done/%' AND cp.data->'Input'->>'SessionID'=s.id AND COALESCE(cp.data->'Input'->>'TaskID','')<>'' LIMIT 1),
+   ''
+  ) AS task_id,
+  CASE
+   WHEN COALESCE(s.data->>'created_at','') ~ '^\d{4}-\d{2}-\d{2}T' THEN (s.data->>'created_at')::timestamptz
+   ELSE NULL
+  END AS created_at
+ FROM openalbert_sessions s
+ LEFT JOIN openalbert_conversations c ON c.id=s.conversation_id
+ WHERE s.id = ANY($2::text[])
+  AND (
+   s.conversation_id=$1
+   OR ($1 LIKE 'personal:%' AND s.conversation_id LIKE 'coding:%' AND 'personal:'||COALESCE(c.data->>'owner_id','')=$1)
+  )
+)
+SELECT r.session_id, r.trigger, r.task_id, COALESCE(t.data->>'title','') AS task_title, r.created_at
+FROM resolved r
+LEFT JOIN openalbert_tasks t ON t.conversation_id=r.conversation_id AND t.id=r.task_id AND r.task_id<>''`, scope, sessionIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var o inspector.SessionOrigin
+		var createdAt *time.Time
+		if err := rows.Scan(&o.SessionID, &o.Trigger, &o.TaskID, &o.TaskTitle, &createdAt); err != nil {
+			return nil, err
+		}
+		if createdAt != nil {
+			o.CreatedAt = createdAt.UTC()
+		}
+		out[o.SessionID] = o
+	}
+	return out, rows.Err()
+}
+
+// InspectLatestConsolidation returns the latest memory consolidation checkpoint
+// recorded for the given conversation scope, if one exists.
+func (s *Store) InspectLatestConsolidation(ctx context.Context, scope string) (string, json.RawMessage, bool, error) {
+	var id string
+	var raw json.RawMessage
+	err := s.pool.QueryRow(ctx, `SELECT id, data FROM openalbert_checkpoints
+ WHERE id LIKE 'memory-consolidation/%'
+  AND data->>'scope'=$1
+ ORDER BY CASE
+   WHEN COALESCE(data->>'completed_at','') ~ '^\d{4}-\d{2}-\d{2}T' THEN (data->>'completed_at')::timestamptz
+   ELSE NULL
+  END DESC NULLS LAST, id DESC
+ LIMIT 1`, scope).Scan(&id, &raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil, false, nil
+		}
+		return "", nil, false, err
+	}
+	return id, raw, true, nil
 }

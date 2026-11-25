@@ -81,6 +81,7 @@ const state = {
   tab: "timeline",
   showOtherTools: false,
   busy: false,
+  refreshToken: 0,
   listToken: 0,
   detailToken: 0,
   routeTrace: "",
@@ -93,14 +94,22 @@ const state = {
   fileToken: 0,
   fileBusy: false,
   memoryScope: "",
+  memoryTab: "entries",
+  memoryEntriesScope: null,
+  memoryEntriesDirty: false,
   memoryQuery: "",
   memoryKind: "",
   memories: [],
   memoryNext: 0,
   memoryToken: 0,
   memoryBusy: false,
+  memoryStats: null,
+  memoryStatsScope: null,
+  memoryStatsToken: 0,
+  memoryStatsBusy: false,
   soulBusy: false,
   soulToken: 0,
+  drawerConsolidation: false,
 };
 const main = $("#main");
 const logsURL = new URL(location.href);
@@ -138,9 +147,11 @@ function sessionName(s) {
 }
 function setBusy(value) {
   state.busy = value;
-  $("#refresh").disabled = value || state.fileBusy || state.memoryBusy || state.soulBusy;
-  $("#refresh").setAttribute("aria-busy", String(value || state.fileBusy || state.memoryBusy || state.soulBusy));
-  $("#nav-logs").setAttribute("aria-disabled", String(value || state.fileBusy || state.memoryBusy || state.soulBusy));
+  const anyBusy =
+    value || state.fileBusy || state.memoryBusy || state.memoryStatsBusy || state.soulBusy;
+  $("#refresh").disabled = anyBusy;
+  $("#refresh").setAttribute("aria-busy", String(anyBusy));
+  $("#nav-logs").setAttribute("aria-disabled", String(anyBusy));
 }
 function listRender() {
   const focusedHref = $("#sessions").contains(document.activeElement)
@@ -528,22 +539,34 @@ async function refresh() {
     state.busy ||
     state.fileBusy ||
     state.memoryBusy ||
+    state.memoryStatsBusy ||
     state.soulBusy ||
     !$("#drawer").classList.contains("hidden")
   )
     return;
+  const token = ++state.refreshToken;
   setBusy(true);
   try {
-    if (state.view === "memory") await Promise.all([loadMemory(), loadSoul()]);
-    else if (state.view === "files") await loadFiles();
+    if (state.view === "memory") {
+      if (state.memoryTab === "analytics") {
+        state.memoryEntriesDirty = true;
+        await Promise.all([loadMemoryStats(true), loadSoul()]);
+      } else {
+        ++state.memoryStatsToken;
+        state.memoryStatsBusy = false;
+        state.memoryStats = null;
+        state.memoryStatsScope = null;
+        await Promise.all([loadMemory(), loadSoul()]);
+      }
+    } else if (state.view === "files") await loadFiles();
     else
       await Promise.all([
         loadList(false, true),
         state.id ? loadDetail(state.id, true) : Promise.resolve(),
       ]);
-    announce("Данные обновлены");
+    if (token === state.refreshToken) announce("Данные обновлены");
   } finally {
-    setBusy(false);
+    if (token === state.refreshToken) setBusy(false);
   }
 }
 function route() {
@@ -557,11 +580,13 @@ function route() {
   if (changedView) {
     clearTimeout(fileDebounce);
     clearTimeout(memoryDebounce);
+    ++state.refreshToken;
     ++state.fileToken;
     ++state.memoryToken;
+    ++state.memoryStatsToken;
     ++state.soulToken;
-    state.fileBusy = state.memoryBusy = state.soulBusy = false;
-    setBusy(state.busy);
+    state.fileBusy = state.memoryBusy = state.memoryStatsBusy = state.soulBusy = false;
+    setBusy(false);
   }
   for (const name of ["sessions", "memory", "files"]) {
     const link = $("#nav-" + name);
@@ -569,15 +594,24 @@ function route() {
     else link.removeAttribute("aria-current");
   }
   if (view === "memory") {
+    clearTimeout(memoryDebounce);
     ++state.detailToken;
+    ++state.refreshToken;
+    ++state.memoryToken;
+    ++state.memoryStatsToken;
+    state.memoryBusy = state.memoryStatsBusy = false;
+    setBusy(false);
     closeDrawer(false);
     state.routeTrace = "";
-    const requested = new URLSearchParams(location.hash.split("?")[1] || "").get("conversation_id");
+    const params = new URLSearchParams(location.hash.split("?")[1] || "");
+    const requested = params.get("conversation_id");
     if (requested) state.memoryScope = requested;
     else if (!state.memoryScope) state.memoryScope = state.data?.session.conversation_id || "";
+    state.memoryTab = params.get("tab") === "analytics" ? "analytics" : "entries";
     memoryShell();
     loadSoul();
-    loadMemory();
+    if (state.memoryTab === "analytics") loadMemoryStats(true);
+    else loadMemory();
     return;
   }
   if (view === "files") {
@@ -630,11 +664,135 @@ const memoryKinds = {
   episode: "Эпизод",
   hypothesis: "Предположение",
 };
+const memoryTabs = ["entries", "analytics"];
+const triggerOrder = ["message", "task", "initiative", "coding", "unknown"];
+const triggerLabels = {
+  message: "Сообщение",
+  task: "Задача",
+  initiative: "Инициатива",
+  coding: "Кодинг",
+  unknown: "Неизвестно",
+};
+const triggerShort = {
+  message: "С",
+  task: "З",
+  initiative: "И",
+  coding: "К",
+  unknown: "?",
+};
+const isMac = navigator.platform?.includes("Mac");
+
+function memoryHash(scope = state.memoryScope, tab = state.memoryTab) {
+  const params = new URLSearchParams();
+  if (scope) params.set("conversation_id", scope);
+  if (tab === "analytics") params.set("tab", "analytics");
+  const qs = params.toString();
+  return qs ? "#/memory?" + qs : "#/memory";
+}
+
+function syncMemoryTabUI() {
+  if (state.view !== "memory") return;
+  const isEntries = state.memoryTab === "entries";
+  const entriesTab = $("#memory-tab-entries");
+  const analyticsTab = $("#memory-tab-analytics");
+  if (!entriesTab || !analyticsTab) return;
+  entriesTab.setAttribute("aria-selected", String(isEntries));
+  entriesTab.tabIndex = isEntries ? 0 : -1;
+  analyticsTab.setAttribute("aria-selected", String(!isEntries));
+  analyticsTab.tabIndex = isEntries ? -1 : 0;
+  $("#memory-panel-entries").classList.toggle("hidden", !isEntries);
+  $("#memory-panel-analytics").classList.toggle("hidden", isEntries);
+  for (const el of main.querySelectorAll(".memory-entries-only")) {
+    el.classList.toggle("hidden", !isEntries);
+  }
+  $(".memory-filters")?.classList.toggle("analytics-mode", !isEntries);
+  const subtitle = $("#memory-subtitle");
+  if (subtitle) {
+    subtitle.textContent = isEntries
+      ? "Текущие записи · сначала обновлённые"
+      : "Рост памяти, бюджет USER.md и источники";
+  }
+  document.title = isEntries
+    ? "Память · OpenAlbert Inspector"
+    : "Аналитика памяти · OpenAlbert Inspector";
+}
+
+function resetMemoryEntriesView() {
+  state.memories = [];
+  state.memoryNext = 0;
+  const list = $("#memory-list");
+  if (list) {
+    list.setAttribute("aria-busy", "true");
+    list.innerHTML = '<div class="loading-line" role="status">Загружаем память…</div>';
+  }
+  if ($("#memory-count")) $("#memory-count").textContent = "";
+  if ($("#memory-tab-entries-count")) $("#memory-tab-entries-count").textContent = "";
+  $("#more-memory")?.classList.add("hidden");
+  $("#memory-profile")?.classList.add("hidden");
+  if ($("#memory-profile pre")) $("#memory-profile pre").textContent = "";
+  const group = $("#memory-group");
+  if (group && group.dataset.scope !== state.memoryScope) {
+    group.classList.add("hidden");
+    if ($("#memory-group pre")) $("#memory-group pre").textContent = "";
+    $("#group-error")?.classList.add("hidden");
+  }
+  $("#memory-error")?.classList.add("hidden");
+}
+
+function setMemoryTab(tab, { focusTab = false, forceReload = false } = {}) {
+  if (state.view !== "memory" || !memoryTabs.includes(tab)) return;
+  const changed = state.memoryTab !== tab;
+  state.memoryTab = tab;
+  history.replaceState(null, "", memoryHash(state.memoryScope, state.memoryTab));
+  const needsEntriesReload =
+    tab === "entries" &&
+    (forceReload ||
+      state.memoryEntriesDirty ||
+      state.memoryEntriesScope !== state.memoryScope);
+  if (needsEntriesReload) resetMemoryEntriesView();
+  syncMemoryTabUI();
+  if (focusTab) $(`#memory-tab-${tab}`)?.focus();
+  if (tab === "analytics") {
+    if (forceReload || state.memoryStatsScope !== state.memoryScope || !state.memoryStats) {
+      loadMemoryStats(false);
+    }
+  } else if (needsEntriesReload) {
+    loadMemory();
+  }
+  if (changed) {
+    announce(tab === "analytics" ? "Открыта вкладка «Аналитика»" : "Открыта вкладка «Записи»");
+  }
+}
+
+function populateMemoryScopes(conversations) {
+  if (!state.memoryScope) state.memoryScope = conversations[0]?.id || "";
+  const choices = [...conversations];
+  // Keep a bookmarked scope accessible even if its conversation metadata is gone.
+  if (state.memoryScope && !choices.some((c) => c.id === state.memoryScope))
+    choices.push({ id: state.memoryScope, title: "Разговор без метаданных" });
+  $("#memory-scope").innerHTML = choices.length
+    ? choices
+        .map(
+          (c) =>
+            `<option value="${esc(c.id)}" ${c.id === state.memoryScope ? "selected" : ""}>${esc(c.title || (c.private ? "Личный разговор" : "Групповой разговор"))} · ${esc(c.id)}</option>`,
+        )
+        .join("")
+    : '<option value="">Разговоров пока нет</option>';
+  $("#memory-scope").disabled = !choices.length;
+  return conversations.find((c) => c.id === state.memoryScope);
+}
+
 function memoryShell() {
   state.memories = [];
   state.memoryNext = 0;
-  document.title = "Память · OpenAlbert Inspector";
-  main.innerHTML = `<div class="session-toolbar memory-toolbar"><div class="session-heading"><h2>Память</h2><span class="muted">Текущие записи · сначала обновлённые</span></div><div class="memory-filters"><label>Разговор<select id="memory-scope"><option value="">Загружаем разговоры…</option></select></label><label>Поиск<div class="search-wrap"><input id="memory-search" type="search" placeholder="Текст, ID, источник или участник…" autocomplete="off" value="${esc(state.memoryQuery)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></label><label>Тип<select id="memory-kind"><option value="">Все типы</option>${Object.entries(memoryKinds).map(([key, title]) => `<option value="${key}" ${state.memoryKind === key ? "selected" : ""}>${title}</option>`).join("")}</select></label></div><p class="memory-hint">Все слова запроса должны встречаться в одной записи. Поиск без учёта регистра.</p></div><div id="memory-error" class="error hidden" role="alert"></div><details id="memory-soul" class="analysis-row"><summary title="Раскрыть или свернуть SOUL.md · Enter" aria-keyshortcuts="Enter">Личность SOUL.md <span class="muted">Имя, характер и правила общения OpenAlbert · общие для всех разговоров</span></summary><div class="run-body" aria-busy="true"><div id="soul-error" class="error hidden" role="alert"></div><pre class="prose" role="status">Загружаем SOUL.md…</pre></div></details><details id="memory-group" class="analysis-row hidden"><summary title="Раскрыть или свернуть GROUP.md · Enter / Пробел" aria-keyshortcuts="Enter Space">Правила группы GROUP.md <span class="muted">Общие для всех топиков выбранной группы</span></summary><div class="run-body" aria-busy="false"><div id="group-error" class="error hidden" role="alert"></div><pre class="prose" role="status"></pre></div></details><details id="memory-profile" class="analysis-row hidden"><summary>Профиль USER.md <span class="muted">Контекст новых сессий этого разговора</span></summary><div class="run-body"><pre class="prose"></pre></div></details><div id="memory-list" aria-busy="true"><div class="loading-line" role="status">Загружаем память…</div></div><div class="pagination"><span id="memory-count" role="status"></span><button id="more-memory" class="button hidden" title="Загрузить ещё записи · Enter" aria-keyshortcuts="Enter">Ещё записи</button></div>`;
+  state.memoryStats = null;
+  state.memoryStatsScope = null;
+  state.memoryEntriesScope = null;
+  state.memoryEntriesDirty = false;
+  const altPrefix = isMac ? "⌥" : "Alt";
+  const altTitle = isMac ? "Alt" : "Alt";
+  main.innerHTML = `<div class="session-toolbar memory-toolbar"><div class="session-heading"><h2>Память</h2><span id="memory-subtitle" class="muted">Текущие записи · сначала обновлённые</span></div><div class="memory-filters"><label>Разговор<select id="memory-scope"><option value="">Загружаем разговоры…</option></select></label><label class="memory-entries-only">Поиск<div class="search-wrap"><input id="memory-search" type="search" placeholder="Текст, ID, источник или участник…" autocomplete="off" value="${esc(state.memoryQuery)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${isMac ? "⌘ K" : "Ctrl K"}</kbd></div></label><label class="memory-entries-only">Тип<select id="memory-kind"><option value="">Все типы</option>${Object.entries(memoryKinds).map(([key, title]) => `<option value="${key}" ${state.memoryKind === key ? "selected" : ""}>${title}</option>`).join("")}</select></label></div><p class="memory-hint memory-entries-only">Все слова запроса должны встречаться в одной записи. Поиск без учёта регистра.</p><nav class="tabs" role="tablist" aria-label="Разделы памяти"><button class="tab" id="memory-tab-entries" role="tab" data-memory-tab="entries" aria-controls="memory-panel-entries" aria-selected="true" tabindex="0" title="Список записей (${altTitle}+1)" aria-keyshortcuts="Alt+1">Записи <small id="memory-tab-entries-count"></small><kbd>${altPrefix} 1</kbd></button><button class="tab" id="memory-tab-analytics" role="tab" data-memory-tab="analytics" aria-controls="memory-panel-analytics" aria-selected="false" tabindex="-1" title="Аналитика памяти (${altTitle}+2)" aria-keyshortcuts="Alt+2">Аналитика <kbd>${altPrefix} 2</kbd></button></nav></div><section id="memory-panel-entries" role="tabpanel" aria-labelledby="memory-tab-entries"><div id="memory-error" class="error hidden" role="alert"></div><details id="memory-soul" class="analysis-row"><summary title="Раскрыть или свернуть SOUL.md · Enter" aria-keyshortcuts="Enter">Личность SOUL.md <span class="muted">Имя, характер и правила общения OpenAlbert · общие для всех разговоров</span></summary><div class="run-body" aria-busy="true"><div id="soul-error" class="error hidden" role="alert"></div><pre class="prose" role="status">Загружаем SOUL.md…</pre></div></details><details id="memory-group" class="analysis-row hidden"><summary title="Раскрыть или свернуть GROUP.md · Enter / Пробел" aria-keyshortcuts="Enter Space">Правила группы GROUP.md <span class="muted">Общие для всех топиков выбранной группы</span></summary><div class="run-body" aria-busy="false"><div id="group-error" class="error hidden" role="alert"></div><pre class="prose" role="status"></pre></div></details><details id="memory-profile" class="analysis-row hidden"><summary>Профиль USER.md <span class="muted">Контекст новых сессий этого разговора</span></summary><div class="run-body"><pre class="prose"></pre></div></details><div id="memory-list" aria-busy="true"><div class="loading-line" role="status">Загружаем память…</div></div><div class="pagination"><span id="memory-count" role="status"></span><button id="more-memory" class="button hidden" title="Загрузить ещё записи · Enter" aria-keyshortcuts="Enter">Ещё записи</button></div></section><section id="memory-panel-analytics" class="hidden" role="tabpanel" aria-labelledby="memory-tab-analytics"><div id="memory-analytics-error" class="error hidden" role="alert"></div><div id="memory-analytics" aria-busy="false"><div class="loading-line" role="status">Загружаем аналитику памяти…</div></div></section>`;
+  syncMemoryTabUI();
 }
 async function loadSoul() {
   if (state.view !== "memory") return;
@@ -691,21 +849,9 @@ async function loadGroupRules(scope, isGroup, token) {
 function scheduleMemory() {
   clearTimeout(memoryDebounce);
   ++state.memoryToken;
-  state.memories = [];
-  state.memoryNext = 0;
   state.memoryBusy = true;
   setBusy(state.busy);
-  $("#memory-list").setAttribute("aria-busy", "true");
-  $("#memory-list").innerHTML = '<div class="loading-line" role="status">Загружаем память…</div>';
-  $("#memory-count").textContent = "";
-  $("#more-memory").classList.add("hidden");
-  $("#memory-profile").classList.add("hidden");
-  if ($("#memory-group").dataset.scope !== state.memoryScope) {
-    $("#memory-group").classList.add("hidden");
-    $("#memory-group pre").textContent = "";
-    $("#group-error").classList.add("hidden");
-  }
-  $("#memory-error").classList.add("hidden");
+  resetMemoryEntriesView();
   memoryDebounce = setTimeout(() => loadMemory(), 250);
 }
 async function loadMemory(more = false) {
@@ -723,30 +869,29 @@ async function loadMemory(more = false) {
     if (!more) {
       const { conversations } = await api("memory/conversations");
       if (token !== state.memoryToken || state.view !== "memory") return;
-      if (!state.memoryScope) state.memoryScope = conversations[0]?.id || "";
-      const choices = [...conversations];
-      // Keep a bookmarked scope accessible even if its conversation metadata is gone.
-      if (state.memoryScope && !choices.some((c) => c.id === state.memoryScope))
-        choices.push({ id: state.memoryScope, title: "Разговор без метаданных" });
-      $("#memory-scope").innerHTML = choices.length
-        ? choices.map((c) => `<option value="${esc(c.id)}" ${c.id === state.memoryScope ? "selected" : ""}>${esc(c.title || (c.private ? "Личный разговор" : "Групповой разговор"))} · ${esc(c.id)}</option>`).join("")
-        : '<option value="">Разговоров пока нет</option>';
-      $("#memory-scope").disabled = !choices.length;
-      const selected = conversations.find((c) => c.id === state.memoryScope);
+      const selected = populateMemoryScopes(conversations);
       groupLoad = loadGroupRules(state.memoryScope, selected && !selected.private && selected.chat_id < 0, token);
     }
-    const result = state.memoryScope
+    const requestedScope = state.memoryScope;
+    const result = requestedScope
       ? await api("memory?" + new URLSearchParams({
-          conversation_id: state.memoryScope,
+          conversation_id: requestedScope,
           q: state.memoryQuery,
           kind: state.memoryKind,
           after: more ? state.memoryNext : 0,
         }))
       : { entries: [], total: 0, next_after: 0, profile: "" };
-    if (token !== state.memoryToken || state.view !== "memory") return;
+    if (
+      token !== state.memoryToken ||
+      state.view !== "memory" ||
+      requestedScope !== state.memoryScope
+    )
+      return;
     const focusedID = document.activeElement?.dataset.memory;
     state.memories = more ? [...state.memories, ...result.entries] : result.entries;
     state.memoryNext = result.next_after || 0;
+    state.memoryEntriesScope = requestedScope;
+    state.memoryEntriesDirty = false;
     $("#memory-profile").classList.toggle("hidden", !result.profile);
     $("#memory-profile pre").textContent = result.profile || "";
     $("#memory-list").innerHTML = state.memories.length
@@ -755,6 +900,8 @@ async function loadMemory(more = false) {
     if (focusedID)
       [...main.querySelectorAll("[data-memory]")].find((el) => el.dataset.memory === focusedID)?.focus({ preventScroll: true });
     $("#memory-count").textContent = `Записи: ${state.memories.length} из ${result.total}`;
+    const tabCountEl = $("#memory-tab-entries-count");
+    if (tabCountEl) tabCountEl.textContent = result.total ? String(result.total) : "";
     $("#more-memory").classList.toggle("hidden", !state.memoryNext);
     $("#memory-list").setAttribute("aria-busy", "false");
   } catch (error) {
@@ -775,9 +922,384 @@ async function loadMemory(more = false) {
     }
   }
 }
+async function loadMemoryStats(withConversations = false) {
+  if (state.view !== "memory") return;
+  const token = ++state.memoryStatsToken;
+  state.memoryStatsBusy = true;
+  setBusy(state.busy);
+  const container = $("#memory-analytics");
+  const errBox = $("#memory-analytics-error");
+  if (!container || !errBox) return;
+  errBox.classList.add("hidden");
+  container.setAttribute("aria-busy", "true");
+  if (!state.memoryStats || state.memoryStatsScope !== state.memoryScope) {
+    container.innerHTML = '<div class="loading-line" role="status">Загружаем аналитику памяти…</div>';
+  }
+  try {
+    if (withConversations || $("#memory-scope")?.options.length <= 1) {
+      const { conversations } = await api("memory/conversations");
+      if (token !== state.memoryStatsToken || state.view !== "memory") return;
+      populateMemoryScopes(conversations);
+    }
+    if (!state.memoryScope) {
+      state.memoryStats = null;
+      state.memoryStatsScope = "";
+      container.innerHTML =
+        '<div class="empty-panel">Разговоров пока нет. Аналитика памяти появится после общения с OpenAlbert.</div>';
+      return;
+    }
+    const requestedScope = state.memoryScope;
+    const stats = await api(
+      "memory/stats?" + new URLSearchParams({ conversation_id: requestedScope }),
+    );
+    if (
+      token !== state.memoryStatsToken ||
+      state.view !== "memory" ||
+      requestedScope !== state.memoryScope
+    )
+      return;
+    state.memoryStats = stats;
+    state.memoryStatsScope = requestedScope;
+    const tabCountEl = $("#memory-tab-entries-count");
+    if (tabCountEl) {
+      tabCountEl.textContent =
+        !state.memoryQuery && !state.memoryKind && stats.total_entries
+          ? String(stats.total_entries)
+          : "";
+    }
+    renderMemoryAnalytics(stats);
+  } catch (error) {
+    if (token !== state.memoryStatsToken || state.view !== "memory") return;
+    errBox.textContent = error.message;
+    errBox.classList.remove("hidden");
+    if (!state.memoryStats || state.memoryStatsScope !== state.memoryScope) {
+      container.innerHTML =
+        '<div class="empty-panel">Не удалось загрузить аналитику памяти. Нажмите «Обновить» (Alt+R).</div>';
+    }
+  } finally {
+    if (token === state.memoryStatsToken && state.view === "memory") {
+      state.memoryStatsBusy = false;
+      setBusy(state.busy);
+      container.setAttribute("aria-busy", "false");
+    }
+  }
+}
+
+const fmtNum = (n) => Number(n || 0).toLocaleString("ru-RU");
+const fmtPct = (n) =>
+  Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigits: 1 });
+const fmtDayShort = (iso) => {
+  const parts = String(iso || "").split("-");
+  return parts.length === 3 ? `${parts[2]}.${parts[1]}` : iso;
+};
+const fmtSigned = (n) => (n > 0 ? `+${fmtNum(n)}` : n < 0 ? `−${fmtNum(Math.abs(n))}` : "0");
+
+function activeTriggers(counts) {
+  return triggerOrder.filter(
+    (key) => key === "message" || key === "task" || key === "initiative" || (counts?.[key] || 0) > 0,
+  );
+}
+
+function renderDailyGrowthChart(stats) {
+  const series = stats.daily_growth || [];
+  const legendKeys = activeTriggers(stats.triggers);
+  const legend = `<div class="analytics-legend" aria-label="Легенда источников">${legendKeys
+    .map(
+      (key) =>
+        `<span class="legend-item"><svg class="legend-swatch" viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" class="bar-${key}"></rect></svg>${esc(triggerLabels[key])}</span>`,
+    )
+    .join("")}</div>`;
+  if (!series.length) {
+    return `<section class="analytics-panel"><div class="analytics-panel-header"><h3>Динамика по дням</h3>${legend}</div><p class="analytics-empty">Нет записей с сохранённой датой создания.</p></section>`;
+  }
+  const width = 960,
+    height = 210,
+    padLeft = 38,
+    padRight = 14,
+    padTop = 14,
+    padBottom = 28;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+  const maxVal = Math.max(1, ...series.map((d) => d.total || 0));
+  const yTicks = [0, Math.ceil(maxVal / 2), maxVal];
+  const uniqueTicks = [...new Set(yTicks)];
+  const slot = plotW / series.length;
+  const barW = Math.max(4, Math.min(34, slot * 0.62));
+  const labelStep = Math.max(1, Math.ceil(series.length / 10));
+
+  const gridMarkup = uniqueTicks
+    .map((tick) => {
+      const y = padTop + plotH - (tick / maxVal) * plotH;
+      return `<line x1="${padLeft}" y1="${y.toFixed(1)}" x2="${width - padRight}" y2="${y.toFixed(1)}" class="chart-grid"></line><text x="${padLeft - 6}" y="${(y + 4).toFixed(1)}" text-anchor="end" class="chart-axis-text">${tick}</text>`;
+    })
+    .join("");
+
+  const barsMarkup = series
+    .map((day, idx) => {
+      const cx = padLeft + slot * idx + slot / 2;
+      const x = cx - barW / 2;
+      let cursorY = padTop + plotH;
+      const tipParts = legendKeys
+        .filter((k) => (day[k] || 0) > 0)
+        .map((k) => `${triggerLabels[k]}: ${day[k]}`);
+      const tip = `${day.date} — всего ${day.total}${tipParts.length ? ` (${tipParts.join(", ")})` : ""}`;
+      const rects = triggerOrder
+        .map((key) => {
+          const val = day[key] || 0;
+          if (!val) return "";
+          const h = Math.max(1, (val / maxVal) * plotH);
+          cursorY -= h;
+          return `<rect x="${x.toFixed(1)}" y="${cursorY.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" class="bar-${key}"><title>${esc(tip)}</title></rect>`;
+        })
+        .join("");
+      const lastIdx = series.length - 1;
+      const showLabel =
+        idx === 0 ||
+        idx === lastIdx ||
+        (idx % labelStep === 0 && lastIdx - idx >= Math.ceil(labelStep * 0.6));
+      const xLabel = showLabel
+        ? `<text x="${cx.toFixed(1)}" y="${height - 8}" text-anchor="middle" class="chart-axis-text">${esc(fmtDayShort(day.date))}</text>`
+        : "";
+      return `<g class="chart-day" data-date="${esc(day.date)}">${rects}${xLabel}</g>`;
+    })
+    .join("");
+
+  const notes = [];
+  if (stats.daily_growth_window_days) {
+    notes.push(`Показаны последние ${fmtNum(stats.daily_growth_window_days)} дн.`);
+  }
+  if (stats.fallback_date_entries > 0) {
+    notes.push(
+      `Для ${fmtNum(stats.fallback_date_entries)} зап. без связанной сессии использована дата обновления.`,
+    );
+  }
+  const activeRows = series.filter((d) => d.total > 0);
+  const tableRows = (activeRows.length ? activeRows : series)
+    .map(
+      (d) =>
+        `<tr><td class="mono nowrap">${esc(d.date)}</td><td class="mono">${fmtNum(d.total)}</td>${legendKeys.map((k) => `<td class="mono">${fmtNum(d[k] || 0)}</td>`).join("")}</tr>`,
+    )
+    .join("");
+  const dataTable = `<details class="chart-table-details"><summary title="Таблица по дням · Enter / Пробел" aria-keyshortcuts="Enter Space">Таблица по дням (${activeRows.length || series.length})</summary><div class="table-scroll"><table class="data-table chart-data-table"><thead><tr><th>Дата</th><th>Всего</th>${legendKeys.map((k) => `<th>${esc(triggerLabels[k])}</th>`).join("")}</tr></thead><tbody>${tableRows}</tbody></table></div></details>`;
+
+  const summaryLabel = `Ежедневные добавления памяти: ${series.length} дн., максимум ${maxVal} зап. в день.`;
+  return `<section class="analytics-panel"><div class="analytics-panel-header"><h3>Динамика по дням</h3>${legend}</div>${notes.length ? `<p class="chart-note muted">${esc(notes.join(" "))}</p>` : ""}<div class="chart-wrap" tabindex="0" aria-label="График динамики по дням"><svg class="growth-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(summaryLabel)}">${gridMarkup}${barsMarkup}</svg></div>${dataTable}</section>`;
+}
+
+function renderProfileBudgetPanel(stats) {
+  const b = stats.profile_budget || {
+    limit: 8000,
+    total_chars: 0,
+    included_chars: 0,
+    truncated_chars: 0,
+    usage_percent: 0,
+    status: "ok",
+    total_entries: 0,
+    included_entries: 0,
+    truncated_entries: 0,
+    truncated_items: [],
+  };
+  const limit = b.limit || 8000;
+  const barW = 400;
+  const barH = 16;
+  let barContent = "";
+  if (b.total_chars > limit) {
+    const incW = Math.max(4, (limit / b.total_chars) * barW);
+    const truncW = Math.max(2, barW - incW);
+    barContent = `<rect x="0" y="0" width="${incW.toFixed(1)}" height="${barH}" class="bar-included"></rect><rect x="${incW.toFixed(1)}" y="0" width="${truncW.toFixed(1)}" height="${barH}" class="bar-truncated"></rect><line x1="${incW.toFixed(1)}" y1="0" x2="${incW.toFixed(1)}" y2="${barH}" class="bar-limit-mark"></line>`;
+  } else if (b.total_chars > 0) {
+    const fillW = Math.max(2, (b.total_chars / limit) * barW);
+    const fillClass = b.status === "warning" ? "bar-warning" : "bar-included";
+    barContent = `<rect x="0" y="0" width="${fillW.toFixed(1)}" height="${barH}" rx="3" class="${fillClass}"></rect>`;
+  }
+  const items = b.truncated_items || [];
+  const truncatedMarkup = items.length
+    ? `<div class="truncated-heading">Усечённые записи (${items.length})</div><ul class="truncated-list">${items
+        .map(
+          (item) =>
+            `<li><button class="truncated-row" data-memory="${esc(item.id)}" title="Открыть запись памяти · Enter" aria-keyshortcuts="Enter"><span class="truncated-meta"><span class="truncated-kind">${esc(memoryKinds[item.kind] || item.kind)}</span><span class="state ${item.partial ? "pending" : "failed"}">${item.partial ? "Частично усечена" : "Усечена полностью"}</span><span class="mono muted">${fmtNum(item.chars)} симв.</span></span><span class="prose truncated-preview">${esc(item.content)}</span><span class="mono muted">${esc(item.id)}</span></button></li>`,
+        )
+        .join("")}</ul>`
+    : `<p class="analytics-empty">${b.total_chars > 0 ? "Все записи профиля и предпочтений целиком помещаются в лимит 8 000 символов." : "Файл USER.md для этого разговора пуст."}</p>`;
+
+  const barAria = `Бюджет USER.md: ${b.total_chars} из ${limit} символов (${fmtPct(b.usage_percent)}%), усечено записей: ${b.truncated_entries}.`;
+  return `<section class="analytics-panel budget-panel budget-${esc(b.status)}"><div class="analytics-panel-header"><h3>Бюджет USER.md и усечение</h3><span class="budget-badge budget-badge-${esc(b.status)}">${fmtNum(b.total_chars)} / ${fmtNum(limit)} (${fmtPct(b.usage_percent)}%)</span></div><svg class="budget-bar-svg" viewBox="0 0 ${barW} ${barH}" preserveAspectRatio="none" role="img" aria-label="${esc(barAria)}"><rect x="0" y="0" width="${barW}" height="${barH}" rx="3" class="bar-track"></rect>${barContent}</svg><div class="budget-stats"><span>В промпте: <strong>${fmtNum(b.included_chars)}</strong> симв. (${b.included_entries} зап.)</span><span>Усечено: <strong>${fmtNum(b.truncated_chars)}</strong> симв. (${b.truncated_entries} зап.)</span></div>${truncatedMarkup}</section>`;
+}
+
+function renderKindBreakdownPanel(stats) {
+  const kinds = stats.kinds || [];
+  const maxTotal = Math.max(1, ...kinds.map((k) => k.total || 0));
+  const barW = 240,
+    barH = 10;
+  const rows = kinds
+    .map((k) => {
+      const labelText = memoryKinds[k.kind] || k.kind;
+      const totalW = k.total ? Math.max(4, (k.total / maxTotal) * barW) : 0;
+      let cursor = 0;
+      const segs = triggerOrder
+        .map((t) => {
+          const v = k[t] || 0;
+          if (!v || !k.total) return "";
+          const w = (v / k.total) * totalW;
+          const x = cursor;
+          cursor += w;
+          return `<rect x="${x.toFixed(1)}" y="0" width="${Math.max(1, w).toFixed(1)}" height="${barH}" class="bar-${t}"></rect>`;
+        })
+        .join("");
+      const parts = activeTriggers(k)
+        .filter((t) => (k[t] || 0) > 0)
+        .map((t) => `${triggerShort[t]} ${k[t]}`)
+        .join(" · ");
+      const title = `Показать записи типа «${labelText}» · Enter`;
+      return `<li><button class="kind-bar-row" data-filter-kind="${esc(k.kind)}" title="${esc(title)}" aria-label="${esc(title)}" aria-keyshortcuts="Enter"><span class="kind-bar-name">${esc(labelText)}</span><svg class="kind-bar-svg" viewBox="0 0 ${barW} ${barH}" preserveAspectRatio="none" aria-hidden="true"><rect x="0" y="0" width="${barW}" height="${barH}" rx="2" class="bar-track"></rect>${segs}</svg><span class="kind-bar-total">${fmtNum(k.total)}</span><span class="kind-bar-split muted">${esc(parts || "—")}</span></button></li>`;
+    })
+    .join("");
+  return `<section class="analytics-panel"><div class="analytics-panel-header"><h3>Типы записей по источникам</h3><span class="muted analytics-sub">Нажмите, чтобы отфильтровать записи</span></div><ul class="kind-bar-list">${rows}</ul></section>`;
+}
+
+function renderGeneratorsPanel(stats) {
+  const gens = stats.top_generators || [];
+  if (!gens.length) {
+    return `<section class="analytics-panel"><div class="analytics-panel-header"><h3>Основные фоновые источники</h3></div><p class="analytics-empty">Фоновые задачи и инициатива пока не создавали записей памяти в этом разговоре.</p></section>`;
+  }
+  const maxCount = Math.max(1, ...gens.map((g) => g.count || 0));
+  const barW = 120,
+    barH = 8;
+  const rows = gens
+    .map((g) => {
+      const name =
+        g.trigger === "initiative"
+          ? "Инициатива"
+          : g.title || (g.task_id ? `Задача ${g.task_id}` : "Фоновая задача");
+      const w = Math.max(3, (g.count / maxCount) * barW);
+      return `<li class="generator-row"><div class="generator-info"><div class="generator-title"><span class="generator-name">${esc(name)}</span><span class="trigger-tag trigger-tag-${esc(g.trigger)}">${esc(triggerLabels[g.trigger] || g.trigger)}</span></div><div class="generator-meta muted">${g.task_id ? `<span class="mono">${esc(g.task_id)}</span><span>·</span>` : ""}<span>${fmtNum(g.chars)} симв.</span>${g.latest_at ? `<span>·</span><time>${esc(shortDate(g.latest_at))}</time>` : ""}</div></div><div class="generator-metric"><svg class="generator-bar-svg" viewBox="0 0 ${barW} ${barH}" preserveAspectRatio="none" aria-hidden="true"><rect x="0" y="0" width="${barW}" height="${barH}" rx="2" class="bar-track"></rect><rect x="0" y="0" width="${w.toFixed(1)}" height="${barH}" rx="2" class="bar-${esc(g.trigger)}"></rect></svg><span class="mono generator-count">${fmtNum(g.count)}</span></div></li>`;
+    })
+    .join("");
+  return `<section class="analytics-panel"><div class="analytics-panel-header"><h3>Основные фоновые источники</h3><span class="muted analytics-sub">По количеству записей</span></div><ul class="generator-list">${rows}</ul></section>`;
+}
+
+function renderConsolidationPanel(stats) {
+  const c = stats.latest_consolidation;
+  if (!c) return "";
+  const entryDelta = (c.after_entries || 0) - (c.before_entries || 0);
+  const charDelta = c.profile_chars_delta ?? (c.after_profile_chars || 0) - (c.before_profile_chars || 0);
+  const ops = c.operations || {};
+  const opEntries = [
+    ["Объединено", ops.merged],
+    ["Перенесено", ops.reclassified],
+    ["Удалено", ops.deleted],
+    ["Обновлено", ops.updated],
+    ["Сохранено", ops.kept],
+    ["Пропущено", ops.skipped],
+  ].filter(([, count]) => count > 0);
+  return `<section class="analytics-panel consolidation-panel"><div class="analytics-panel-header"><h3>Последняя консолидация</h3><span class="muted analytics-sub">${c.completed_at ? esc(date(c.completed_at)) : esc(c.id)}</span></div><dl class="consolidation-metrics"><div><dt>Записи</dt><dd class="mono">${fmtNum(c.before_entries)} → ${fmtNum(c.after_entries)} <span class="${entryDelta < 0 ? "trend-good" : "muted"}">(${fmtSigned(entryDelta)})</span></dd></div><div><dt>USER.md</dt><dd class="mono">${fmtNum(c.before_profile_chars)} → ${fmtNum(c.after_profile_chars)} симв. <span class="${charDelta < 0 ? "trend-good" : "muted"}">(${fmtSigned(charDelta)})</span></dd></div></dl>${opEntries.length ? `<div class="consolidation-ops">${opEntries.map(([name, count]) => `<span class="op-pill">${esc(name)}: <strong>${fmtNum(count)}</strong></span>`).join("")}</div>` : ""}<div class="consolidation-actions"><button id="open-consolidation-log" class="button" data-consolidation-log="true" title="Открыть журнал операций консолидации · Enter" aria-keyshortcuts="Enter">Журнал операций</button></div></section>`;
+}
+
+function renderMemoryAnalytics(stats) {
+  const container = $("#memory-analytics");
+  if (!container) return;
+  const focusedMemory = document.activeElement?.dataset.memory;
+  const focusedKind = document.activeElement?.dataset.filterKind;
+  const focusedConsolidation = document.activeElement?.id === "open-consolidation-log";
+
+  const t = stats.triggers || {};
+  const b = stats.profile_budget || { limit: 8000, total_chars: 0, usage_percent: 0, status: "ok", truncated_entries: 0 };
+  const tr = stats.trend || { last_7_days: 0, prev_7_days: 0, delta: 0, avg_per_day: 0 };
+  const deltaText =
+    tr.delta_percent !== undefined && tr.delta_percent !== null
+      ? `${fmtSigned(tr.delta)} (${fmtSigned(tr.delta_percent)}%) к прошлым 7 дн.`
+      : tr.prev_7_days === 0 && tr.last_7_days > 0
+        ? `За прошлые 7 дн.: 0 · ~${fmtPct(tr.avg_per_day)}/дн.`
+        : `За прошлые 7 дн.: ${fmtNum(tr.prev_7_days)}`;
+  const trendClass = tr.delta > 0 ? "kpi-delta-up" : tr.delta < 0 ? "kpi-delta-down" : "muted";
+  const hasConsolidation = Boolean(stats.latest_consolidation);
+
+  const kpis = `<div class="analytics-kpis">
+    <div class="kpi-card">
+      <div class="kpi-label">Всего записей</div>
+      <div class="kpi-value">${fmtNum(stats.total_entries)}</div>
+      <div class="kpi-sub muted">${esc(fileSize(stats.total_bytes || 0))} · ${fmtNum(stats.total_chars)} симв.${stats.span_days ? ` · ${fmtNum(stats.span_days)} дн.` : ""}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Фоновые сессии</div>
+      <div class="kpi-value">${fmtPct(stats.background_share_percent)}%</div>
+      <div class="kpi-sub muted">Инициатива ${fmtNum(t.initiative)} · Задача ${fmtNum(t.task)} · Сообщения ${fmtNum(t.message)}</div>
+    </div>
+    <div class="kpi-card kpi-budget-${esc(b.status)}">
+      <div class="kpi-label">Бюджет USER.md</div>
+      <div class="kpi-value">${fmtNum(b.total_chars)} / ${fmtNum(b.limit)}</div>
+      <div class="kpi-sub ${b.status === "over" ? "kpi-sub-danger" : b.status === "warning" ? "kpi-sub-warning" : "muted"}">${fmtPct(b.usage_percent)}% · ${b.truncated_entries > 0 ? `Усечено: ${fmtNum(b.truncated_entries)}` : b.total_chars > 0 ? "Помещается полностью" : "USER.md пуст"}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Рост за 7 дней</div>
+      <div class="kpi-value">${fmtNum(tr.last_7_days)}</div>
+      <div class="kpi-sub ${trendClass}">${esc(deltaText)}</div>
+    </div>
+  </div>`;
+
+  if (stats.total_entries === 0 && !b.total_chars && !hasConsolidation) {
+    container.innerHTML = `<div class="analytics-root">${kpis}<div class="empty-panel">В этом разговоре пока нет записей памяти. После первых сессий здесь появятся графики роста, бюджет USER.md и разбивка по источникам.</div></div>`;
+    return;
+  }
+
+  container.innerHTML = `<div class="analytics-root">
+    ${kpis}
+    ${renderDailyGrowthChart(stats)}
+    <div class="analytics-grid">
+      ${renderProfileBudgetPanel(stats)}
+      ${renderKindBreakdownPanel(stats)}
+    </div>
+    <div class="analytics-grid ${hasConsolidation ? "" : "analytics-grid-single"}">
+      ${renderGeneratorsPanel(stats)}
+      ${renderConsolidationPanel(stats)}
+    </div>
+  </div>`;
+
+  if (focusedMemory) {
+    [...container.querySelectorAll("[data-memory]")].find((el) => el.dataset.memory === focusedMemory)?.focus({ preventScroll: true });
+  } else if (focusedKind) {
+    [...container.querySelectorAll("[data-filter-kind]")].find((el) => el.dataset.filterKind === focusedKind)?.focus({ preventScroll: true });
+  } else if (focusedConsolidation) {
+    $("#open-consolidation-log")?.focus({ preventScroll: true });
+  }
+}
+
+function openConsolidationLog(opener) {
+  const c = state.memoryStats?.latest_consolidation;
+  if (!c) return;
+  state.drawerMemoryID = null;
+  state.drawerFileKey = state.drawerTraceID = state.drawerRecordID = null;
+  state.drawerConsolidation = true;
+  showDrawer("Журнал консолидации памяти", opener);
+  const ops = c.operations || {};
+  const opItems = [
+    ["Объединено", ops.merged],
+    ["Перенесено", ops.reclassified],
+    ["Удалено", ops.deleted],
+    ["Обновлено", ops.updated],
+    ["Сохранено", ops.kept],
+    ["Пропущено", ops.skipped],
+  ].filter(([, n]) => n > 0);
+  const logOps = Array.isArray(c.log?.operations)
+    ? c.log.operations
+    : Array.isArray(c.log?.ops)
+      ? c.log.ops
+      : [];
+  const opsMarkup = logOps.length
+    ? `<h3>Операции <small>${logOps.length}</small></h3><ul class="consolidation-log-list">${logOps
+        .map(
+          (item) =>
+            `<li><div class="consolidation-log-line"><strong>${esc(item.op || item.action || item.type || "operation")}</strong>${Array.isArray(item.ids) && item.ids.length ? `<span class="mono muted">${esc(item.ids.join(", "))}</span>` : item.id ? `<span class="mono muted">${esc(item.id)}</span>` : ""}</div>${item.reason ? `<div class="prose">${esc(item.reason)}</div>` : ""}</li>`,
+        )
+        .join("")}</ul>`
+    : "";
+  $("#drawer-content").innerHTML = `<div class="trace-meta">${c.completed_at ? `<span>${esc(date(c.completed_at))}</span>` : ""}<span>Записи: ${fmtNum(c.before_entries)} → ${fmtNum(c.after_entries)}</span><span>USER.md: ${fmtNum(c.before_profile_chars)} → ${fmtNum(c.after_profile_chars)} симв. (${fmtSigned(c.profile_chars_delta)})</span></div><p class="mono trace-id">${esc(c.id)}</p>${opItems.length ? `<div class="consolidation-ops">${opItems.map(([name, n]) => `<span class="op-pill">${esc(name)}: <strong>${fmtNum(n)}</strong></span>`).join("")}</div>` : ""}${opsMarkup}<details class="trace-section" open><summary>Полный отчёт JSON</summary>${json(c.log || c)}</details>`;
+}
+
 async function openMemory(id, opener) {
   state.drawerMemoryID = id;
   state.drawerFileKey = state.drawerTraceID = state.drawerRecordID = null;
+  state.drawerConsolidation = false;
   const token = showDrawer("Запись памяти", opener);
   $("#drawer-content").innerHTML = '<div class="loading-line" role="status">Загружаем запись…</div>';
   try {
@@ -902,6 +1424,7 @@ async function openFile(key, opener) {
   state.drawerMemoryID = null;
   state.drawerFileKey = key;
   state.drawerTraceID = state.drawerRecordID = null;
+  state.drawerConsolidation = false;
   const token = showDrawer("Файл", opener);
   $("#drawer-content").innerHTML =
     '<div class="loading-line" role="status">Загружаем файл…</div>';
@@ -940,6 +1463,7 @@ function openRecord(id, opener) {
   state.drawerFileKey = null;
   state.drawerTraceID = null;
   state.drawerRecordID = id;
+  state.drawerConsolidation = false;
   let title = "Исходная запись",
     record;
   if (id.startsWith("outgoing:")) {
@@ -967,6 +1491,7 @@ async function openTrace(id, opener) {
   state.drawerFileKey = null;
   state.drawerTraceID = id;
   state.drawerRecordID = null;
+  state.drawerConsolidation = false;
   state.routeTrace = id;
   history.replaceState(null, "", `#/session/${encodeURIComponent(state.id)}?${new URLSearchParams({ trace: id })}`);
   const token = showDrawer("Вызов", opener);
@@ -1001,20 +1526,23 @@ function closeDrawer(clearRoute = true) {
   if (wasOpen) {
     const opener = state.drawerOpener?.isConnected
       ? state.drawerOpener
-      : [
-          ...main.querySelectorAll("[data-trace],[data-record],[data-file],[data-memory]"),
-        ].find((el) =>
-          state.drawerMemoryID
-            ? el.dataset.memory === state.drawerMemoryID
-            : state.drawerFileKey
-            ? el.dataset.file === state.drawerFileKey
-            : state.drawerRecordID
-              ? el.dataset.record === state.drawerRecordID
-              : el.dataset.trace === state.drawerTraceID,
-        );
+      : state.drawerConsolidation
+        ? $("#open-consolidation-log")
+        : [
+            ...main.querySelectorAll("[data-trace],[data-record],[data-file],[data-memory]"),
+          ].find((el) =>
+            state.drawerMemoryID
+              ? el.dataset.memory === state.drawerMemoryID
+              : state.drawerFileKey
+                ? el.dataset.file === state.drawerFileKey
+                : state.drawerRecordID
+                  ? el.dataset.record === state.drawerRecordID
+                  : el.dataset.trace === state.drawerTraceID,
+          );
     (opener || main).focus();
   }
   state.drawerOpener = null;
+  state.drawerConsolidation = false;
   if (clearRoute && state.routeTrace) {
     state.routeTrace = "";
     history.replaceState(null, "", `#/session/${encodeURIComponent(state.id)}`);
@@ -1022,7 +1550,8 @@ function closeDrawer(clearRoute = true) {
 }
 $("#refresh").addEventListener("click", refresh);
 $("#nav-logs").addEventListener("click", (event) => {
-  if (state.busy || state.fileBusy || state.memoryBusy || state.soulBusy) event.preventDefault();
+  if (state.busy || state.fileBusy || state.memoryBusy || state.memoryStatsBusy || state.soulBusy)
+    event.preventDefault();
 });
 $("#more-sessions").addEventListener("click", () => loadList(true));
 let debounce;
@@ -1049,6 +1578,26 @@ main.addEventListener("toggle", async (event) => {
 }, true);
 
 main.addEventListener("click", (event) => {
+  const memoryTab = event.target.closest("[data-memory-tab]");
+  if (memoryTab) {
+    setMemoryTab(memoryTab.dataset.memoryTab);
+    return;
+  }
+  const filterKind = event.target.closest("[data-filter-kind]");
+  if (filterKind) {
+    state.memoryKind = filterKind.dataset.filterKind;
+    if ($("#memory-kind")) $("#memory-kind").value = state.memoryKind;
+    state.memoryEntriesDirty = true;
+    setMemoryTab("entries", { forceReload: true });
+    $("#memory-kind")?.focus();
+    announce(`Фильтр типа: ${memoryKinds[state.memoryKind] || state.memoryKind}`);
+    return;
+  }
+  const consolidationBtn = event.target.closest("[data-consolidation-log]");
+  if (consolidationBtn) {
+    openConsolidationLog(consolidationBtn);
+    return;
+  }
   const tab = event.target.closest("[data-tab]");
   if (tab) {
     state.tab = tab.dataset.tab;
@@ -1095,8 +1644,25 @@ main.addEventListener("change", (event) => {
     updateToolVisibility();
   } else if (event.target.id === "memory-scope") {
     state.memoryScope = event.target.value;
-    history.replaceState(null, "", "#/memory?" + new URLSearchParams({ conversation_id: state.memoryScope }));
-    scheduleMemory();
+    history.replaceState(null, "", memoryHash(state.memoryScope, state.memoryTab));
+    ++state.memoryStatsToken;
+    state.memoryStatsBusy = false;
+    state.memoryStats = null;
+    state.memoryStatsScope = null;
+    state.memoryEntriesDirty = true;
+    if (state.memoryTab === "analytics") {
+      clearTimeout(memoryDebounce);
+      ++state.refreshToken;
+      ++state.memoryToken;
+      state.memoryBusy = false;
+      setBusy(false);
+      resetMemoryEntriesView();
+      loadMemoryStats(false);
+    } else {
+      ++state.refreshToken;
+      setBusy(false);
+      scheduleMemory();
+    }
   } else if (event.target.id === "memory-kind") {
     state.memoryKind = event.target.value;
     scheduleMemory();
@@ -1123,12 +1689,25 @@ main.addEventListener("input", (event) => {
 main.addEventListener("keydown", (event) => {
   if (
     event.isComposing ||
+    event.keyCode === 229 ||
     event.repeat ||
     !event.target.matches("[role=tab]") ||
     !["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)
   )
     return;
   event.preventDefault();
+  if (event.target.dataset.memoryTab) {
+    let index = memoryTabs.indexOf(state.memoryTab);
+    index =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? memoryTabs.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + memoryTabs.length) %
+            memoryTabs.length;
+    setMemoryTab(memoryTabs[index], { focusTab: true });
+    return;
+  }
   let index = tabs.findIndex(([key]) => key === state.tab);
   index =
     event.key === "Home"
@@ -1197,6 +1776,7 @@ document.addEventListener("keydown", (event) => {
   ) {
     event.preventDefault();
     if (state.view === "memory") {
+      if (state.memoryTab !== "entries") setMemoryTab("entries");
       $("#memory-search").focus();
       $("#memory-search").select();
       return;
@@ -1221,7 +1801,20 @@ document.addEventListener("keydown", (event) => {
     event.code === "KeyL"
   ) {
     event.preventDefault();
-    if (!state.busy && !state.fileBusy && !state.memoryBusy && !state.soulBusy) $("#nav-logs").click();
+    if (!state.busy && !state.fileBusy && !state.memoryBusy && !state.memoryStatsBusy && !state.soulBusy)
+      $("#nav-logs").click();
+  }
+  if (
+    state.view === "memory" &&
+    event.altKey &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    (event.code === "Digit1" || event.code === "Digit2") &&
+    !event.target.closest("input, textarea, select, [contenteditable]")
+  ) {
+    event.preventDefault();
+    setMemoryTab(event.code === "Digit1" ? "entries" : "analytics");
   }
   if (
     event.altKey &&

@@ -472,6 +472,22 @@ func (s *Store) Update(ctx context.Context, e domain.MemoryEntry) error {
 	if readErr == nil && old.SubjectUserID != e.SubjectUserID {
 		return errors.New("memory cannot change its participant")
 	}
+	if readErr == nil {
+		origSource := old.OriginSource
+		if origSource == "" {
+			origSource = old.Source
+		}
+		if old.OriginSource != "" || (origSource != "" && origSource != e.Source) {
+			e.OriginSource = origSource
+		}
+		// Preserve genuine creation time; never infer CreatedAt from a legacy
+		// entry's UpdatedAt, which may already reflect an earlier correction.
+		if !old.CreatedAt.IsZero() {
+			e.CreatedAt = old.CreatedAt
+		}
+	} else if e.CreatedAt.IsZero() {
+		e.CreatedAt = e.UpdatedAt
+	}
 	b, err := marshalMemory(e)
 	if err != nil {
 		return err

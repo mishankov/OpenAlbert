@@ -36,7 +36,9 @@ func TestKnowledgePersistenceAndIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := reopened.Read(ctx, entry.Scope, entry.ID)
-	if err != nil || got != entry {
+	want := entry
+	want.CreatedAt = entry.UpdatedAt
+	if err != nil || got != want {
 		t.Fatalf("reopened %#v %v", got, err)
 	}
 	if _, err = reopened.Read(ctx, "telegram:group:456", entry.ID); !os.IsNotExist(err) {

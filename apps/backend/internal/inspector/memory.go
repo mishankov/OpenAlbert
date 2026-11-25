@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"openalbert/apps/backend/internal/domain"
 )
@@ -111,6 +112,43 @@ func RegisterMemory(mux *http.ServeMux, conversations ConversationStore, memory 
 			next = end
 		}
 		write(w, map[string]any{"entries": filtered[start:end], "total": total, "next_after": next, "profile": profile})
+	})))
+	mux.Handle("GET /api/inspect/memory/stats", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scope := r.URL.Query().Get("conversation_id")
+		if !memoryID(scope) {
+			fail(w, 400)
+			return
+		}
+		entries, err := memory.ListMemory(r.Context(), scope)
+		if err != nil {
+			fail(w, 500)
+			return
+		}
+		profile, err := memory.Profile(r.Context(), scope)
+		if err != nil {
+			fail(w, 500)
+			return
+		}
+		var origins map[string]SessionOrigin
+		var consolidation *ConsolidationSummary
+		if meta, ok := conversations.(MemoryMetadataStore); ok {
+			if sessionIDs := uniqueOriginSessionIDs(entries); len(sessionIDs) > 0 {
+				origins, err = meta.InspectSessionOrigins(r.Context(), scope, sessionIDs)
+				if err != nil {
+					fail(w, 500)
+					return
+				}
+			}
+			id, raw, found, err := meta.InspectLatestConsolidation(r.Context(), scope)
+			if err != nil {
+				fail(w, 500)
+				return
+			}
+			if found {
+				consolidation = parseConsolidationReceipt(id, raw)
+			}
+		}
+		write(w, computeMemoryStats(scope, entries, profile, origins, consolidation, time.Now().UTC()))
 	})))
 	mux.Handle("GET /api/inspect/memory/entry", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scope, id := r.URL.Query().Get("conversation_id"), r.URL.Query().Get("id")
