@@ -32,6 +32,7 @@ type Config struct {
 	YandexAPIKey, YandexFolderID, YandexEndpoint            string
 	KnowledgeDir, SoulFile, HTTPAddr                        string
 	SessionIdleTimeout, TaskMinInterval, InitiativeInterval time.Duration
+	MemoryConsolidationInterval                             time.Duration
 	MaxAgentSteps                                           int
 	S3Endpoint, S3AccessKey, S3SecretKey, S3Bucket          string
 	S3Secure                                                bool
@@ -173,6 +174,7 @@ func load(get func(string) string) (Config, error) {
 	c.SessionIdleTimeout = duration("SESSION_IDLE_TIMEOUT", "30m", false)
 	c.TaskMinInterval = duration("TASK_MIN_INTERVAL", "5m", false)
 	c.InitiativeInterval = duration("INITIATIVE_INTERVAL", "30m", true)
+	c.MemoryConsolidationInterval = duration("MEMORY_CONSOLIDATION_INTERVAL", "24h", true)
 	c.MaxAgentSteps, err = strconv.Atoi(value("MAX_AGENT_STEPS", "100"))
 	if err != nil || c.MaxAgentSteps < 1 || c.MaxAgentSteps > 200 {
 		problems = append(problems, errors.New("MAX_AGENT_STEPS must be between 1 and 200"))

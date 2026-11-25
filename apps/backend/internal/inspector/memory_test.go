@@ -19,7 +19,9 @@ import (
 	"openalbert/apps/backend/internal/knowledge"
 )
 
-type memoryConversations struct{}
+type memoryConversations struct {
+	consolidations map[string][]domain.MemoryConsolidationReport
+}
 
 func (memoryConversations) ListConversations(context.Context) ([]domain.Conversation, error) {
 	return []domain.Conversation{{ID: "personal:7", ChatID: 7, Private: true}, {ID: "group:8", ChatID: -8, Title: "Группа"}, {ID: "group:8:topic:9", ChatID: -8, ThreadID: 9}, {ID: "group:empty", ChatID: -9}}, nil
@@ -33,6 +35,10 @@ func (c memoryConversations) Conversation(ctx context.Context, id string) (domai
 		}
 	}
 	return domain.Conversation{}, false, err
+}
+
+func (c memoryConversations) ListMemoryConsolidations(_ context.Context, scope string, _ int) ([]domain.MemoryConsolidationReport, error) {
+	return c.consolidations[scope], nil
 }
 
 func TestMemoryInspectorReadsAllPagesAndKeepsScopes(t *testing.T) {
@@ -320,11 +326,12 @@ func TestMemoryStatsEndpointAggregatesAndRemainsReadOnly(t *testing.T) {
 	day := func(offset int) time.Time { return now.AddDate(0, 0, offset) }
 
 	// Populate profile + preference entries exceeding 8,000 Cyrillic runes to verify
-	// exact truncation metrics matching clip(profile, 8000).
+	// exact truncation metrics matching clip(profile, 8000) under profile-first,
+	// newest-first USER.md ordering.
 	entries := []domain.MemoryEntry{
 		{Scope: "personal:7", ID: "01-prof-a", Kind: "profile", Content: strings.Repeat("А", 4200), Source: "sess-msg", UpdatedAt: day(-10)},
-		{Scope: "personal:7", ID: "02-pref-b", Kind: "preference", Content: strings.Repeat("Б", 3900), Source: "session:sess-task-1; sess-later", UpdatedAt: day(-2)},
-		{Scope: "personal:7", ID: "03-pref-c", Kind: "preference", Content: strings.Repeat("В", 200), Source: "sess-init", UpdatedAt: day(-1)},
+		{Scope: "personal:7", ID: "02-pref-b", Kind: "preference", Content: strings.Repeat("Б", 3900), Source: "session:sess-task-1; sess-later", UpdatedAt: day(-1)},
+		{Scope: "personal:7", ID: "03-pref-c", Kind: "preference", Content: strings.Repeat("В", 200), Source: "sess-init", UpdatedAt: day(-2)},
 		{Scope: "personal:7", ID: "04-fact-1", Kind: "fact", Content: "Задача мониторит погоду", Source: "sess-task-1", UpdatedAt: day(-1)},
 		{Scope: "personal:7", ID: "05-ep-1", Kind: "episode", Content: "Сводка инициативы", Source: "sess-init", UpdatedAt: day(0)},
 		{Scope: "personal:7", ID: "06-hyp-1", Kind: "hypothesis", Content: "Может предпочитать вечер", Source: "sess-missing", UpdatedAt: day(-8)},
@@ -638,5 +645,88 @@ func TestMemoryStatsPreservesOriginalSessionAndDateOnToolOverwrite(t *testing.T)
 	legacyStats := computeMemoryStats("personal:7", legacyEntries, "", origins, nil, now)
 	if legacyStats.Triggers.Message != 1 || legacyStats.Trend.Prev7Days != 1 || legacyStats.Trend.Last7Days != 0 {
 		t.Fatalf("legacy overwrite shifted trigger or growth week: triggers=%+v trend=%+v", legacyStats.Triggers, legacyStats.Trend)
+	}
+}
+
+func TestMemoryConsolidationInspectorEndpointAndStatsIntegration(t *testing.T) {
+	store, err := knowledge.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := domain.MemoryConsolidationReport{
+		ID:                 "run-1",
+		Scope:              "personal:7",
+		Trigger:            "scheduled",
+		StartedAt:          time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC),
+		CompletedAt:        time.Date(2026, 11, 25, 10, 1, 0, 0, time.UTC),
+		Status:             "completed",
+		BeforeCount:        12,
+		AfterCount:         8,
+		ProfileCharsBefore: 4200,
+		ProfileCharsAfter:  2100,
+		ProfileCharsDelta:  -2100,
+		Operations: []domain.MemoryConsolidationOperation{
+			{Phase: "profile", Op: "merge", IDs: []string{"a", "b"}, ResultID: "a", Kind: "preference", Reason: "duplicate rule", Status: "applied"},
+			{Phase: "profile", Op: "reclassify", IDs: []string{"d"}, ResultID: "d", Kind: "profile", Reason: "already profile", Status: "kept"},
+			{Phase: "hygiene", Op: "delete", IDs: []string{"c"}, Reason: "stale", Status: "skipped", SkipReason: "concurrent_modification"},
+		},
+	}
+	mux := http.NewServeMux()
+	RegisterMemory(mux, memoryConversations{consolidations: map[string][]domain.MemoryConsolidationReport{"personal:7": {report}}}, store)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/api/inspect/memory/consolidations?conversation_id=personal:7", nil))
+	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("consolidations: %d %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Consolidations []domain.MemoryConsolidationReport `json:"consolidations"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || len(out.Consolidations) != 1 || out.Consolidations[0].ProfileCharsDelta != -2100 {
+		t.Fatalf("unexpected consolidations payload: %+v %v", out, err)
+	}
+
+	// Verify /api/inspect/memory/stats surfaces the latest consolidation report from ListMemoryConsolidations.
+	wStats := httptest.NewRecorder()
+	mux.ServeHTTP(wStats, httptest.NewRequest("GET", "http://localhost/api/inspect/memory/stats?conversation_id=personal:7", nil))
+	if wStats.Code != 200 {
+		t.Fatalf("stats with consolidation report: %d %s", wStats.Code, wStats.Body.String())
+	}
+	var stats MemoryStats
+	if err := json.Unmarshal(wStats.Body.Bytes(), &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.LatestConsolidation == nil ||
+		stats.LatestConsolidation.ID != "run-1" ||
+		stats.LatestConsolidation.BeforeEntries != 12 ||
+		stats.LatestConsolidation.AfterEntries != 8 ||
+		stats.LatestConsolidation.ProfileCharsDelta != -2100 ||
+		stats.LatestConsolidation.Operations.Merged != 1 ||
+		stats.LatestConsolidation.Operations.Kept != 1 ||
+		stats.LatestConsolidation.Operations.Reclassified != 0 ||
+		stats.LatestConsolidation.Operations.Skipped != 1 ||
+		stats.LatestConsolidation.Operations.Deleted != 0 ||
+		len(stats.LatestConsolidation.Log) == 0 {
+		t.Fatalf("unexpected stats latest consolidation: %+v", stats.LatestConsolidation)
+	}
+
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/api/inspect/memory/consolidations?conversation_id=group:empty", nil))
+	if w.Code != 200 || w.Body.String() != "{\"consolidations\":[]}\n" {
+		t.Fatalf("empty consolidations: %d %q", w.Code, w.Body.String())
+	}
+
+	for _, tc := range []struct {
+		method, path string
+		code         int
+	}{
+		{"GET", "/api/inspect/memory/consolidations", 400},
+		{"POST", "/api/inspect/memory/consolidations?conversation_id=personal:7", 405},
+	} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(tc.method, "http://localhost"+tc.path, nil))
+		if w.Code != tc.code {
+			t.Fatalf("%s %s: %d", tc.method, tc.path, w.Code)
+		}
 	}
 }

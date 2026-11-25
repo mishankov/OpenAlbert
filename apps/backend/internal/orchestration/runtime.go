@@ -23,18 +23,20 @@ import (
 )
 
 type Runtime struct {
-	Repo               domain.Repository
-	Activities         *agent.Activities
-	Telegram           *integrations.Telegram
-	TTS                domain.SpeechSynthesizer
-	Client             client.Client
-	TaskQueue          string
-	IdleTimeout        time.Duration
-	MaxSteps           int
-	InitiativeInterval time.Duration
-	Logger             *slog.Logger
-	wg                 sync.WaitGroup
-	voice              *voiceSynthesis
+	Repo                        domain.Repository
+	Activities                  *agent.Activities
+	Telegram                    *integrations.Telegram
+	TTS                         domain.SpeechSynthesizer
+	Client                      client.Client
+	TaskQueue                   string
+	IdleTimeout                 time.Duration
+	MaxSteps                    int
+	InitiativeInterval          time.Duration
+	MemoryConsolidationInterval time.Duration
+	Logger                      *slog.Logger
+	wg                          sync.WaitGroup
+	voice                       *voiceSynthesis
+	lastConsolidationCheck      time.Time
 }
 
 func (r *Runtime) Worker() worker.Worker {
@@ -44,6 +46,7 @@ func (r *Runtime) Worker() worker.Worker {
 	w.RegisterWorkflow(AnalysisWorkflow)
 	w.RegisterWorkflow(InitiativeWorkflow)
 	w.RegisterWorkflow(BackupEventWorkflow)
+	w.RegisterWorkflow(MemoryConsolidationWorkflow)
 	w.RegisterActivity(r.Activities)
 	return w
 }
@@ -307,6 +310,15 @@ func (r *Runtime) DispatchOnce(ctx context.Context) error {
 			_, err = r.Client.ExecuteWorkflow(ctx, workflowOptions(id, r.TaskQueue), InitiativeWorkflow, InitiativeInput{ConversationID: c.ID, Interval: r.InitiativeInterval, MaxSteps: r.MaxSteps})
 			if err != nil && !already(err) {
 				return err
+			}
+		}
+	}
+	if r.MemoryConsolidationInterval > 0 {
+		now := time.Now().UTC()
+		if r.lastConsolidationCheck.IsZero() || now.Sub(r.lastConsolidationCheck) >= memoryConsolidationCheckInterval {
+			r.lastConsolidationCheck = now
+			if err := r.DispatchMemoryConsolidation(ctx, now); err != nil {
+				r.record(ctx, "memory.consolidation.dispatch", err)
 			}
 		}
 	}

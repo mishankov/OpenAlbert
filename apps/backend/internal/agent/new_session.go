@@ -58,7 +58,7 @@ func (a *Activities) startNewSession(ctx context.Context, scope, previous, next 
 			}
 		}
 	}
-	if err := a.Repo.StartSession(ctx, domain.Session{ID: next, ConversationID: scope, CreatedAt: time.Now().UTC()}); err != nil {
+	if err := a.Repo.StartSession(ctx, domain.Session{ID: next, ConversationID: scope, Trigger: "message", CreatedAt: time.Now().UTC()}); err != nil {
 		return err
 	}
 	if err := a.Repo.EnqueueOutgoing(ctx, domain.Outgoing{ID: ID("new-session", ids[len(ids)-1]), Conversation: conv,

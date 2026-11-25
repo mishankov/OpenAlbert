@@ -109,6 +109,12 @@ func (s *Store) rebuildParticipant(scope string, id int64) error {
 	fmt.Fprintf(&b, "# Participant %d\n\n- Display name: %s\n- Username: %s\n- Conversation: %s\n\n", id, profile.Participant.DisplayName, profile.Participant.Username, scope)
 	for _, fact := range profile.Facts {
 		fmt.Fprintf(&b, "- %s\n  - Kind: %s; memory ID: %s\n  - Source: %s; message: %s\n  - Evidence: %q\n", fact.Content, fact.Kind, fact.ID, fact.Source, fact.SourceMessageID, fact.Evidence)
+		for _, extra := range fact.Provenance {
+			if extra.SourceMessageID == fact.SourceMessageID && extra.Evidence == fact.Evidence {
+				continue
+			}
+			fmt.Fprintf(&b, "  - Additional message: %s; evidence: %q\n", extra.SourceMessageID, extra.Evidence)
+		}
 	}
 	return s.write(filepath.Join(participantDir(scope, id), "PROFILE.md"), []byte(b.String()))
 }

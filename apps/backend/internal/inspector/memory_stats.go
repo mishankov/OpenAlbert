@@ -433,14 +433,25 @@ func computeProfileBudget(entries []domain.MemoryEntry, profile string, limit in
 		return budget
 	}
 
-	// Match eligible entries in knowledge.Store.rebuildProfile's deterministic ID order.
+	// Match eligible entries in knowledge.Store.rebuildProfile's deterministic order:
+	// profile entries before preference entries, newest UpdatedAt first, then ID.
 	eligible := make([]domain.MemoryEntry, 0)
 	for _, e := range entries {
 		if e.SubjectUserID == 0 && (e.Kind == "profile" || e.Kind == "preference") {
 			eligible = append(eligible, e)
 		}
 	}
-	sort.Slice(eligible, func(i, j int) bool { return eligible[i].ID < eligible[j].ID })
+	sort.Slice(eligible, func(i, j int) bool {
+		iProfile := eligible[i].Kind == "profile"
+		jProfile := eligible[j].Kind == "profile"
+		if iProfile != jProfile {
+			return iProfile
+		}
+		if !eligible[i].UpdatedAt.Equal(eligible[j].UpdatedAt) {
+			return eligible[i].UpdatedAt.After(eligible[j].UpdatedAt)
+		}
+		return eligible[i].ID < eligible[j].ID
+	})
 
 	byFirstLine := make(map[string][]int, len(eligible))
 	for i, e := range eligible {
@@ -585,6 +596,52 @@ func parseConsolidationReceipt(id string, raw json.RawMessage) *ConsolidationSum
 				summary.Operations.Skipped++
 			}
 		}
+	}
+	return summary
+}
+
+func consolidationSummaryFromReport(report domain.MemoryConsolidationReport) *ConsolidationSummary {
+	summary := &ConsolidationSummary{
+		ID:                 report.ID,
+		BeforeEntries:      report.BeforeCount,
+		AfterEntries:       report.AfterCount,
+		BeforeProfileChars: report.ProfileCharsBefore,
+		AfterProfileChars:  report.ProfileCharsAfter,
+		ProfileCharsDelta:  report.ProfileCharsDelta,
+	}
+	if !report.CompletedAt.IsZero() {
+		ts := report.CompletedAt.UTC()
+		summary.CompletedAt = &ts
+	} else if !report.StartedAt.IsZero() {
+		ts := report.StartedAt.UTC()
+		summary.CompletedAt = &ts
+	}
+	for _, item := range report.Operations {
+		switch strings.ToLower(strings.TrimSpace(item.Status)) {
+		case "skipped":
+			summary.Operations.Skipped++
+			continue
+		case "kept":
+			summary.Operations.Kept++
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(item.Op)) {
+		case "merge", "merged":
+			summary.Operations.Merged++
+		case "reclassify", "reclassified":
+			summary.Operations.Reclassified++
+		case "delete", "deleted":
+			summary.Operations.Deleted++
+		case "keep", "kept":
+			summary.Operations.Kept++
+		case "update", "updated":
+			summary.Operations.Updated++
+		case "skip", "skipped":
+			summary.Operations.Skipped++
+		}
+	}
+	if raw, err := json.Marshal(report); err == nil {
+		summary.Log = raw
 	}
 	return summary
 }

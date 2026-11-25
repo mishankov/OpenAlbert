@@ -419,7 +419,7 @@ func (s *Store) SyncCodingSession(ctx context.Context, batch domain.CodingSyncBa
 
 	// Atomically ensure session row exists, then lock it FOR UPDATE so close cannot race with sync.
 	sessBytes, err := encode(domain.Session{
-		ID: batch.SessionID, ConversationID: batch.ConversationID, Status: "active", CreatedAt: time.Now().UTC(),
+		ID: batch.SessionID, ConversationID: batch.ConversationID, Status: "active", Trigger: "coding", CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		return err

@@ -1404,6 +1404,9 @@ h4 {
 .memory-origin dt { color: var(--muted); }
 .memory-origin dd { margin: 0; overflow-wrap: anywhere; }
 .memory-evidence { margin: 0; padding-left: 12px; border-left: 2px solid var(--line); }
+.consolidation-run { padding: 8px 0; border-bottom: 1px solid #eaeef2; }
+.consolidation-run:last-child { border-bottom: 0; }
+.consolidation-ops { margin: 6px 0 0; padding-left: 18px; font-size: 11px; overflow-wrap: anywhere; }
 @media (max-width: 650px) {
   .memory-filters { grid-template-columns: minmax(0, 1fr) minmax(110px, .6fr); }
   .memory-filters label:first-child { grid-column: 1 / -1; }

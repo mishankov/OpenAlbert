@@ -736,6 +736,12 @@ function resetMemoryEntriesView() {
     if ($("#memory-group pre")) $("#memory-group pre").textContent = "";
     $("#group-error")?.classList.add("hidden");
   }
+  const consolidations = $("#memory-consolidations");
+  if (consolidations && consolidations.dataset.scope !== state.memoryScope) {
+    consolidations.classList.add("hidden");
+    if ($("#consolidations-content")) $("#consolidations-content").innerHTML = "";
+    $("#consolidations-error")?.classList.add("hidden");
+  }
   $("#memory-error")?.classList.add("hidden");
 }
 
@@ -791,7 +797,7 @@ function memoryShell() {
   state.memoryEntriesDirty = false;
   const altPrefix = isMac ? "⌥" : "Alt";
   const altTitle = isMac ? "Alt" : "Alt";
-  main.innerHTML = `<div class="session-toolbar memory-toolbar"><div class="session-heading"><h2>Память</h2><span id="memory-subtitle" class="muted">Текущие записи · сначала обновлённые</span></div><div class="memory-filters"><label>Разговор<select id="memory-scope"><option value="">Загружаем разговоры…</option></select></label><label class="memory-entries-only">Поиск<div class="search-wrap"><input id="memory-search" type="search" placeholder="Текст, ID, источник или участник…" autocomplete="off" value="${esc(state.memoryQuery)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${isMac ? "⌘ K" : "Ctrl K"}</kbd></div></label><label class="memory-entries-only">Тип<select id="memory-kind"><option value="">Все типы</option>${Object.entries(memoryKinds).map(([key, title]) => `<option value="${key}" ${state.memoryKind === key ? "selected" : ""}>${title}</option>`).join("")}</select></label></div><p class="memory-hint memory-entries-only">Все слова запроса должны встречаться в одной записи. Поиск без учёта регистра.</p><nav class="tabs" role="tablist" aria-label="Разделы памяти"><button class="tab" id="memory-tab-entries" role="tab" data-memory-tab="entries" aria-controls="memory-panel-entries" aria-selected="true" tabindex="0" title="Список записей (${altTitle}+1)" aria-keyshortcuts="Alt+1">Записи <small id="memory-tab-entries-count"></small><kbd>${altPrefix} 1</kbd></button><button class="tab" id="memory-tab-analytics" role="tab" data-memory-tab="analytics" aria-controls="memory-panel-analytics" aria-selected="false" tabindex="-1" title="Аналитика памяти (${altTitle}+2)" aria-keyshortcuts="Alt+2">Аналитика <kbd>${altPrefix} 2</kbd></button></nav></div><section id="memory-panel-entries" role="tabpanel" aria-labelledby="memory-tab-entries"><div id="memory-error" class="error hidden" role="alert"></div><details id="memory-soul" class="analysis-row"><summary title="Раскрыть или свернуть SOUL.md · Enter" aria-keyshortcuts="Enter">Личность SOUL.md <span class="muted">Имя, характер и правила общения OpenAlbert · общие для всех разговоров</span></summary><div class="run-body" aria-busy="true"><div id="soul-error" class="error hidden" role="alert"></div><pre class="prose" role="status">Загружаем SOUL.md…</pre></div></details><details id="memory-group" class="analysis-row hidden"><summary title="Раскрыть или свернуть GROUP.md · Enter / Пробел" aria-keyshortcuts="Enter Space">Правила группы GROUP.md <span class="muted">Общие для всех топиков выбранной группы</span></summary><div class="run-body" aria-busy="false"><div id="group-error" class="error hidden" role="alert"></div><pre class="prose" role="status"></pre></div></details><details id="memory-profile" class="analysis-row hidden"><summary>Профиль USER.md <span class="muted">Контекст новых сессий этого разговора</span></summary><div class="run-body"><pre class="prose"></pre></div></details><div id="memory-list" aria-busy="true"><div class="loading-line" role="status">Загружаем память…</div></div><div class="pagination"><span id="memory-count" role="status"></span><button id="more-memory" class="button hidden" title="Загрузить ещё записи · Enter" aria-keyshortcuts="Enter">Ещё записи</button></div></section><section id="memory-panel-analytics" class="hidden" role="tabpanel" aria-labelledby="memory-tab-analytics"><div id="memory-analytics-error" class="error hidden" role="alert"></div><div id="memory-analytics" aria-busy="false"><div class="loading-line" role="status">Загружаем аналитику памяти…</div></div></section>`;
+  main.innerHTML = `<div class="session-toolbar memory-toolbar"><div class="session-heading"><h2>Память</h2><span id="memory-subtitle" class="muted">Текущие записи · сначала обновлённые</span></div><div class="memory-filters"><label>Разговор<select id="memory-scope"><option value="">Загружаем разговоры…</option></select></label><label class="memory-entries-only">Поиск<div class="search-wrap"><input id="memory-search" type="search" placeholder="Текст, ID, источник или участник…" autocomplete="off" value="${esc(state.memoryQuery)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${isMac ? "⌘ K" : "Ctrl K"}</kbd></div></label><label class="memory-entries-only">Тип<select id="memory-kind"><option value="">Все типы</option>${Object.entries(memoryKinds).map(([key, title]) => `<option value="${key}" ${state.memoryKind === key ? "selected" : ""}>${title}</option>`).join("")}</select></label></div><p class="memory-hint memory-entries-only">Все слова запроса должны встречаться в одной записи. Поиск без учёта регистра.</p><nav class="tabs" role="tablist" aria-label="Разделы памяти"><button class="tab" id="memory-tab-entries" role="tab" data-memory-tab="entries" aria-controls="memory-panel-entries" aria-selected="true" tabindex="0" title="Список записей (${altTitle}+1)" aria-keyshortcuts="Alt+1">Записи <small id="memory-tab-entries-count"></small><kbd>${altPrefix} 1</kbd></button><button class="tab" id="memory-tab-analytics" role="tab" data-memory-tab="analytics" aria-controls="memory-panel-analytics" aria-selected="false" tabindex="-1" title="Аналитика памяти (${altTitle}+2)" aria-keyshortcuts="Alt+2">Аналитика <kbd>${altPrefix} 2</kbd></button></nav></div><section id="memory-panel-entries" role="tabpanel" aria-labelledby="memory-tab-entries"><div id="memory-error" class="error hidden" role="alert"></div><details id="memory-soul" class="analysis-row"><summary title="Раскрыть или свернуть SOUL.md · Enter" aria-keyshortcuts="Enter">Личность SOUL.md <span class="muted">Имя, характер и правила общения OpenAlbert · общие для всех разговоров</span></summary><div class="run-body" aria-busy="true"><div id="soul-error" class="error hidden" role="alert"></div><pre class="prose" role="status">Загружаем SOUL.md…</pre></div></details><details id="memory-group" class="analysis-row hidden"><summary title="Раскрыть или свернуть GROUP.md · Enter / Пробел" aria-keyshortcuts="Enter Space">Правила группы GROUP.md <span class="muted">Общие для всех топиков выбранной группы</span></summary><div class="run-body" aria-busy="false"><div id="group-error" class="error hidden" role="alert"></div><pre class="prose" role="status"></pre></div></details><details id="memory-profile" class="analysis-row hidden"><summary>Профиль USER.md <span class="muted">Контекст новых сессий этого разговора</span></summary><div class="run-body"><pre class="prose"></pre></div></details><details id="memory-consolidations" class="analysis-row hidden"><summary title="Раскрыть или свернуть историю консолидации · Enter / Пробел" aria-keyshortcuts="Enter Space">История консолидации <span class="muted" id="memory-consolidations-meta"></span></summary><div class="run-body" aria-busy="false"><div id="consolidations-error" class="error hidden" role="alert"></div><div id="consolidations-content"></div></div></details><div id="memory-list" aria-busy="true"><div class="loading-line" role="status">Загружаем память…</div></div><div class="pagination"><span id="memory-count" role="status"></span><button id="more-memory" class="button hidden" title="Загрузить ещё записи · Enter" aria-keyshortcuts="Enter">Ещё записи</button></div></section><section id="memory-panel-analytics" class="hidden" role="tabpanel" aria-labelledby="memory-tab-analytics"><div id="memory-analytics-error" class="error hidden" role="alert"></div><div id="memory-analytics" aria-busy="false"><div class="loading-line" role="status">Загружаем аналитику памяти…</div></div></section>`;
   syncMemoryTabUI();
 }
 async function loadSoul() {
@@ -846,6 +852,43 @@ async function loadGroupRules(scope, isGroup, token) {
   }
 }
 
+async function loadConsolidations(scope, token) {
+  const section = $("#memory-consolidations");
+  section.dataset.scope = scope;
+  $("#consolidations-error").classList.add("hidden");
+  $("#consolidations-content").innerHTML = "";
+  $("#memory-consolidations-meta").textContent = "";
+  $("#memory-consolidations .run-body").setAttribute("aria-busy", "false");
+  if (!scope) {
+    section.classList.add("hidden");
+    return;
+  }
+  $("#memory-consolidations .run-body").setAttribute("aria-busy", "true");
+  try {
+    const { consolidations } = await api("memory/consolidations?" + new URLSearchParams({ conversation_id: scope }));
+    if (token !== state.memoryToken || state.view !== "memory") return;
+    if (!consolidations?.length) {
+      section.classList.add("hidden");
+      return;
+    }
+    section.classList.remove("hidden");
+    $("#memory-consolidations-meta").textContent = `Запусков: ${consolidations.length}`;
+    $("#consolidations-content").innerHTML = consolidations.map((run) => {
+      const delta = run.profile_chars_delta > 0 ? `+${run.profile_chars_delta}` : `${run.profile_chars_delta || 0}`;
+      const ops = (run.operations || []).map((op) => `<li><span class="mono">${esc(op.phase)}/${esc(op.op)}</span> (${esc(op.status)}${op.skip_reason ? `: ${esc(op.skip_reason)}` : ""}) <span class="mono">${esc((op.ids || []).join(", "))}</span>${op.reason ? ` — ${esc(op.reason)}` : ""}</li>`).join("");
+      return `<div class="consolidation-run"><div class="memory-meta"><span>${esc(date(run.started_at))}</span><span>${esc(run.trigger || "scheduled")}</span><span>${esc(run.status)}</span><span>Записей: ${esc(run.before_count)} → ${esc(run.after_count)}</span><span>USER.md: ${esc(run.profile_chars_before)} → ${esc(run.profile_chars_after)} (${esc(delta)})</span></div>${ops ? `<ul class="consolidation-ops">${ops}</ul>` : '<p class="muted">Операций не было.</p>'}</div>`;
+    }).join("");
+  } catch (error) {
+    if (token !== state.memoryToken || state.view !== "memory") return;
+    section.classList.remove("hidden");
+    $("#consolidations-error").textContent = `Не удалось загрузить историю консолидации. ${error.message} Нажмите «Обновить» (Alt+R).`;
+    $("#consolidations-error").classList.remove("hidden");
+  } finally {
+    if (token === state.memoryToken && state.view === "memory")
+      $("#memory-consolidations .run-body").setAttribute("aria-busy", "false");
+  }
+}
+
 function scheduleMemory() {
   clearTimeout(memoryDebounce);
   ++state.memoryToken;
@@ -864,13 +907,14 @@ async function loadMemory(more = false) {
   $("#memory-list").setAttribute("aria-busy", "true");
   $("#more-memory").disabled = true;
   $("#memory-error").classList.add("hidden");
-  let groupLoad;
+  let groupLoad, consolidationLoad;
   try {
     if (!more) {
       const { conversations } = await api("memory/conversations");
       if (token !== state.memoryToken || state.view !== "memory") return;
       const selected = populateMemoryScopes(conversations);
       groupLoad = loadGroupRules(state.memoryScope, selected && !selected.private && selected.chat_id < 0, token);
+      consolidationLoad = loadConsolidations(state.memoryScope, token);
     }
     const requestedScope = state.memoryScope;
     const result = requestedScope
@@ -911,7 +955,7 @@ async function loadMemory(more = false) {
     if (!state.memories.length)
       $("#memory-list").innerHTML = '<div class="empty-panel">Не удалось загрузить память. Нажмите «Обновить» (Alt+R).</div>';
   } finally {
-    await groupLoad;
+    await Promise.all([groupLoad, consolidationLoad]);
     if (token === state.memoryToken && state.view === "memory") {
       state.memoryBusy = false;
       setBusy(state.busy);

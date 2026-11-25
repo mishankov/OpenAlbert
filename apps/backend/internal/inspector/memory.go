@@ -15,6 +15,7 @@ import (
 type ConversationStore interface {
 	ListConversations(context.Context) ([]domain.Conversation, error)
 	Conversation(context.Context, string) (domain.Conversation, bool, error)
+	ListMemoryConsolidations(context.Context, string, int) ([]domain.MemoryConsolidationReport, error)
 }
 
 type MemoryStore interface {
@@ -131,6 +132,12 @@ func RegisterMemory(mux *http.ServeMux, conversations ConversationStore, memory 
 		}
 		var origins map[string]SessionOrigin
 		var consolidation *ConsolidationSummary
+		if reports, err := conversations.ListMemoryConsolidations(r.Context(), scope, 1); err != nil {
+			fail(w, 500)
+			return
+		} else if len(reports) > 0 {
+			consolidation = consolidationSummaryFromReport(reports[0])
+		}
 		if meta, ok := conversations.(MemoryMetadataStore); ok {
 			if sessionIDs := uniqueOriginSessionIDs(entries); len(sessionIDs) > 0 {
 				origins, err = meta.InspectSessionOrigins(r.Context(), scope, sessionIDs)
@@ -139,13 +146,15 @@ func RegisterMemory(mux *http.ServeMux, conversations ConversationStore, memory 
 					return
 				}
 			}
-			id, raw, found, err := meta.InspectLatestConsolidation(r.Context(), scope)
-			if err != nil {
-				fail(w, 500)
-				return
-			}
-			if found {
-				consolidation = parseConsolidationReceipt(id, raw)
+			if consolidation == nil {
+				id, raw, found, err := meta.InspectLatestConsolidation(r.Context(), scope)
+				if err != nil {
+					fail(w, 500)
+					return
+				}
+				if found {
+					consolidation = parseConsolidationReceipt(id, raw)
+				}
 			}
 		}
 		write(w, computeMemoryStats(scope, entries, profile, origins, consolidation, time.Now().UTC()))
@@ -166,6 +175,22 @@ func RegisterMemory(mux *http.ServeMux, conversations ConversationStore, memory 
 			return
 		}
 		write(w, entry)
+	})))
+	mux.Handle("GET /api/inspect/memory/consolidations", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scope := r.URL.Query().Get("conversation_id")
+		if !memoryID(scope) {
+			fail(w, 400)
+			return
+		}
+		rows, err := conversations.ListMemoryConsolidations(r.Context(), scope, 50)
+		if err != nil {
+			fail(w, 500)
+			return
+		}
+		if rows == nil {
+			rows = []domain.MemoryConsolidationReport{}
+		}
+		write(w, map[string]any{"consolidations": rows})
 	})))
 }
 
