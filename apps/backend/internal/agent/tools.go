@@ -173,6 +173,9 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 	if strings.HasPrefix(in.Call.Name, "computer_") {
 		return a.executeComputer(ctx, in)
 	}
+	if isT3Tool(in.Call.Name) {
+		return a.executeT3(ctx, in)
+	}
 	if in.Call.Name == "backup_status" {
 		return a.backupStatus(in)
 	}
@@ -666,6 +669,9 @@ func (a *Activities) toolDefinitions() []domain.Tool {
 		tools = append(tools, computerDefinitions()...)
 	}
 	tools = append(tools, a.workspaceToolDefinitions()...)
+	if a.T3 != nil {
+		tools = append(tools, t3Definitions()...)
+	}
 	available := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
 		if (tool.Name == "send_widget" || tool.Name == "edit_widget_data") && a.Widgets == nil {
@@ -703,6 +709,9 @@ func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 			continue
 		}
 		if strings.HasPrefix(tool.Name, "computer_") && (!a.isOwnerAuthorized(turn.Conversation) || turn.Input.Initiative) {
+			continue
+		}
+		if isT3Tool(tool.Name) && (!a.isT3AuthorizedConversation(turn.Conversation) || turn.Input.Initiative) {
 			continue
 		}
 		if tool.Name == "backup_status" && !a.isOwnerAuthorized(turn.Conversation) {

@@ -38,6 +38,7 @@ type Memory struct {
 	progress           map[string]domain.Progress
 	consolidations     map[string]domain.MemoryConsolidationReport
 	consolidationOrder []string
+	t3                 *memoryT3
 }
 
 var _ domain.Repository = (*Memory)(nil)

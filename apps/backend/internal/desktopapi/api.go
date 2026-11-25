@@ -25,6 +25,7 @@ import (
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/integrations"
+	"openalbert/apps/backend/internal/t3"
 )
 
 const MaxAttachmentBytes = 20 << 20
@@ -37,6 +38,7 @@ type MemoryReader interface {
 type API struct {
 	Billing    *integrations.BillingModel
 	Activities *agent.Activities
+	T3         *t3.ControlPlane
 	Logger     *slog.Logger
 	Repo       domain.Repository
 	Memory     MemoryReader
@@ -96,6 +98,11 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/coding/sessions", a.codingSessionCreate)
 	mux.HandleFunc("POST /api/v1/coding/sessions/{id}/sync", a.codingSessionSync)
 	mux.HandleFunc("POST /api/v1/coding/sessions/{id}/close", a.codingSessionClose)
+	mux.HandleFunc("POST /api/v1/t3/hosts/register", a.t3HostRegister)
+	mux.HandleFunc("POST /api/v1/t3/heartbeat", a.t3Heartbeat)
+	mux.HandleFunc("GET /api/v1/t3/commands/stream", a.t3CommandStream)
+	mux.HandleFunc("POST /api/v1/t3/commands/{command_id}/result", a.t3CommandResult)
+	mux.HandleFunc("POST /api/v1/t3/events", a.t3Event)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
