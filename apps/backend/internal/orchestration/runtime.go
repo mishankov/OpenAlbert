@@ -26,6 +26,7 @@ type Runtime struct {
 	Repo                        domain.Repository
 	Activities                  *agent.Activities
 	Telegram                    *integrations.Telegram
+	Callbacks                   *integrations.CallbackRouter
 	TTS                         domain.SpeechSynthesizer
 	Client                      client.Client
 	TaskQueue                   string
@@ -158,7 +159,15 @@ func (r *Runtime) poll(ctx context.Context) {
 		// the whole bounded API batch immediately so one slow request cannot
 		// exhaust the 15-second deadline of the following queries.
 		for _, update := range updates {
-			if update.WidgetQuery == nil || r.Activities.Widgets == nil {
+			if update.CallbackQuery != nil && r.Callbacks != nil && r.Callbacks.Handles(*update.CallbackQuery) {
+				r.wg.Add(1)
+				go func(q domain.CallbackQuery) {
+					defer r.wg.Done()
+					r.record(ctx, "telegram.callback_query", r.Callbacks.Dispatch(ctx, q))
+				}(*update.CallbackQuery)
+				continue
+			}
+			if update.WidgetQuery == nil || r.Activities == nil || r.Activities.Widgets == nil {
 				continue
 			}
 			r.wg.Add(1)

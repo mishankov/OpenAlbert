@@ -145,7 +145,7 @@ func TestRequiredOwnerAndSecrets(t *testing.T) {
 	}
 }
 func TestInvalidSettingsNeverEchoInput(t *testing.T) {
-	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_CONFIG_FILE", "INSPECTOR_PUBLIC_URL", "VICTORIALOGS_URL", "DATABASE_URL", "S3_SECURE", "TELEGRAM_ALLOW_BOT_MESSAGES", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX", "WEB_SEARCH_PROVIDER", "EXA_SEARCH_URL", "EXA_MONTHLY_BUDGET_USD"} {
+	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "TELEGRAM_WORKSPACE_GROUP_ID", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_CONFIG_FILE", "INSPECTOR_PUBLIC_URL", "VICTORIALOGS_URL", "DATABASE_URL", "S3_SECURE", "TELEGRAM_ALLOW_BOT_MESSAGES", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX", "WEB_SEARCH_PROVIDER", "EXA_SEARCH_URL", "EXA_MONTHLY_BUDGET_USD"} {
 		t.Run(key, func(t *testing.T) {
 			env := validEnv(t)
 			env[key] = "secret-bad-value"
@@ -312,4 +312,50 @@ func TestProfileAuthenticationDefaultAndLegacyConflicts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTelegramWorkspaceGroupSetting(t *testing.T) {
+	t.Run("unset by default", func(t *testing.T) {
+		env := validEnv(t)
+		cfg, err := load(func(k string) string { return env[k] })
+		if err != nil || cfg.TelegramWorkspaceGroupID != 0 || len(cfg.TelegramAllowedGroupIDs) != 0 {
+			t.Fatalf("unexpected workspace default: id=%d groups=%v err=%v", cfg.TelegramWorkspaceGroupID, cfg.TelegramAllowedGroupIDs, err)
+		}
+	})
+	t.Run("auto-added to allowed group IDs without duplication", func(t *testing.T) {
+		env := validEnv(t)
+		env["TELEGRAM_ALLOWED_GROUP_IDS"] = "-100111"
+		env["TELEGRAM_WORKSPACE_GROUP_ID"] = "-100222"
+		cfg, err := load(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.TelegramWorkspaceGroupID != -100222 {
+			t.Fatalf("got workspace %d, want -100222", cfg.TelegramWorkspaceGroupID)
+		}
+		if len(cfg.TelegramAllowedGroupIDs) != 2 || cfg.TelegramAllowedGroupIDs[0] != -100111 || cfg.TelegramAllowedGroupIDs[1] != -100222 {
+			t.Fatalf("unexpected allowed groups: %v", cfg.TelegramAllowedGroupIDs)
+		}
+	})
+	t.Run("deduplicated when already listed in allowed group IDs", func(t *testing.T) {
+		env := validEnv(t)
+		env["TELEGRAM_ALLOWED_GROUP_IDS"] = "-100222, -100333"
+		env["TELEGRAM_WORKSPACE_GROUP_ID"] = " -100222 "
+		cfg, err := load(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.TelegramWorkspaceGroupID != -100222 || len(cfg.TelegramAllowedGroupIDs) != 2 {
+			t.Fatalf("expected deduplicated groups, got id=%d groups=%v", cfg.TelegramWorkspaceGroupID, cfg.TelegramAllowedGroupIDs)
+		}
+	})
+	t.Run("rejects zero, positive, and non-numeric values", func(t *testing.T) {
+		for _, raw := range []string{"0", "100222", "secret-workspace"} {
+			env := validEnv(t)
+			env["TELEGRAM_WORKSPACE_GROUP_ID"] = raw
+			if _, err := load(func(k string) string { return env[k] }); err == nil || strings.Contains(err.Error(), "secret-workspace") {
+				t.Fatalf("raw=%q should fail without leaking input, err=%v", raw, err)
+			}
+		}
+	})
 }

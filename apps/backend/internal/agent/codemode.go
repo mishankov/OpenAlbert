@@ -130,9 +130,13 @@ func (a *Activities) CodemodeStep(ctx context.Context, in CodemodeInput) (codemo
 			return codemode.Result{}, err
 		}
 	}
+	conv, err := a.sanitizeWorkspaceTaskConversation(ctx, in.Conversation, in.TaskID)
+	if err != nil {
+		return codemode.Result{}, err
+	}
 	turn := Turn{
 		Input:         RunInput{TaskID: in.TaskID, Initiative: in.Background},
-		Conversation:  in.Conversation,
+		Conversation:  conv,
 		TelegramReply: in.TelegramReply,
 	}
 	var tools []codemode.Tool
@@ -183,7 +187,8 @@ func CodemodeParallelRead(name string) bool {
 func codemodeNeedsClaim(name string) bool {
 	switch name {
 	case "group_update", "task_update", "memory_update", "participant_update",
-		"soul_update", "skill_propose_change", "computer_upload":
+		"soul_update", "skill_propose_change", "computer_upload",
+		"topic_create", "topic_update", "workspace_post":
 		return true
 	default:
 		return false

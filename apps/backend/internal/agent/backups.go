@@ -11,7 +11,7 @@ import (
 )
 
 func backupDefinition() domain.Tool {
-	return domain.Tool{Name: "backup_status", Description: "Read host-reported backup schedule, current phase, last verified successful S3 backup and saved dates. Owner private chat only. This is a local status snapshot with observation timestamps, not a live S3 query. Unknown/stale status is not success. Does not start, change, delete or restore backups. Never exposes credentials.", Parameters: schema(``)}
+	return domain.Tool{Name: "backup_status", Description: "Read host-reported backup schedule, current phase, last verified successful S3 backup and saved dates. Authorized owner conversations only. This is a local status snapshot with observation timestamps, not a live S3 query. Unknown/stale status is not success. Does not start, change, delete or restore backups. Never exposes credentials.", Parameters: schema(``)}
 }
 
 type BackupAlertInput struct {
@@ -29,7 +29,7 @@ func (a *Activities) BackupAlert(ctx context.Context, in BackupAlertInput) error
 	if err != nil {
 		return err
 	}
-	if !found || a.backupAccess(conv) != nil {
+	if !found || a.Backups == nil || !a.isOwnerPrivate(conv) {
 		return errors.New("backup alert requires the owner's private conversation")
 	}
 	if time.Since(in.Event.At) > 48*time.Hour {
@@ -53,8 +53,8 @@ func (a *Activities) BackupAlert(ctx context.Context, in BackupAlertInput) error
 }
 
 func (a *Activities) backupAccess(c domain.Conversation) error {
-	if a.Backups == nil || !a.isOwnerPrivate(c) {
-		return errors.New("backup status is only available in the owner's private chat when configured")
+	if a.Backups == nil || !a.isOwnerAuthorized(c) {
+		return errors.New("backup status is only available in authorized owner conversations when configured")
 	}
 	return nil
 }

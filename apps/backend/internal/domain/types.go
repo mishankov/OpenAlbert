@@ -222,6 +222,7 @@ type Task struct {
 	ScheduleCron     string    `json:"schedule_cron,omitempty"`
 	ScheduleTimezone string    `json:"schedule_timezone,omitempty"`
 	Maintenance      bool      `json:"maintenance,omitempty"`
+	OwnerAuthorized  bool      `json:"owner_authorized,omitempty"`
 	NextRunAt        time.Time `json:"next_run_at,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`

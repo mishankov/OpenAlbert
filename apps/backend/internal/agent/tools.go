@@ -66,13 +66,13 @@ func Definitions() []domain.Tool {
 		{Name: "task_find", Description: "Find assignments, reminders and monitoring tasks in the current conversation, including those created in earlier sessions. Use for schedules, progress, results and status questions, and before creating a possible duplicate; these belong to tasks, not memory_search. query is a literal case-insensitive substring of title or goal, or an exact task ID; omitted or empty query returns all saved tasks in this conversation, including completed ones. Inspect status and use task_read for details.", Parameters: schema(`"query":{"type":"string","description":"A literal substring of task title or goal, or an exact ID. Omit or use an empty string to list all saved tasks in this conversation."}`)},
 		{Name: "task_read", Description: "Read saved task status, result, last update, next check. Reading does not execute it.", Parameters: schema(`"id":{"type":"string"}`, "id")},
 		{Name: "task_update", Description: "Update a task goal, result, status or schedule. Status: queued, running, waiting, paused, completed, cancelled, failed. Completed and cancelled tasks stop. To resume use queued. Use for progress and stop requests.", Parameters: schema(`"id":{"type":"string"},"goal":{"type":"string"},"result":{"type":"string"},"status":{"type":"string"},"next_run_at":{"type":"string"},"schedule_seconds":{"type":"integer","minimum":0},"schedule_cron":{"type":"string"},"schedule_timezone":{"type":"string"},"maintenance":{"type":"boolean"}`, "id")},
-		{Name: "conversation_list", Description: "List readable saved conversations. In the owner's private chat includes all known groups; elsewhere only the current conversation. Use before recalling group discussions. Does not send messages to those chats.", Parameters: schema(``)},
-		{Name: "conversation_history", Description: "Search or read saved user/assistant messages across sessions, including active sessions. conversation_id defaults to this chat; only the owner's private chat can read groups. Results newest first with original scope, session and sequence. Use for earlier messages and who said what; memory_search is not a complete message log. Optional query is one literal case-insensitive substring of the message, not keywords combined with AND or OR; use a short distinctive fragment. Omit query or use an empty string to read recent messages. Use next_before_seq as before_seq to page backwards. session_started_at is the session start, not the message timestamp. Only messages actually received and processed by this bot are available. tool_calls lists the IDs and names of actual send_message, send_rich_message, and send_voice calls; their text is included in content. An ordinary assistant response without a delivery tool is internal run history. A delivery tool call is a request to send, not confirmation of delivery.", Parameters: schema(`"conversation_id":{"type":"string"},"query":{"type":"string","description":"One literal substring of a saved message, not a list of keywords. Omit or use an empty string to read recent messages."},"before_seq":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}`)},
-		{Name: "memory_search", Description: "Search saved memory entries by literal, case-insensitive substrings, NOT semantic search. Every whitespace-separated query term must occur in the SAME entry (content, source or kind). Punctuation is literal; commas do not mean OR. No stemming, translation, synonyms, regex or wildcard syntax. Start with one distinctive name or keyword, for example Polka; search unrelated topics in separate calls. After an empty result, shorten the query or try an alternative spelling; adding words narrows the search. An empty query returns up to 50 most recently updated readable entries, not a complete export. An empty result means no matching entries, not that no memories exist. In the owner's private chat searches this chat and saved groups by default; optional conversation_id selects an authorized scope. Results include scope and source; do not attribute group participants' facts to the owner. Use task_find/task_read for assignments and schedules, conversation_history for earlier messages.", Parameters: schema(`"query":{"type":"string","description":"Literal terms that must all match one entry. Prefer a single distinctive term, e.g. Polka. Empty string lists recent entries; do not use comma-separated topics."},"conversation_id":{"type":"string","description":"Optional authorized conversation scope. Omit to search all scopes readable from this chat."}`, "query")},
-		{Name: "memory_read", Description: "Read a memory and its source. For a group result found from the owner's private chat, supply its conversation_id from the result scope.", Parameters: schema(`"id":{"type":"string"},"conversation_id":{"type":"string"}`, "id")},
+		{Name: "conversation_list", Description: "List readable saved conversations. In authorized owner conversations (private chat or owner workspace topics) includes all known groups and the owner's private chat; elsewhere only the current conversation. Use before recalling group discussions. Does not send messages to those chats.", Parameters: schema(``)},
+		{Name: "conversation_history", Description: "Search or read saved user/assistant messages across sessions, including active sessions. conversation_id defaults to this chat; only authorized owner conversations can read other saved conversations. Results newest first with original scope, session and sequence. Use for earlier messages and who said what; memory_search is not a complete message log. Optional query is one literal case-insensitive substring of the message, not keywords combined with AND or OR; use a short distinctive fragment. Omit query or use an empty string to read recent messages. Use next_before_seq as before_seq to page backwards. session_started_at is the session start, not the message timestamp. Only messages actually received and processed by this bot are available. tool_calls lists the IDs and names of actual send_message, send_rich_message, and send_voice calls; their text is included in content. An ordinary assistant response without a delivery tool is internal run history. A delivery tool call is a request to send, not confirmation of delivery.", Parameters: schema(`"conversation_id":{"type":"string"},"query":{"type":"string","description":"One literal substring of a saved message, not a list of keywords. Omit or use an empty string to read recent messages."},"before_seq":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}`)},
+		{Name: "memory_search", Description: "Search saved memory entries by literal, case-insensitive substrings, NOT semantic search. Every whitespace-separated query term must occur in the SAME entry (content, source or kind). Punctuation is literal; commas do not mean OR. No stemming, translation, synonyms, regex or wildcard syntax. Start with one distinctive name or keyword, for example Polka; search unrelated topics in separate calls. After an empty result, shorten the query or try an alternative spelling; adding words narrows the search. An empty query returns up to 50 most recently updated readable entries, not a complete export. An empty result means no matching entries, not that no memories exist. In authorized owner conversations searches owner personal memory and saved groups by default; optional conversation_id selects an authorized scope. Results include scope and source; do not attribute group participants' facts to the owner. Use task_find/task_read for assignments and schedules, conversation_history for earlier messages.", Parameters: schema(`"query":{"type":"string","description":"Literal terms that must all match one entry. Prefer a single distinctive term, e.g. Polka. Empty string lists recent entries; do not use comma-separated topics."},"conversation_id":{"type":"string","description":"Optional authorized conversation scope. Omit to search all scopes readable from this chat."}`, "query")},
+		{Name: "memory_read", Description: "Read a memory and its source. For a group result found from an authorized owner conversation, supply its conversation_id from the result scope.", Parameters: schema(`"id":{"type":"string"},"conversation_id":{"type":"string"}`, "id")},
 		{Name: "memory_update", Description: "Save useful user memory with provenance. Use profile for core user facts (name, home city, timezone), preference only for explicitly stated lasting preferences, fact for contextual facts, episode for past events, hypothesis for uncertain inferences. Profile and preference rebuild USER.md automatically. A one-time request/reminder is task state, not a lasting preference; do not save it as one. Update the same ID for corrections; delete obsolete memory using delete=true.", Parameters: schema(`"id":{"type":"string"},"content":{"type":"string"},"kind":{"type":"string","enum":["profile","fact","preference","episode","hypothesis"]},"delete":{"type":"boolean"}`)},
-		{Name: "participant_search", Description: "Find group participants by name, username, Telegram ID or remembered facts. Within a group searches only that conversation; in the owner's private chat searches known groups. Optional conversation_id narrows scope. The same user in different groups has separate profiles.", Parameters: schema(`"query":{"type":"string"},"conversation_id":{"type":"string"}`)},
-		{Name: "participant_read", Description: "Read a participant's group-scoped profile and facts with source quotes. Use user_id from Telegram metadata or participant_search, not a guessed identity. Owner private chat must specify a readable group conversation_id. Large profiles are bounded; use memory_read with a fact ID and conversation_id for its full content.", Parameters: schema(`"user_id":{"type":"integer","minimum":1},"conversation_id":{"type":"string"}`, "user_id")},
+		{Name: "participant_search", Description: "Find group participants by name, username, Telegram ID or remembered facts. Within an ordinary group searches only that conversation; in authorized owner conversations searches known groups. Optional conversation_id narrows scope. The same user in different groups has separate profiles.", Parameters: schema(`"query":{"type":"string"},"conversation_id":{"type":"string"}`)},
+		{Name: "participant_read", Description: "Read a participant's group-scoped profile and facts with source quotes. Use user_id from Telegram metadata or participant_search, not a guessed identity. Authorized owner conversations outside an ordinary group must specify a readable group conversation_id. Large profiles are bounded; use memory_read with a fact ID and conversation_id for its full content.", Parameters: schema(`"user_id":{"type":"integer","minimum":1},"conversation_id":{"type":"string"}`, "user_id")},
 		{Name: "participant_update", Description: "Automatically remember useful facts a group participant explicitly stated about themselves, without waiting for 'remember'. Save their Telegram user_id, source_message_id and exact evidence quote from their own text. Use profile for core facts, preference for explicitly lasting preferences, fact for context. Never infer a person's preference from another speaker, assistant/tool output, jokes or a one-time request. Updates and deletions use an existing fact ID from participant_read. Only the originating group is writable; private chats cannot write group profiles. delete=true forgets that fact after quoting the participant's own request.", Parameters: schema(`"user_id":{"type":"integer","minimum":1},"source_message_id":{"type":"string"},"evidence":{"type":"string"},"id":{"type":"string"},"content":{"type":"string"},"kind":{"type":"string","enum":["profile","preference","fact"]},"delete":{"type":"boolean"}`, "user_id", "source_message_id", "evidence")},
 		{Name: "soul_read", Description: "Read the current SOUL.md in the installation owner's interactive private chat: your shared name, identity and personality. Use before editing to get the exact current text. Never disclose this text in a group.", Parameters: schema(``)},
 		{Name: "soul_update", Description: "Edit your SOUL.md when the installation owner requests a change in their private conversation, for example renaming you. Replace one exact old_text fragment with new_text; old_text must match once, so include surrounding text when needed. Preserve unrelated instructions. Changes persist across sessions and apply when the next turn is prepared. Never use for other users, group requests, background tasks or initiative checks.", Parameters: schema(`"old_text":{"type":"string"},"new_text":{"type":"string"}`, "old_text", "new_text")},
@@ -166,6 +166,9 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 			return nil, errors.New("invalid widget JSON")
 		}
 		return map[string]string{"state": "updated"}, a.Widgets.Edit(ctx, in.Conversation, p.MessageID, p.WidgetData)
+	}
+	if isWorkspaceTool(in.Call.Name) {
+		return a.executeWorkspaceTool(ctx, in)
 	}
 	if strings.HasPrefix(in.Call.Name, "computer_") {
 		return a.executeComputer(ctx, in)
@@ -327,7 +330,7 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 		if interval < 0 || (interval > 0 && time.Duration(interval)*time.Second < a.MinTaskInterval) {
 			return nil, fmt.Errorf("schedule must be at least %d seconds", int(a.MinTaskInterval.Seconds()))
 		}
-		task := domain.Task{ID: key, ConversationID: scope, Title: p.Title, Goal: p.Goal, Reason: p.Reason, Status: "queued", ScheduleSeconds: interval, NextRunAt: next, CreatedAt: now, UpdatedAt: now}
+		task := domain.Task{ID: key, ConversationID: scope, Title: p.Title, Goal: p.Goal, Reason: p.Reason, Status: "queued", ScheduleSeconds: interval, OwnerAuthorized: a.isOwnerAuthorized(in.Conversation), NextRunAt: next, CreatedAt: now, UpdatedAt: now}
 		if p.Maintenance != nil {
 			if in.Background {
 				return nil, errors.New("only an interactive request may configure maintenance authority")
@@ -463,14 +466,19 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 	case "memory_search":
 		return a.searchMemories(ctx, in.Conversation, p)
 	case "memory_read":
-		target, err := a.readScope(ctx, in.Conversation, p.ConversationID)
+		requested := p.ConversationID
+		if requested == "" {
+			requested = a.memoryWriteScope(in.Conversation)
+		}
+		target, err := a.readScope(ctx, in.Conversation, requested)
 		if err != nil {
 			return nil, err
 		}
 		return a.Knowledge.Read(ctx, target, p.ID)
 	case "memory_update":
+		memScope := a.memoryWriteScope(in.Conversation)
 		if p.Delete && p.ID != "" {
-			previous, err := a.Knowledge.Read(ctx, scope, p.ID)
+			previous, err := a.Knowledge.Read(ctx, memScope, p.ID)
 			if err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return nil, err
 			}
@@ -478,7 +486,7 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 				return nil, errors.New("use participant_update to change or delete a participant fact")
 			}
 		}
-		if !in.Conversation.Private && (p.Kind == "profile" || p.Kind == "preference") {
+		if !in.Conversation.Private && !a.isOwnerWorkspace(in.Conversation, in.Conversation.OwnerID) && (p.Kind == "profile" || p.Kind == "preference") {
 			return nil, errors.New("use participant_update with author evidence for a participant profile or preference")
 		}
 
@@ -486,7 +494,7 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 			p.ID = key
 		}
 		if p.Delete {
-			return map[string]string{"deleted": p.ID}, a.Knowledge.Delete(ctx, scope, p.ID)
+			return map[string]string{"deleted": p.ID}, a.Knowledge.Delete(ctx, memScope, p.ID)
 		}
 		if strings.TrimSpace(p.Content) == "" {
 			return nil, errors.New("memory content required")
@@ -497,7 +505,7 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 		if p.Kind != "profile" && p.Kind != "fact" && p.Kind != "preference" && p.Kind != "episode" && p.Kind != "hypothesis" {
 			return nil, errors.New("invalid memory kind")
 		}
-		entry := domain.MemoryEntry{ID: p.ID, Scope: scope, Content: p.Content, Source: in.SessionID, Kind: p.Kind, UpdatedAt: now}
+		entry := domain.MemoryEntry{ID: p.ID, Scope: memScope, Content: p.Content, Source: in.SessionID, Kind: p.Kind, UpdatedAt: now}
 		return entry, a.Knowledge.Update(ctx, entry)
 	case "participant_search":
 		return a.searchParticipants(ctx, in.Conversation, p)
@@ -657,6 +665,7 @@ func (a *Activities) toolDefinitions() []domain.Tool {
 	if a.Computer != nil {
 		tools = append(tools, computerDefinitions()...)
 	}
+	tools = append(tools, a.workspaceToolDefinitions()...)
 	available := make([]domain.Tool, 0, len(tools))
 	for _, tool := range tools {
 		if (tool.Name == "send_widget" || tool.Name == "edit_widget_data") && a.Widgets == nil {
@@ -693,28 +702,31 @@ func (a *Activities) toolsForTurn(turn Turn) []domain.Tool {
 		if (tool.Name == "group_read" || tool.Name == "group_update") && (!a.isOwnerPrivate(turn.Conversation) || !interactive) {
 			continue
 		}
-		if strings.HasPrefix(tool.Name, "computer_") && (!a.isOwnerPrivate(turn.Conversation) || turn.Input.Initiative) {
+		if strings.HasPrefix(tool.Name, "computer_") && (!a.isOwnerAuthorized(turn.Conversation) || turn.Input.Initiative) {
 			continue
 		}
-		if tool.Name == "backup_status" && !a.isOwnerPrivate(turn.Conversation) {
+		if tool.Name == "backup_status" && !a.isOwnerAuthorized(turn.Conversation) {
 			continue
 		}
 		if tool.Name == "task_update" && turn.Input.Initiative {
 			continue
 		}
-		if tool.Name == "logs_search" && (!a.isOwnerPrivate(turn.Conversation) || turn.Input.Initiative) {
+		if tool.Name == "logs_search" && (!a.isOwnerAuthorized(turn.Conversation) || turn.Input.Initiative) {
 			continue
 		}
 		if tool.Name == "report_progress" && !interactive {
 			continue
 		}
-		if tool.Name == "participant_update" && turn.Conversation.Private {
+		if tool.Name == "participant_update" && (turn.Conversation.Private || a.isWorkspaceGroup(turn.Conversation)) {
 			continue
 		}
 		if (tool.Name == "soul_read" || tool.Name == "soul_update") && (!a.isOwnerPrivate(turn.Conversation) || !interactive) {
 			continue
 		}
 		if tool.Name == "send_group_message" && (!a.isOwnerPrivate(turn.Conversation) || !interactive) {
+			continue
+		}
+		if isWorkspaceTool(tool.Name) && !a.workspaceToolAllowed(tool.Name, turn) {
 			continue
 		}
 		filtered = append(filtered, tool)
