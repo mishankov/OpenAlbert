@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
@@ -70,7 +71,7 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInp
 	p1CursorTime, p1CursorID := prep.StartPhase1Time, prep.StartPhase1ID
 	p2CursorTime, p2CursorID := prep.StartPhase2Time, prep.StartPhase2ID
 
-	recordFailure := func(runErr error, failedBatchKey string, p1HasMore, p2HasMore bool) error {
+	recordFailure := func(runErr error, failedBatchKey string, p1HasMore, p1FollowUp, p2HasMore bool) error {
 		cleanup, _ := workflow.NewDisconnectedContext(ctx)
 		var report domain.MemoryConsolidationReport
 		_ = workflow.ExecuteActivity(cleanup, "FinalizeMemoryConsolidation", agent.ConsolidationFinalizeInput{
@@ -86,6 +87,7 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInp
 			NextPhase1Time:     p1CursorTime,
 			NextPhase1ID:       p1CursorID,
 			Phase1HasMore:      p1HasMore,
+			Phase1FollowUp:     p1FollowUp,
 			NextPhase2Time:     p2CursorTime,
 			NextPhase2ID:       p2CursorID,
 			Phase2HasMore:      p2HasMore,
@@ -107,7 +109,8 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInp
 			BatchIDs:   batch.IDs,
 			Now:        workflow.Now(ctx).UTC(),
 		}).Get(ctx, &res); err != nil {
-			return recordFailure(err, fmt.Sprintf("profile/%d", i), true, prep.Phase2HasMore || len(prep.Phase2Batches) > 0)
+			p2More := !prep.Phase1FollowUp && (prep.Phase2HasMore || len(prep.Phase2Batches) > 0)
+			return recordFailure(err, fmt.Sprintf("profile/%d", i), true, prep.Phase1FollowUp, p2More)
 		}
 		operations = append(operations, res.Operations...)
 		completedBatches++
@@ -128,7 +131,7 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInp
 			BatchIDs:   batch.IDs,
 			Now:        workflow.Now(ctx).UTC(),
 		}).Get(ctx, &batchResult); err != nil {
-			return recordFailure(err, fmt.Sprintf("hygiene/%d", i), false, true)
+			return recordFailure(err, fmt.Sprintf("hygiene/%d", i), false, false, true)
 		}
 		operations = append(operations, batchResult.Operations...)
 		completedBatches++
@@ -153,6 +156,7 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInp
 		NextPhase1Time:     prep.NextPhase1Time,
 		NextPhase1ID:       prep.NextPhase1ID,
 		Phase1HasMore:      prep.Phase1HasMore,
+		Phase1FollowUp:     prep.Phase1FollowUp,
 		NextPhase2Time:     prep.NextPhase2Time,
 		NextPhase2ID:       prep.NextPhase2ID,
 		Phase2HasMore:      prep.Phase2HasMore,
@@ -215,7 +219,18 @@ func (r *Runtime) DispatchMemoryConsolidation(ctx context.Context, now time.Time
 						updatedSince++
 					}
 				}
-				if len([]rune(profile)) >= agent.DefaultProfileCharThreshold ||
+				profileChars := utf8.RuneCountInString(profile)
+				profileHash := agent.ID(profile)
+				profileThreshold := false
+				if profileChars >= agent.DefaultProfileCharThreshold {
+					if state.LastProfileHash != "" {
+						profileThreshold = profileChars > state.LastProfileChars ||
+							(profileChars == state.LastProfileChars && profileHash != state.LastProfileHash)
+					} else {
+						profileThreshold = profileChars > state.LastProfileChars
+					}
+				}
+				if profileThreshold ||
 					len(entries)-state.LastEntryCount >= agent.DefaultNewEntryThreshold ||
 					updatedSince >= agent.DefaultNewEntryThreshold {
 					trigger = "threshold"

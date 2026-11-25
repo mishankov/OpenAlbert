@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"openalbert/apps/backend/internal/domain"
 )
@@ -501,30 +502,35 @@ func (s *Store) Update(ctx context.Context, e domain.MemoryEntry) error {
 	}
 	return s.rebuildProfile(e.Scope)
 }
+func renderProfile(entries []domain.MemoryEntry) string {
+	sorted := append([]domain.MemoryEntry(nil), entries...)
+	sort.Slice(sorted, func(i, j int) bool {
+		iProfile := sorted[i].Kind == "profile"
+		jProfile := sorted[j].Kind == "profile"
+		if iProfile != jProfile {
+			return iProfile
+		}
+		if !sorted[i].UpdatedAt.Equal(sorted[j].UpdatedAt) {
+			return sorted[i].UpdatedAt.After(sorted[j].UpdatedAt)
+		}
+		return sorted[i].ID < sorted[j].ID
+	})
+	var b strings.Builder
+	b.WriteString("# User profile\n\n")
+	for _, e := range sorted {
+		if e.SubjectUserID == 0 && (e.Kind == "profile" || e.Kind == "preference") {
+			fmt.Fprintf(&b, "- %s\n", e.Content)
+		}
+	}
+	return b.String()
+}
+
 func (s *Store) rebuildProfile(scope string) error {
 	entries, err := s.all(scope)
 	if err != nil {
 		return err
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		iProfile := entries[i].Kind == "profile"
-		jProfile := entries[j].Kind == "profile"
-		if iProfile != jProfile {
-			return iProfile
-		}
-		if !entries[i].UpdatedAt.Equal(entries[j].UpdatedAt) {
-			return entries[i].UpdatedAt.After(entries[j].UpdatedAt)
-		}
-		return entries[i].ID < entries[j].ID
-	})
-	var b strings.Builder
-	b.WriteString("# User profile\n\n")
-	for _, e := range entries {
-		if e.SubjectUserID == 0 && (e.Kind == "profile" || e.Kind == "preference") {
-			fmt.Fprintf(&b, "- %s\n", e.Content)
-		}
-	}
-	return s.write(filepath.Join(scopeDir(scope), "USER.md"), []byte(b.String()))
+	return s.write(filepath.Join(scopeDir(scope), "USER.md"), []byte(renderProfile(entries)))
 }
 
 func memoryEntryEqual(a, b domain.MemoryEntry) bool {
@@ -684,6 +690,35 @@ func (s *Store) ApplyMemoryMutation(ctx context.Context, mut domain.MemoryMutati
 		}
 		if old, ok := liveByID[u.ID]; ok && old.SubjectUserID != u.SubjectUserID {
 			return false, "", errors.New("memory cannot change its participant")
+		}
+		if mut.MaxProfileChars > 0 && u.SubjectUserID == 0 && (u.Kind == "profile" || u.Kind == "preference") {
+			allEntries, err := s.all(mut.Scope)
+			if err != nil {
+				return false, "", err
+			}
+			deleted := make(map[string]bool, len(mut.DeleteIDs))
+			for _, delID := range mut.DeleteIDs {
+				deleted[delID] = true
+			}
+			projected := make([]domain.MemoryEntry, 0, len(allEntries)+1)
+			replaced := false
+			for _, entry := range allEntries {
+				if deleted[entry.ID] {
+					continue
+				}
+				if entry.ID == u.ID {
+					projected = append(projected, u)
+					replaced = true
+					continue
+				}
+				projected = append(projected, entry)
+			}
+			if !replaced {
+				projected = append(projected, u)
+			}
+			if utf8.RuneCountInString(renderProfile(projected)) > mut.MaxProfileChars {
+				return false, "profile_budget_exceeded", nil
+			}
 		}
 		for _, exp := range mut.Expected {
 			if err := s.write(archivePath(mut.Scope, mut.RunID, exp, now), rawByID[exp.ID]); err != nil {

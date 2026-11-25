@@ -484,3 +484,215 @@ type splitBudgetModel struct {
 func (m *splitBudgetModel) FitsContext(_ context.Context, messages []domain.Message, _ []domain.Tool) (bool, error) {
 	return !(strings.Contains(messages[1].Content, `"sub-0"`) && strings.Contains(messages[1].Content, `"sub-1"`)), nil
 }
+
+func TestDispatchMemoryConsolidationPreventsHourlyProfileThresholdLoop(t *testing.T) {
+	a, repo, k, conv := newFixture(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+
+	for i := range 2 {
+		if err := k.Update(ctx, domain.MemoryEntry{
+			ID:        fmt.Sprintf("stable-pref-%d", i),
+			Scope:     conv.ID,
+			Kind:      "preference",
+			Content:   strings.Repeat("p", 3200),
+			UpdatedAt: now.Add(-2 * time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	profile, err := k.Profile(ctx, conv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableChars := len([]rune(profile))
+	if stableChars < agent.DefaultProfileCharThreshold {
+		t.Fatalf("test setup error: expected USER.md >= %d chars, got %d", agent.DefaultProfileCharThreshold, stableChars)
+	}
+
+	// Persist state as if consolidation just completed and USER.md stabilized >= 6000 chars.
+	rawState, _ := json.Marshal(agent.ConsolidationState{
+		LastRunAt:        now,
+		LastAttemptAt:    now,
+		LastRunID:        "run-stable",
+		LastEntryCount:   2,
+		LastProfileChars: stableChars,
+		LastProfileHash:  agent.ID(profile),
+	})
+	if err := repo.SaveCheckpoint(ctx, agent.ConsolidationStateKey(conv.ID), rawState); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. After threshold cooldown (2h, 6h, 12h), unchanged USER.md >= 6000 chars must NOT re-trigger.
+	clNone := &mocks.Client{}
+	r := &Runtime{Repo: repo, Activities: a, Client: clNone, TaskQueue: "openalbert", MemoryConsolidationInterval: 24 * time.Hour}
+	for _, offset := range []time.Duration{2 * time.Hour, 6 * time.Hour, 12 * time.Hour} {
+		if err := r.DispatchMemoryConsolidation(ctx, now.Add(offset)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clNone.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+
+	// 2. If USER.md shrinks slightly while staying >= 6000 chars, still do NOT trigger threshold.
+	if err := k.Update(ctx, domain.MemoryEntry{
+		ID:        "stable-pref-1",
+		Scope:     conv.ID,
+		Kind:      "preference",
+		Content:   strings.Repeat("p", 3100),
+		UpdatedAt: now.Add(3 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.DispatchMemoryConsolidation(ctx, now.Add(4*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	clNone.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+
+	// 3. If USER.md changes at the exact same length (hash changes), trigger threshold once.
+	if err := k.Update(ctx, domain.MemoryEntry{
+		ID:        "stable-pref-1",
+		Scope:     conv.ID,
+		Kind:      "preference",
+		Content:   strings.Repeat("q", 3200),
+		UpdatedAt: now.Add(5 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clChanged := &mocks.Client{}
+	clChanged.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(in MemoryConsolidationInput) bool {
+		return in.Scope == conv.ID && in.Trigger == "threshold"
+	})).Return(nil, nil).Once()
+	r.Client = clChanged
+	if err := r.DispatchMemoryConsolidation(ctx, now.Add(6*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	clChanged.AssertExpectations(t)
+
+	// 4. Reset to stable state, then grow USER.md -> triggers threshold.
+	if err := repo.SaveCheckpoint(ctx, agent.ConsolidationStateKey(conv.ID), rawState); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Update(ctx, domain.MemoryEntry{
+		ID:        "extra-pref",
+		Scope:     conv.ID,
+		Kind:      "preference",
+		Content:   "Additional preference that grows USER.md.",
+		UpdatedAt: now.Add(7 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clGrew := &mocks.Client{}
+	clGrew.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(in MemoryConsolidationInput) bool {
+		return in.Scope == conv.ID && in.Trigger == "threshold"
+	})).Return(nil, nil).Once()
+	r.Client = clGrew
+	if err := r.DispatchMemoryConsolidation(ctx, now.Add(8*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	clGrew.AssertExpectations(t)
+
+	// 5. After MemoryConsolidationInterval (24h), scheduled run still fires even without growth.
+	if err := k.Delete(ctx, conv.ID, "extra-pref"); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Update(ctx, domain.MemoryEntry{
+		ID:        "stable-pref-1",
+		Scope:     conv.ID,
+		Kind:      "preference",
+		Content:   strings.Repeat("p", 3200),
+		UpdatedAt: now.Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCheckpoint(ctx, agent.ConsolidationStateKey(conv.ID), rawState); err != nil {
+		t.Fatal(err)
+	}
+	clScheduled := &mocks.Client{}
+	clScheduled.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(in MemoryConsolidationInput) bool {
+		return in.Scope == conv.ID && in.Trigger == "scheduled"
+	})).Return(nil, nil).Once()
+	r.Client = clScheduled
+	if err := r.DispatchMemoryConsolidation(ctx, now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	clScheduled.AssertExpectations(t)
+}
+
+func TestMemoryConsolidationWorkflowPhase2PromotionQueuesPhase1FollowUp(t *testing.T) {
+	a, repo, k, conv := newFixture(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+
+	if err := k.Update(ctx, domain.MemoryEntry{ID: "p-existing", Scope: conv.ID, Kind: "preference", Content: "Prefer short answers.", Source: "s1", UpdatedAt: now.Add(-3 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Update(ctx, domain.MemoryEntry{ID: "f-keep", Scope: conv.ID, Kind: "fact", Content: "Has a bicycle.", Source: "s1b", UpdatedAt: now.Add(-2*time.Hour - time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Update(ctx, domain.MemoryEntry{ID: "f-promote", Scope: conv.ID, Kind: "fact", Content: "Always prefers short answers in chat.", Source: "s2", UpdatedAt: now.Add(-2 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a Phase-2-only backlog continuation where Phase 1 already completed in a prior run.
+	rawState, _ := json.Marshal(agent.ConsolidationState{
+		LastRunAt:     now.Add(-10 * time.Minute),
+		LastAttemptAt: now.Add(-10 * time.Minute),
+		LastRunID:     "prev-run",
+		Phase1HasMore: false,
+		Phase2HasMore: true,
+		HasMore:       true,
+	})
+	if err := repo.SaveCheckpoint(ctx, agent.ConsolidationStateKey(conv.ID), rawState); err != nil {
+		t.Fatal(err)
+	}
+
+	sawPhase1InSecondRun := false
+	modelCalls := 0
+	a.Model = &scriptedModel{run: func(step int, messages []domain.Message) (domain.Message, error) {
+		modelCalls++
+		switch step {
+		case 0:
+			// Run 0: Phase-2-only continuation promotes f-promote to preference and keeps f-keep.
+			return finish(`{"operations":[{"op":"reclassify","ids":["f-promote"],"kind":"preference","reason":"lasting preference"},{"op":"keep","ids":["f-keep"],"reason":"durable fact"}]}`), nil
+		case 1:
+			// Run 1: Queued Phase 1 follow-up compacts/merges USER.md without re-running hygiene over f-keep.
+			if strings.Contains(messages[0].Content, `"compact"`) && strings.Contains(messages[1].Content, `"f-promote"`) && strings.Contains(messages[1].Content, `"p-existing"`) {
+				sawPhase1InSecondRun = true
+			}
+			return finish(`{"operations":[{"op":"merge","ids":["p-existing","f-promote"],"content":"Prefer short answers.","kind":"preference","reason":"deduplicate promoted preference"}]}`), nil
+		default:
+			return domain.Message{}, fmt.Errorf("unexpected step %d (hygiene should not re-run)", step)
+		}
+	}}
+
+	twoRuns := func(ctx workflow.Context, in MemoryConsolidationInput) error {
+		for i := range 2 {
+			childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: fmt.Sprintf("p2-promo-run-%d", i)})
+			if err := workflow.ExecuteChildWorkflow(childCtx, MemoryConsolidationWorkflow, in).Get(ctx, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	env := newEnv(a)
+	env.RegisterWorkflow(MemoryConsolidationWorkflow)
+	env.ExecuteWorkflow(twoRuns, MemoryConsolidationInput{Scope: conv.ID, Trigger: "backlog"})
+	requireWorkflowOK(t, env)
+
+	if !sawPhase1InSecondRun || modelCalls != 2 {
+		t.Fatalf("expected exactly 2 model calls (phase 2 + phase 1 follow-up only), got calls=%d sawPhase1=%v", modelCalls, sawPhase1InSecondRun)
+	}
+	reports, err := repo.ListMemoryConsolidations(ctx, conv.ID, 10)
+	if err != nil || len(reports) != 2 {
+		t.Fatalf("expected 2 reports, got %+v %v", reports, err)
+	}
+	// Newest first: run 1 completed cleanly, run 0 was partial with HasMore=true to trigger Phase 1.
+	if reports[1].Status != "partial" || !reports[1].HasMore || reports[0].Status != "completed" || reports[0].HasMore {
+		t.Fatalf("unexpected report progression after Phase 2 promotion: %+v", reports)
+	}
+	entries, err := k.ListMemory(ctx, conv.ID)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("expected p-existing and f-keep after Phase 1 follow-up, got %+v %v", entries, err)
+	}
+}
