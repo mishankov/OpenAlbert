@@ -1252,7 +1252,6 @@ func TestBridgeStateEdgeCases(t *testing.T) {
 	})
 }
 
-
 func TestNormalizeModelSelectionMapsModelIDAndProviderInstanceID(t *testing.T) {
 	got := normalizeModelSelection(map[string]any{
 		"provider_instance_id": "antigravity",
