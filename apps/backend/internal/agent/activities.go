@@ -15,6 +15,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/scheduling"
+	"openalbert/apps/backend/internal/t3"
 	"openalbert/apps/backend/internal/telemetry"
 	"openalbert/apps/backend/internal/widgets"
 )
@@ -41,6 +42,7 @@ type Activities struct {
 	MinTaskInterval    time.Duration
 	TaskChanged        func(context.Context, string, string) error
 	Backups            *backup.Reader
+	T3                 *t3.ControlPlane
 }
 type RunInput struct {
 	Key                string
@@ -512,6 +514,8 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 		accessErr = a.backupAccess(in.Conversation)
 	case "logs_search":
 		accessErr = a.logSearchAccess(in)
+	case "t3_hosts", "t3_threads_list", "t3_thread_launch", "t3_thread_send", "t3_thread_read", "t3_thread_respond", "t3_thread_control":
+		accessErr = a.t3Access(in)
 	case "task_update":
 		accessErr = taskUpdateAccess(in)
 	case "topic_create", "topic_update", "workspace_post":

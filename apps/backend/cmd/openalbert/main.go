@@ -26,6 +26,7 @@ import (
 	"openalbert/apps/backend/internal/knowledge"
 	"openalbert/apps/backend/internal/orchestration"
 	"openalbert/apps/backend/internal/storage"
+	"openalbert/apps/backend/internal/t3"
 	"openalbert/apps/backend/internal/telemetry"
 	"openalbert/apps/backend/internal/widgets"
 
@@ -173,6 +174,8 @@ func run() error {
 		}
 		return err
 	}
+	t3ControlPlane := t3.New(repo, artifacts, t3.Config{OwnerUserID: c.TelegramOwnerUserID, Logger: logger, TaskChanged: activities.TaskChanged})
+	activities.T3 = t3ControlPlane
 	activities.Widgets = &widgets.Controller{Repo: artifacts, Transport: telegram, TaskChanged: activities.TaskChanged}
 	if browsers != nil {
 		activities.Widgets.PrepareCloseTask = browsers.(*browser.Manager).PrepareCloseTask
@@ -197,7 +200,7 @@ func run() error {
 			defer w.Stop()
 		}
 	}
-	(&desktopapi.API{Repo: artifacts, Memory: knowledgeStore, OwnerID: c.TelegramOwnerUserID, Token: c.DesktopAPIToken, Billing: billing, Activities: activities, Logger: logger}).Register(mux)
+	(&desktopapi.API{Repo: artifacts, Memory: knowledgeStore, OwnerID: c.TelegramOwnerUserID, Token: c.DesktopAPIToken, Billing: billing, Activities: activities, T3: t3ControlPlane, Logger: logger}).Register(mux)
 	inspector.Register(mux, repo, artifacts)
 	inspector.RegisterMemory(mux, repo, knowledgeStore)
 	inspector.RegisterSearch(mux, repo, search, c.ExaMonthlyBudgetUSD)

@@ -219,3 +219,73 @@ CREATE INDEX IF NOT EXISTS openalbert_checkpoints_turn_done_task
 CREATE INDEX IF NOT EXISTS openalbert_checkpoints_consolidation_latest
     ON openalbert_checkpoints(consolidation_scope, consolidation_completed_at DESC NULLS LAST, id DESC)
     WHERE consolidation_scope IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS openalbert_t3_hosts (
+    environment_id text PRIMARY KEY,
+    host_id text NOT NULL UNIQUE,
+    label text NOT NULL,
+    projects_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+    providers_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+    last_seen_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS openalbert_t3_commands (
+    seq bigserial UNIQUE,
+    id text PRIMARY KEY,
+    environment_id text NOT NULL,
+    action text NOT NULL,
+    payload_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+    status text NOT NULL CHECK (status IN ('pending','dispatched','succeeded','failed')),
+    result_json jsonb,
+    error_text text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS openalbert_t3_commands_env_pending
+    ON openalbert_t3_commands(environment_id, seq)
+    WHERE status IN ('pending', 'dispatched');
+CREATE TABLE IF NOT EXISTS openalbert_t3_threads (
+    thread_id text PRIMARY KEY,
+    environment_id text NOT NULL,
+    conversation_id text NOT NULL DEFAULT '',
+    task_id text NOT NULL DEFAULT '',
+    project_id text NOT NULL DEFAULT '',
+    title text NOT NULL DEFAULT '',
+    link text NOT NULL DEFAULT '',
+    provider_instance_id text NOT NULL DEFAULT '',
+    model text NOT NULL DEFAULT '',
+    branch text NOT NULL DEFAULT '',
+    status text NOT NULL DEFAULT '',
+    pr_url text NOT NULL DEFAULT '',
+    pending_request_json jsonb,
+    last_output_json jsonb,
+    last_summary text NOT NULL DEFAULT '',
+    last_error text NOT NULL DEFAULT '',
+    last_event_at timestamptz,
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL
+);
+ALTER TABLE openalbert_t3_threads ADD COLUMN IF NOT EXISTS last_event_at timestamptz;
+CREATE INDEX IF NOT EXISTS openalbert_t3_threads_env
+    ON openalbert_t3_threads(environment_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS openalbert_t3_threads_conv
+    ON openalbert_t3_threads(conversation_id, updated_at DESC)
+    WHERE conversation_id <> '';
+CREATE INDEX IF NOT EXISTS openalbert_t3_threads_status
+    ON openalbert_t3_threads(status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS openalbert_t3_events (
+    event_id text PRIMARY KEY,
+    environment_id text NOT NULL,
+    thread_id text NOT NULL,
+    kind text NOT NULL,
+    payload_json jsonb NOT NULL,
+    received_at timestamptz NOT NULL,
+    woken_at timestamptz
+);
+ALTER TABLE openalbert_t3_events ADD COLUMN IF NOT EXISTS woken_at timestamptz;
+CREATE INDEX IF NOT EXISTS openalbert_t3_events_thread
+    ON openalbert_t3_events(thread_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS openalbert_t3_events_pending_wake
+    ON openalbert_t3_events(thread_id, received_at ASC)
+    WHERE woken_at IS NULL AND kind IN ('thread_waiting_input', 'thread_completed', 'thread_failed');
