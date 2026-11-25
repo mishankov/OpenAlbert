@@ -29,8 +29,8 @@ func (s *Store) SaveTrace(ctx context.Context, tr domain.Trace) error {
 	return nil
 }
 
-const sessionTriggerSQL = `COALESCE((SELECT tr.data->>'trigger' FROM openalbert_traces tr WHERE tr.session_id=s.id AND tr.data->>'trigger' IN ('message','task','initiative','coding') ORDER BY tr.started_at LIMIT 1),
- CASE WHEN s.conversation_id LIKE 'coding:%' THEN 'coding' ELSE COALESCE((SELECT CASE WHEN COALESCE(cp.data->'Input'->>'TaskID','')<>'' THEN 'task' WHEN cp.data->'Input'->>'Initiative'='true' THEN 'initiative' ELSE 'message' END FROM openalbert_checkpoints cp WHERE cp.id LIKE 'turn-done/%' AND cp.data->'Input'->>'SessionID'=s.id LIMIT 1),'message') END)`
+const sessionTriggerSQL = `COALESCE((SELECT tr.trigger_kind FROM openalbert_traces tr WHERE tr.session_id=s.id AND tr.trigger_kind IS NOT NULL ORDER BY tr.started_at LIMIT 1),
+ CASE WHEN s.conversation_id LIKE 'coding:%' THEN 'coding' ELSE COALESCE((SELECT CASE WHEN cp.turn_task_id IS NOT NULL THEN 'task' WHEN cp.turn_initiative THEN 'initiative' ELSE 'message' END FROM openalbert_checkpoints cp WHERE cp.turn_session_id IS NOT NULL AND cp.turn_session_id=s.id LIMIT 1),'message') END)`
 
 const sessionColumns = `s.seq,s.data,COALESCE(c.data,'{}'),s.analyzed,
  (SELECT count(*) FROM openalbert_messages m WHERE m.session_id=s.id),
@@ -229,22 +229,8 @@ func (s *Store) InspectTrace(ctx context.Context, session, id string) (tr domain
 
 var _ inspector.MemoryMetadataStore = (*Store)(nil)
 
-// InspectSessionOrigins resolves session triggers, creation timestamps, and
-// originating task metadata for a scope's memory entries in a single batched
-// query, including owner-matched coding sessions for personal scopes while
-// enforcing scope isolation across conversations and owners.
-func (s *Store) InspectSessionOrigins(ctx context.Context, scope string, sessionIDs []string) (map[string]inspector.SessionOrigin, error) {
-	out := make(map[string]inspector.SessionOrigin, len(sessionIDs))
-	if len(sessionIDs) == 0 {
-		return out, nil
-	}
-	rows, err := s.pool.Query(ctx, `WITH resolved AS (
- SELECT s.id AS session_id, s.conversation_id, `+sessionTriggerSQL+` AS trigger,
-  COALESCE(
-   (SELECT NULLIF(tr.data->>'task_id','') FROM openalbert_traces tr WHERE tr.session_id=s.id AND COALESCE(tr.data->>'task_id','')<>'' ORDER BY tr.started_at LIMIT 1),
-   (SELECT NULLIF(cp.data->'Input'->>'TaskID','') FROM openalbert_checkpoints cp WHERE cp.id LIKE 'turn-done/%' AND cp.data->'Input'->>'SessionID'=s.id AND COALESCE(cp.data->'Input'->>'TaskID','')<>'' LIMIT 1),
-   ''
-  ) AS task_id,
+const inspectSessionOriginsSQL = `WITH scoped AS (
+ SELECT s.id AS session_id, s.conversation_id,
   CASE
    WHEN COALESCE(s.data->>'created_at','') ~ '^\d{4}-\d{2}-\d{2}T' THEN (s.data->>'created_at')::timestamptz
    ELSE NULL
@@ -256,10 +242,72 @@ func (s *Store) InspectSessionOrigins(ctx context.Context, scope string, session
    s.conversation_id=$1
    OR ($1 LIKE 'personal:%' AND s.conversation_id LIKE 'coding:%' AND 'personal:'||COALESCE(c.data->>'owner_id','')=$1)
   )
+),
+resolved AS (
+ SELECT sc.session_id, sc.conversation_id, sc.created_at,
+  COALESCE(
+   tr_trig.trigger_kind,
+   CASE WHEN sc.conversation_id LIKE 'coding:%' THEN 'coding' ELSE COALESCE(cp_trig.trigger_kind, 'message') END
+  ) AS trigger,
+  COALESCE(tr_task.task_id, cp_task.task_id, '') AS task_id
+ FROM scoped sc
+ LEFT JOIN LATERAL (
+  SELECT tr.trigger_kind
+  FROM openalbert_traces tr
+  WHERE tr.session_id=sc.session_id AND tr.trigger_kind IS NOT NULL
+  ORDER BY tr.started_at
+  LIMIT 1
+ ) tr_trig ON true
+ LEFT JOIN LATERAL (
+  SELECT CASE
+   WHEN cp.turn_task_id IS NOT NULL THEN 'task'
+   WHEN cp.turn_initiative THEN 'initiative'
+   ELSE 'message'
+  END AS trigger_kind
+  FROM openalbert_checkpoints cp
+  WHERE tr_trig.trigger_kind IS NULL
+   AND sc.conversation_id NOT LIKE 'coding:%'
+   AND cp.turn_session_id IS NOT NULL
+   AND cp.turn_session_id=sc.session_id
+  LIMIT 1
+ ) cp_trig ON true
+ LEFT JOIN LATERAL (
+  SELECT tr.task_id
+  FROM openalbert_traces tr
+  WHERE tr.session_id=sc.session_id AND tr.task_id IS NOT NULL
+  ORDER BY tr.started_at
+  LIMIT 1
+ ) tr_task ON true
+ LEFT JOIN LATERAL (
+  SELECT cp.turn_task_id AS task_id
+  FROM openalbert_checkpoints cp
+  WHERE tr_task.task_id IS NULL
+   AND cp.turn_session_id IS NOT NULL
+   AND cp.turn_session_id=sc.session_id
+   AND cp.turn_task_id IS NOT NULL
+  LIMIT 1
+ ) cp_task ON true
 )
 SELECT r.session_id, r.trigger, r.task_id, COALESCE(t.data->>'title','') AS task_title, r.created_at
 FROM resolved r
-LEFT JOIN openalbert_tasks t ON t.conversation_id=r.conversation_id AND t.id=r.task_id AND r.task_id<>''`, scope, sessionIDs)
+LEFT JOIN openalbert_tasks t ON t.conversation_id=r.conversation_id AND t.id=r.task_id AND r.task_id<>''`
+
+const inspectLatestConsolidationSQL = `SELECT id, data FROM openalbert_checkpoints
+ WHERE consolidation_scope IS NOT NULL
+  AND consolidation_scope=$1
+ ORDER BY consolidation_completed_at DESC NULLS LAST, id DESC
+ LIMIT 1`
+
+// InspectSessionOrigins resolves session triggers, creation timestamps, and
+// originating task metadata for a scope's memory entries in a single batched
+// query, including owner-matched coding sessions for personal scopes while
+// enforcing scope isolation across conversations and owners.
+func (s *Store) InspectSessionOrigins(ctx context.Context, scope string, sessionIDs []string) (map[string]inspector.SessionOrigin, error) {
+	out := make(map[string]inspector.SessionOrigin, len(sessionIDs))
+	if len(sessionIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, inspectSessionOriginsSQL, scope, sessionIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -283,14 +331,7 @@ LEFT JOIN openalbert_tasks t ON t.conversation_id=r.conversation_id AND t.id=r.t
 func (s *Store) InspectLatestConsolidation(ctx context.Context, scope string) (string, json.RawMessage, bool, error) {
 	var id string
 	var raw json.RawMessage
-	err := s.pool.QueryRow(ctx, `SELECT id, data FROM openalbert_checkpoints
- WHERE id LIKE 'memory-consolidation/%'
-  AND data->>'scope'=$1
- ORDER BY CASE
-   WHEN COALESCE(data->>'completed_at','') ~ '^\d{4}-\d{2}-\d{2}T' THEN (data->>'completed_at')::timestamptz
-   ELSE NULL
-  END DESC NULLS LAST, id DESC
- LIMIT 1`, scope).Scan(&id, &raw)
+	err := s.pool.QueryRow(ctx, inspectLatestConsolidationSQL, scope).Scan(&id, &raw)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", nil, false, nil

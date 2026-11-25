@@ -38,10 +38,11 @@ type MemoryConsolidationReport struct {
 // MemoryMutation describes one atomic compare-archive-mutate consolidation
 // operation verified and applied under the knowledge store lock.
 type MemoryMutation struct {
-	Scope     string
-	RunID     string
-	Now       time.Time
-	Expected  []MemoryEntry
-	Update    *MemoryEntry
-	DeleteIDs []string
+	Scope           string
+	RunID           string
+	Now             time.Time
+	Expected        []MemoryEntry
+	Update          *MemoryEntry
+	DeleteIDs       []string
+	MaxProfileChars int
 }

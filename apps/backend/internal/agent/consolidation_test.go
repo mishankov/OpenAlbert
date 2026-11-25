@@ -266,7 +266,7 @@ func TestConsolidationEnforcesGroupSubjectInvariantsAndProvenance(t *testing.T) 
 		{Op: "reclassify", IDs: []string{"group-fact"}, Kind: "preference", Reason: "must not turn group fact into USER preference"},
 	}}
 
-	ops, err := a.applyConsolidationPlan(ctx, groupConv.ID, "run-group", "profile", "", true, now, snapshot, plan)
+	ops, err := a.applyConsolidationPlan(ctx, groupConv.ID, "run-group", "profile", "", true, false, now, snapshot, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,4 +550,431 @@ func TestSelectProfileReferenceEntriesFindsOlderDuplicatesAcrossLargeBacklog(t *
 	if !found {
 		t.Fatalf("older duplicate pref-060 omitted from references in 360-entry backlog (got %d refs)", len(refs))
 	}
+}
+
+func TestConsolidateProfileBatchBudgetCompactTasksAndGroupRules(t *testing.T) {
+	a, repo, k, conv := fixture(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+
+	a.OwnerUserID = conv.OwnerID
+	a.AllowedGroupIDs = []int64{-100}
+
+	if err := repo.SaveConversation(ctx, domain.Conversation{ID: "group:-100", ChatID: -100, Private: false, Title: "Family"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveConversation(ctx, domain.Conversation{ID: "group:-200", ChatID: -200, Private: false, Title: "Unallowed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveConversation(ctx, domain.Conversation{ID: "personal:99", ChatID: 99, OwnerID: 99, Private: true, Title: "Other User"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.UpdateGroupRules(ctx, -100, "", "Only reply when directly mentioned in Family group."); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.UpdateGroupRules(ctx, -200, "", "Secret unallowed group rule."); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := repo.CreateTask(ctx, domain.Task{
+		ID:               "task-digest",
+		ConversationID:   conv.ID,
+		Title:            "Morning digest",
+		Goal:             "Send news digest every morning at 09:00 with bullet points.",
+		Status:           "waiting",
+		ScheduleCron:     "0 9 * * *",
+		ScheduleTimezone: "Europe/Moscow",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateTask(ctx, domain.Task{
+		ID:             "task-done",
+		ConversationID: conv.ID,
+		Title:          "Old completed task",
+		Goal:           "Should not appear in active_tasks.",
+		Status:         "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	verboseCreated := now.Add(-10 * time.Hour)
+	seed := []domain.MemoryEntry{
+		{
+			ID:        "verbose-rule",
+			Scope:     conv.ID,
+			Kind:      "preference",
+			Content:   "On 2026-10-15 in turn turn-99123 the user got frustrated when a long status essay was posted during task-42 and explicitly said: 'Please keep replies concise and skip filler intros.'",
+			Source:    "s1",
+			CreatedAt: verboseCreated,
+			UpdatedAt: now.Add(-4 * time.Hour),
+		},
+		{
+			ID:        "short-rule",
+			Scope:     conv.ID,
+			Kind:      "preference",
+			Content:   "Use metric units.",
+			Source:    "s2",
+			UpdatedAt: now.Add(-3 * time.Hour),
+		},
+		{
+			ID:        "same-rule",
+			Scope:     conv.ID,
+			Kind:      "preference",
+			Content:   "Prefer Russian for personal chat.",
+			Source:    "s3",
+			UpdatedAt: now.Add(-2 * time.Hour),
+		},
+		{
+			ID:        "big-pad",
+			Scope:     conv.ID,
+			Kind:      "preference",
+			Content:   strings.Repeat("a", 8100),
+			Source:    "s4",
+			UpdatedAt: now.Add(-1 * time.Hour),
+		},
+	}
+	for _, entry := range seed {
+		if err := k.Update(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var gotPayload consolidationPayload
+	a.Model = &testModel{respond: func(messages []domain.Message) (domain.Message, error) {
+		if !strings.Contains(messages[0].Content, `"compact"`) || !strings.Contains(messages[0].Content, "8,000") {
+			t.Fatalf("profile consolidation instructions missing compact/budget guidance: %s", messages[0].Content)
+		}
+		if err := json.Unmarshal([]byte(messages[1].Content), &gotPayload); err != nil {
+			t.Fatal(err)
+		}
+		return domain.Message{Content: `{"operations":[
+			{"op":"compact","ids":["verbose-rule"],"content":"Keep replies concise without filler intros.","reason":"strip incident anecdote and turn ID"},
+			{"op":"compact","ids":["short-rule"],"content":"Always use metric units for temperatures, distances, and weights.","reason":"attempted bloat"},
+			{"op":"compact","ids":["same-rule"],"content":"Prefer Russian for personal chat.","reason":"unchanged"},
+			{"op":"compact","ids":["short-rule","same-rule"],"content":"Too many IDs","reason":"invalid multi-id compact"}
+		]}`}, nil
+	}}
+
+	res, err := a.ConsolidateProfileBatch(ctx, ConsolidationBatchInput{
+		RunID:      "run-compact",
+		Scope:      conv.ID,
+		Group:      false,
+		BatchIndex: 0,
+		BatchIDs:   []string{"verbose-rule", "short-rule", "same-rule", "big-pad"},
+		Now:        now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if gotPayload.ProfileBudget == nil || gotPayload.ProfileBudget.CharLimit != UserProfileCharLimit || gotPayload.ProfileBudget.CurrentChars <= UserProfileCharLimit || gotPayload.ProfileBudget.OverByChars <= 0 {
+		t.Fatalf("unexpected profile_budget in payload: %+v", gotPayload.ProfileBudget)
+	}
+	if len(gotPayload.ActiveTasks) != 1 || gotPayload.ActiveTasks[0].ID != "task-digest" || !strings.Contains(gotPayload.ActiveTasks[0].Schedule, "0 9 * * *") {
+		t.Fatalf("expected only active recurring task in active_tasks, got %+v", gotPayload.ActiveTasks)
+	}
+	if len(gotPayload.GroupRules) != 1 || gotPayload.GroupRules[0].GroupID != -100 || gotPayload.GroupRules[0].Title != "Family" || !strings.Contains(gotPayload.GroupRules[0].Rules, "directly mentioned") {
+		t.Fatalf("expected only allowed group GROUP.md for owner private scope, got %+v", gotPayload.GroupRules)
+	}
+
+	if len(res.Operations) != 4 {
+		t.Fatalf("expected 4 operations, got %+v", res.Operations)
+	}
+	if res.Operations[0].Status != "applied" || res.Operations[0].Op != "compact" || res.Operations[0].ResultID != "verbose-rule" {
+		t.Fatalf("compact op failed: %+v", res.Operations[0])
+	}
+	if res.Operations[1].Status != "skipped" || res.Operations[1].SkipReason != "compact_not_shorter" {
+		t.Fatalf("non-shortening compact not rejected: %+v", res.Operations[1])
+	}
+	if res.Operations[2].Status != "kept" || res.Operations[2].ResultID != "same-rule" {
+		t.Fatalf("identical compact not marked kept: %+v", res.Operations[2])
+	}
+	if res.Operations[3].Status != "skipped" || res.Operations[3].SkipReason != "conflicting_operation" {
+		t.Fatalf("conflicting multi-id compact not skipped: %+v", res.Operations[3])
+	}
+
+	compacted, err := k.Read(ctx, conv.ID, "verbose-rule")
+	if err != nil || compacted.Content != "Keep replies concise without filler intros." || compacted.Source != "s1" || !compacted.CreatedAt.Equal(verboseCreated) {
+		t.Fatalf("compacted entry did not preserve metadata or content: %+v %v", compacted, err)
+	}
+	unchanged, err := k.Read(ctx, conv.ID, "short-rule")
+	if err != nil || unchanged.Content != "Use metric units." {
+		t.Fatalf("rejected non-shortening compact mutated entry: %+v %v", unchanged, err)
+	}
+
+	// Non-owner private scope and group scopes must never receive owner GROUP.md context.
+	for _, scope := range []string{"personal:99", "group:-100"} {
+		rules, err := a.loadConsolidationGroupRules(ctx, scope)
+		if err != nil || len(rules) != 0 {
+			t.Fatalf("group rules leaked to non-owner scope %s: %+v %v", scope, rules, err)
+		}
+	}
+
+	// Verify multi-id compact and kind-change compact rejections, plus Phase 2 compact rejection.
+	ops, err := a.applyConsolidationPlan(ctx, conv.ID, "run-compact-guards", "profile", "", false, false, now, seed, consolidationPlan{
+		Operations: []consolidationPlanOp{
+			{Op: "compact", IDs: []string{"verbose-rule", "short-rule"}, Content: "Short", Reason: "two ids"},
+			{Op: "compact", IDs: []string{"short-rule"}, Content: "Metric.", Kind: "fact", Reason: "attempt kind change via compact"},
+		},
+	})
+	if err != nil || len(ops) != 2 ||
+		ops[0].Status != "skipped" || ops[0].SkipReason != "compact_requires_single_id" ||
+		ops[1].Status != "skipped" || ops[1].SkipReason != "compact_cannot_change_kind" {
+		t.Fatalf("profile compact guards failed: %+v %v", ops, err)
+	}
+	hygieneOps, err := a.applyConsolidationPlan(ctx, conv.ID, "run-compact-hygiene", "hygiene", "", false, false, now, seed, consolidationPlan{
+		Operations: []consolidationPlanOp{{Op: "compact", IDs: []string{"short-rule"}, Content: "Metric.", Reason: "phase 2 compact"}},
+	})
+	if err != nil || len(hygieneOps) != 1 || hygieneOps[0].Status != "skipped" || hygieneOps[0].SkipReason != "invalid_op" {
+		t.Fatalf("phase 2 compact was not rejected: %+v %v", hygieneOps, err)
+	}
+}
+
+func TestConsolidateHygieneBatchFullProfileAndPromotionGuards(t *testing.T) {
+	t.Run("passes full unclipped USER.md and blocks promotions past budget", func(t *testing.T) {
+		a, _, k, conv := fixture(t)
+		ctx := context.Background()
+		now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+
+		// Build a USER.md larger than 8,000 chars with a distinctive marker near the tail.
+		if err := k.Update(ctx, domain.MemoryEntry{ID: "p-head", Scope: conv.ID, Kind: "profile", Content: strings.Repeat("h", 8100), Source: "s0", UpdatedAt: now.Add(-3 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := k.Update(ctx, domain.MemoryEntry{ID: "p-tail", Scope: conv.ID, Kind: "preference", Content: "TAIL_MARKER_PAST_8000_CHARS", Source: "s1", UpdatedAt: now.Add(-2 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := k.Update(ctx, domain.MemoryEntry{ID: "f-promote", Scope: conv.ID, Kind: "fact", Content: "Some fact trying to re-enter USER.md", Source: "s2", UpdatedAt: now.Add(-time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+
+		var gotPayload consolidationPayload
+		a.Model = &testModel{respond: func(messages []domain.Message) (domain.Message, error) {
+			if err := json.Unmarshal([]byte(messages[1].Content), &gotPayload); err != nil {
+				t.Fatal(err)
+			}
+			return domain.Message{Content: `{"operations":[
+				{"op":"reclassify","ids":["f-promote"],"kind":"preference","reason":"promote despite full budget"}
+			]}`}, nil
+		}}
+
+		res, err := a.ConsolidateHygieneBatch(ctx, ConsolidationBatchInput{
+			RunID:      "run-hygiene-budget",
+			Scope:      conv.ID,
+			BatchIndex: 0,
+			BatchIDs:   []string{"f-promote"},
+			Now:        now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(gotPayload.UserProfile, "TAIL_MARKER_PAST_8000_CHARS") {
+			t.Fatalf("ConsolidateHygieneBatch clipped USER.md past 8000 chars (len=%d)", len(gotPayload.UserProfile))
+		}
+		if gotPayload.ProfileBudget == nil || gotPayload.ProfileBudget.OverByChars <= 0 {
+			t.Fatalf("ConsolidateHygieneBatch missing over-budget metadata: %+v", gotPayload.ProfileBudget)
+		}
+		if len(res.Operations) != 1 || res.Operations[0].Status != "skipped" || res.Operations[0].SkipReason != "profile_budget_exceeded" {
+			t.Fatalf("over-budget phase 2 promotion not blocked: %+v", res.Operations)
+		}
+		gotFact, err := k.Read(ctx, conv.ID, "f-promote")
+		if err != nil || gotFact.Kind != "fact" {
+			t.Fatalf("blocked promotion mutated fact kind: %+v %v", gotFact, err)
+		}
+	})
+
+	t.Run("blocks promotion when user_profile was dropped for context fitting", func(t *testing.T) {
+		a, _, k, conv := fixture(t)
+		ctx := context.Background()
+		now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+
+		if err := k.Update(ctx, domain.MemoryEntry{ID: "p-marker", Scope: conv.ID, Kind: "preference", Content: "oversized profile marker", Source: "s0", UpdatedAt: now.Add(-2 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := k.Update(ctx, domain.MemoryEntry{ID: "f-blind", Scope: conv.ID, Kind: "fact", Content: "Should not promote blindly", Source: "s1", UpdatedAt: now.Add(-time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+
+		a.Model = &analysisBudgetModel{testModel: &testModel{respond: func([]domain.Message) (domain.Message, error) {
+			return domain.Message{Content: `{"operations":[{"op":"reclassify","ids":["f-blind"],"kind":"preference","reason":"blind promotion"}]}`}, nil
+		}}}
+
+		res, err := a.ConsolidateHygieneBatch(ctx, ConsolidationBatchInput{
+			RunID:      "run-hygiene-blind",
+			Scope:      conv.ID,
+			BatchIndex: 0,
+			BatchIDs:   []string{"f-blind"},
+			Now:        now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Operations) != 1 || res.Operations[0].Status != "skipped" || res.Operations[0].SkipReason != "profile_context_incomplete" {
+			t.Fatalf("promotion with omitted profile context not blocked: %+v", res.Operations)
+		}
+	})
+
+	t.Run("under-budget phase 2 promotion queues phase 1 follow-up only without re-running hygiene", func(t *testing.T) {
+		a, repo, k, conv := fixture(t)
+		ctx := context.Background()
+		now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+
+		if err := k.Update(ctx, domain.MemoryEntry{ID: "p-ok", Scope: conv.ID, Kind: "profile", Content: "Lives in Moscow", Source: "s0", UpdatedAt: now.Add(-3 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := k.Update(ctx, domain.MemoryEntry{ID: "f-keep", Scope: conv.ID, Kind: "fact", Content: "Owns a bike", Source: "s1", UpdatedAt: now.Add(-2 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := k.Update(ctx, domain.MemoryEntry{ID: "f-ok", Scope: conv.ID, Kind: "fact", Content: "Prefers dark mode", Source: "s2", UpdatedAt: now.Add(-time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+
+		a.Model = &testModel{respond: func([]domain.Message) (domain.Message, error) {
+			return domain.Message{Content: `{"operations":[{"op":"reclassify","ids":["f-ok"],"kind":"preference","reason":"lasting preference"}]}`}, nil
+		}}
+
+		res, err := a.ConsolidateHygieneBatch(ctx, ConsolidationBatchInput{
+			RunID:      "run-hygiene-ok",
+			Scope:      conv.ID,
+			BatchIndex: 0,
+			BatchIDs:   []string{"f-keep", "f-ok"},
+			Now:        now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Operations) != 1 || res.Operations[0].Status != "applied" || res.Operations[0].Kind != "preference" {
+			t.Fatalf("under-budget promotion failed: %+v", res.Operations)
+		}
+
+		report, err := a.FinalizeMemoryConsolidation(ctx, ConsolidationFinalizeInput{
+			RunID:              "run-hygiene-ok",
+			Scope:              conv.ID,
+			Trigger:            "backlog",
+			StartedAt:          now,
+			CompletedAt:        now.Add(time.Second),
+			Status:             "completed",
+			BeforeCount:        3,
+			ProfileCharsBefore: 35,
+			BatchesProcessed:   1,
+			Operations:         res.Operations,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !report.HasMore || report.Status != "partial" {
+			t.Fatalf("expected phase 2 promotion to schedule phase 1 follow-up (partial + has_more), got %+v", report)
+		}
+		rawState, ok, err := repo.LoadCheckpoint(ctx, ConsolidationStateKey(conv.ID))
+		if err != nil || !ok {
+			t.Fatalf("missing saved consolidation state: ok=%v err=%v", ok, err)
+		}
+		var state ConsolidationState
+		if err := json.Unmarshal(rawState, &state); err != nil {
+			t.Fatal(err)
+		}
+		if !state.Phase1HasMore || !state.Phase1FollowUp || !state.HasMore || !state.Phase1CursorTime.IsZero() || state.Phase1CursorID != "" {
+			t.Fatalf("expected phase 1 follow-up cursor reset, got %+v", state)
+		}
+		if state.LastProfileChars != report.ProfileCharsAfter || state.LastProfileHash == "" {
+			t.Fatalf("expected LastProfileChars and LastProfileHash persisted, got %+v", state)
+		}
+
+		// Next PrepareMemoryConsolidation must schedule Phase 1 only and zero hygiene batches
+		// even though unpromoted fact f-keep remains in the store.
+		prep, err := a.PrepareMemoryConsolidation(ctx, ConsolidationRunInput{
+			RunID:      "run-followup",
+			Scope:      conv.ID,
+			Trigger:    "backlog",
+			BatchSize:  10,
+			MaxBatches: 5,
+			Now:        now.Add(5 * time.Minute),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(prep.Phase1Batches) != 1 || len(prep.Phase2Batches) != 0 || prep.Phase2HasMore || !prep.Phase1FollowUp || prep.HasMore {
+			t.Fatalf("expected Phase 1 follow-up with zero hygiene batches, got %+v", prep)
+		}
+	})
+
+	t.Run("atomic budget check enforces exact 8000 limit and reconciles retry at exact 8000", func(t *testing.T) {
+		a, repo, k, conv := fixture(t)
+		ctx := context.Background()
+		now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+
+		// "# User profile\n\n" (16) + "- " + 7900 + "\n" (7903) = 7919 chars.
+		// Adding "- " + 78 + "\n" (81) lands at EXACTLY 8000 chars.
+		if err := k.Update(ctx, domain.MemoryEntry{ID: "p-base", Scope: conv.ID, Kind: "profile", Content: strings.Repeat("b", 7900), Source: "s0", UpdatedAt: now.Add(-2 * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		exactFact := domain.MemoryEntry{ID: "f-exact", Scope: conv.ID, Kind: "fact", Content: strings.Repeat("c", 78), Source: "s1", CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)}
+		if err := k.Update(ctx, exactFact); err != nil {
+			t.Fatal(err)
+		}
+
+		// Simulate crash right after ApplyMemoryMutation succeeded (USER.md == 8000 chars)
+		// before progress/applied checkpoints were saved.
+		chunksRaw, _ := json.Marshal(batchChunksCheckpoint{Chunks: []consolidationChunk{{Entries: []domain.MemoryEntry{exactFact}}}})
+		if err := repo.SaveCheckpoint(ctx, "memory-consolidation-run/run-exact-8000/chunks/hygiene/0", chunksRaw); err != nil {
+			t.Fatal(err)
+		}
+		planRaw, _ := json.Marshal(consolidationPlanCheckpoint{
+			Plan:     consolidationPlan{Operations: []consolidationPlanOp{{Op: "reclassify", IDs: []string{"f-exact"}, Kind: "preference", Reason: "exact fit"}}},
+			Snapshot: []domain.MemoryEntry{exactFact},
+			Now:      now,
+		})
+		if err := repo.SaveCheckpoint(ctx, "memory-consolidation-run/run-exact-8000/plan/hygiene/0/0", planRaw); err != nil {
+			t.Fatal(err)
+		}
+		promoted := exactFact
+		promoted.Kind = "preference"
+		promoted.UpdatedAt = now
+		if applied, reason, err := k.ApplyMemoryMutation(ctx, domain.MemoryMutation{
+			Scope:           conv.ID,
+			RunID:           "run-exact-8000",
+			Now:             now,
+			Expected:        []domain.MemoryEntry{exactFact},
+			Update:          &promoted,
+			MaxProfileChars: UserProfileCharLimit,
+		}); err != nil || !applied || reason != "" {
+			t.Fatalf("exact 8000-char promotion failed: applied=%v reason=%q err=%v", applied, reason, err)
+		}
+
+		a.Model = &testModel{respond: func([]domain.Message) (domain.Message, error) {
+			t.Fatal("retry should use plan checkpoint without calling model")
+			return domain.Message{}, nil
+		}}
+		res, err := a.ConsolidateHygieneBatch(ctx, ConsolidationBatchInput{
+			RunID:      "run-exact-8000",
+			Scope:      conv.ID,
+			BatchIndex: 0,
+			BatchIDs:   []string{"f-exact"},
+			Now:        now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Operations) != 1 || res.Operations[0].Status != "applied" || res.Operations[0].Kind != "preference" {
+			t.Fatalf("retry of exact 8000-char promotion misreported: %+v", res.Operations)
+		}
+
+		// Even 1 char past 8000 must be rejected atomically under the store lock.
+		overFact := domain.MemoryEntry{ID: "f-over", Scope: conv.ID, Kind: "fact", Content: "x", Source: "s2", CreatedAt: now, UpdatedAt: now}
+		if err := k.Update(ctx, overFact); err != nil {
+			t.Fatal(err)
+		}
+		overPromoted := overFact
+		overPromoted.Kind = "preference"
+		overPromoted.UpdatedAt = now.Add(time.Second)
+		if applied, reason, err := k.ApplyMemoryMutation(ctx, domain.MemoryMutation{
+			Scope:           conv.ID,
+			RunID:           "run-over-8000",
+			Now:             now,
+			Expected:        []domain.MemoryEntry{overFact},
+			Update:          &overPromoted,
+			MaxProfileChars: UserProfileCharLimit,
+		}); err != nil || applied || reason != "profile_budget_exceeded" {
+			t.Fatalf("expected atomic rejection past 8000 chars: applied=%v reason=%q err=%v", applied, reason, err)
+		}
+	})
 }

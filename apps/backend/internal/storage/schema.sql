@@ -110,3 +110,68 @@ CREATE TABLE IF NOT EXISTS openalbert_memory_consolidations (
     data jsonb NOT NULL
 );
 CREATE INDEX IF NOT EXISTS openalbert_memory_consolidations_scope ON openalbert_memory_consolidations(scope, seq DESC);
+
+-- Stored scalar columns and partial covering indexes so InspectSessionOrigins,
+-- sessionTriggerSQL, and InspectLatestConsolidation use index-only scans without
+-- detoasting full trace payloads or turn-done checkpoint message histories.
+CREATE OR REPLACE FUNCTION openalbert_rfc3339_timestamptz(raw text) RETURNS timestamptz
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $$
+BEGIN
+    IF raw IS NULL THEN
+        RETURN NULL;
+    END IF;
+    IF raw ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$' THEN
+        RETURN raw::timestamptz;
+    END IF;
+    IF raw ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$' THEN
+        RETURN raw::timestamp AT TIME ZONE 'UTC';
+    END IF;
+    RETURN NULL;
+EXCEPTION WHEN others THEN
+    RETURN NULL;
+END;
+$$;
+
+ALTER TABLE openalbert_traces
+    ADD COLUMN IF NOT EXISTS trigger_kind text GENERATED ALWAYS AS (
+        CASE WHEN data->>'trigger' IN ('message','task','initiative','coding') THEN data->>'trigger' END
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS task_id text GENERATED ALWAYS AS (
+        NULLIF(data->>'task_id', '')
+    ) STORED;
+CREATE INDEX IF NOT EXISTS openalbert_traces_session_trigger
+    ON openalbert_traces(session_id, started_at)
+    INCLUDE (trigger_kind)
+    WHERE trigger_kind IS NOT NULL;
+CREATE INDEX IF NOT EXISTS openalbert_traces_session_task
+    ON openalbert_traces(session_id, started_at)
+    INCLUDE (task_id)
+    WHERE task_id IS NOT NULL;
+
+ALTER TABLE openalbert_checkpoints
+    ADD COLUMN IF NOT EXISTS turn_session_id text GENERATED ALWAYS AS (
+        CASE WHEN id LIKE 'turn-done/%' THEN NULLIF(data->'Input'->>'SessionID', '') END
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS turn_task_id text GENERATED ALWAYS AS (
+        CASE WHEN id LIKE 'turn-done/%' THEN NULLIF(data->'Input'->>'TaskID', '') END
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS turn_initiative boolean GENERATED ALWAYS AS (
+        CASE WHEN id LIKE 'turn-done/%' THEN (COALESCE(data->'Input'->>'Initiative', '') = 'true') END
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS consolidation_scope text GENERATED ALWAYS AS (
+        CASE WHEN id LIKE 'memory-consolidation/%' THEN NULLIF(data->>'scope', '') END
+    ) STORED,
+    ADD COLUMN IF NOT EXISTS consolidation_completed_at timestamptz GENERATED ALWAYS AS (
+        CASE WHEN id LIKE 'memory-consolidation/%' THEN openalbert_rfc3339_timestamptz(data->>'completed_at') END
+    ) STORED;
+CREATE INDEX IF NOT EXISTS openalbert_checkpoints_turn_done_origin
+    ON openalbert_checkpoints(turn_session_id)
+    INCLUDE (turn_task_id, turn_initiative)
+    WHERE turn_session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS openalbert_checkpoints_turn_done_task
+    ON openalbert_checkpoints(turn_session_id)
+    INCLUDE (turn_task_id)
+    WHERE turn_session_id IS NOT NULL AND turn_task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS openalbert_checkpoints_consolidation_latest
+    ON openalbert_checkpoints(consolidation_scope, consolidation_completed_at DESC NULLS LAST, id DESC)
+    WHERE consolidation_scope IS NOT NULL;

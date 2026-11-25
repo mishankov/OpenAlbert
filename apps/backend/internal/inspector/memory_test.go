@@ -667,6 +667,7 @@ func TestMemoryConsolidationInspectorEndpointAndStatsIntegration(t *testing.T) {
 		ProfileCharsDelta:  -2100,
 		Operations: []domain.MemoryConsolidationOperation{
 			{Phase: "profile", Op: "merge", IDs: []string{"a", "b"}, ResultID: "a", Kind: "preference", Reason: "duplicate rule", Status: "applied"},
+			{Phase: "profile", Op: "compact", IDs: []string{"e"}, ResultID: "e", Kind: "preference", Reason: "tighten verbose rule", Status: "applied"},
 			{Phase: "profile", Op: "reclassify", IDs: []string{"d"}, ResultID: "d", Kind: "profile", Reason: "already profile", Status: "kept"},
 			{Phase: "hygiene", Op: "delete", IDs: []string{"c"}, Reason: "stale", Status: "skipped", SkipReason: "concurrent_modification"},
 		},
@@ -702,6 +703,7 @@ func TestMemoryConsolidationInspectorEndpointAndStatsIntegration(t *testing.T) {
 		stats.LatestConsolidation.AfterEntries != 8 ||
 		stats.LatestConsolidation.ProfileCharsDelta != -2100 ||
 		stats.LatestConsolidation.Operations.Merged != 1 ||
+		stats.LatestConsolidation.Operations.Updated != 1 ||
 		stats.LatestConsolidation.Operations.Kept != 1 ||
 		stats.LatestConsolidation.Operations.Reclassified != 0 ||
 		stats.LatestConsolidation.Operations.Skipped != 1 ||

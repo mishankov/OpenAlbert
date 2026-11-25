@@ -590,7 +590,7 @@ func parseConsolidationReceipt(id string, raw json.RawMessage) *ConsolidationSum
 				summary.Operations.Deleted++
 			case "keep", "kept":
 				summary.Operations.Kept++
-			case "update", "updated":
+			case "update", "updated", "compact", "compacted":
 				summary.Operations.Updated++
 			case "skip", "skipped":
 				summary.Operations.Skipped++
@@ -634,7 +634,7 @@ func consolidationSummaryFromReport(report domain.MemoryConsolidationReport) *Co
 			summary.Operations.Deleted++
 		case "keep", "kept":
 			summary.Operations.Kept++
-		case "update", "updated":
+		case "update", "updated", "compact", "compacted":
 			summary.Operations.Updated++
 		case "skip", "skipped":
 			summary.Operations.Skipped++
