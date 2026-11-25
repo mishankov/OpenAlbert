@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/config"
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/serverclient"
-	"github.com/mishankov/OpenAlbert/apps/acp/internal/session"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/config"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/serverclient"
+	"github.com/mishankov/OpenAlbert/apps/cli/internal/session"
 )
 
 func TestEndToEndACPCodemodeSkillsMCPPermissionsAndInspectorSync(t *testing.T) {
@@ -270,7 +270,7 @@ return { skill: sk.name, mcp, mem, out: sh.stdout };
 
 	// 1. initialize (must not advertise unsupported mcpCapabilities.sse)
 	initResp := call("1", "initialize", map[string]any{"protocolVersion": 1})
-	if !strings.Contains(string(initResp.Result), `"openalbert-acp"`) || strings.Contains(string(initResp.Result), `"sse"`) {
+	if !strings.Contains(string(initResp.Result), `"openalbert"`) || strings.Contains(string(initResp.Result), `"sse"`) {
 		t.Fatalf("unexpected initialize result: %s", initResp.Result)
 	}
 

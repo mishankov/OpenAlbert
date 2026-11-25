@@ -10,7 +10,7 @@ COPY services/log-gateway/go.mod ./services/log-gateway/
 COPY services/stt/go.mod ./services/stt/
 COPY shared/backup/go.mod shared/backup/go.sum ./shared/backup/
 RUN sh tools/testing/go-modules.sh mod download
-COPY apps/acp ./apps/acp
+COPY apps/cli ./apps/cli
 COPY apps/backend ./apps/backend
 COPY services/backup ./services/backup
 COPY services/log-gateway ./services/log-gateway

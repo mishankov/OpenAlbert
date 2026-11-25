@@ -134,7 +134,7 @@ escaped. Images are downloaded by the client and decoded locally.
 
 ### Coding Agent Gateway & Inspector Sync (`/api/v1/llm/*`, `/api/v1/agent/*`, `/api/v1/coding/*`)
 
-Authenticated with the same `DESKTOP_API_TOKEN` Bearer header for `openalbert-acp`:
+Authenticated with the same `DESKTOP_API_TOKEN` Bearer header for `openalbert acp`:
 
 - `GET /api/v1/llm/models?refresh=true` — returns `{"default_model":"<provider>/<model>","models":[CatalogModel]}` discovered from configured providers and static `[models.*]` entries.
 - `POST /api/v1/llm/complete` — Server-Sent Events (`text/event-stream`) streaming completion gateway (`text_delta`, `reasoning_delta`, `tool_call_delta`, `done`, `error`). Records model traces and token/cost telemetry server-side under the coding session.
