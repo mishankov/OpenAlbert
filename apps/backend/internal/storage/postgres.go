@@ -165,7 +165,7 @@ func (s *Store) AcceptIncoming(ctx context.Context, in domain.Incoming, offset i
 	if err != nil {
 		return false, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO openalbert_conversations(id,data) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET data=CASE WHEN COALESCE((openalbert_conversations.data->>'thread_id')::int,0)>0 AND COALESCE(openalbert_conversations.data->>'title','')<>'' THEN jsonb_set(excluded.data,'{title}',openalbert_conversations.data->'title') ELSE excluded.data END`, in.Conversation.ID, c); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO openalbert_conversations(id,data) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET data=CASE WHEN COALESCE((openalbert_conversations.data->>'thread_id')::int,0)>0 AND COALESCE(openalbert_conversations.data->>'title','')<>'' AND NOT COALESCE((openalbert_conversations.data->>'title_from_chat')::boolean,false) AND NOT (COALESCE((excluded.data->>'title_from_chat')::boolean,false) AND openalbert_conversations.data->>'title'=excluded.data->>'title') THEN (jsonb_set(excluded.data,'{title}',openalbert_conversations.data->'title') - 'title_from_chat') ELSE excluded.data END`, in.Conversation.ID, c); err != nil {
 		return false, err
 	}
 	if _, err = tx.Exec(ctx, "UPDATE openalbert_poll SET offset_value=GREATEST(offset_value,$1) WHERE id", offset); err != nil {

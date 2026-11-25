@@ -48,12 +48,12 @@ func TestTelegramWorkspacePollOwnerOnly(t *testing.T) {
 	if err != nil || len(updates) != 7 {
 		t.Fatalf("poll failed: len=%d err=%v", len(updates), err)
 	}
-	// Update 1: owner topic message accepted.
-	if updates[0].Incoming == nil || updates[0].Incoming.Conversation.ID != "telegram:group:-100555:topic:42" || updates[0].Incoming.Conversation.ThreadID != 42 || updates[0].Incoming.Conversation.OwnerID != 7 {
+	// Update 1: owner topic message accepted (no forum_topic_created -> TitleFromChat=true).
+	if updates[0].Incoming == nil || updates[0].Incoming.Conversation.ID != "telegram:group:-100555:topic:42" || updates[0].Incoming.Conversation.ThreadID != 42 || updates[0].Incoming.Conversation.OwnerID != 7 || !updates[0].Incoming.Conversation.TitleFromChat {
 		t.Fatalf("unexpected update 0: %+v", updates[0].Incoming)
 	}
 	// Update 2: owner general/#Control message accepted.
-	if updates[1].Incoming == nil || updates[1].Incoming.Conversation.ID != "telegram:group:-100555:topic:0" || updates[1].Incoming.Conversation.ThreadID != 0 {
+	if updates[1].Incoming == nil || updates[1].Incoming.Conversation.ID != "telegram:group:-100555:topic:0" || updates[1].Incoming.Conversation.ThreadID != 0 || updates[1].Incoming.Conversation.TitleFromChat {
 		t.Fatalf("unexpected update 1: %+v", updates[1].Incoming)
 	}
 	// Updates 3-6: non-owner, stranger, bot, and non-supergroup in workspace MUST be ignored.

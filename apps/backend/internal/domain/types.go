@@ -11,6 +11,7 @@ import (
 type Conversation struct {
 	DeliveryChannel string `json:"delivery_channel,omitempty"` // Ephemeral turn route; never persist in canonical conversations.
 	Title           string `json:"title,omitempty"`
+	TitleFromChat   bool   `json:"title_from_chat,omitempty"` // True when Title is a supergroup chat-title fallback, not a known forum topic name.
 	ID              string `json:"id"`
 	ChatID          int64  `json:"chat_id"`
 	ThreadID        int    `json:"thread_id,omitempty"`
