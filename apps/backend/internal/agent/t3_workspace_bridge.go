@@ -30,9 +30,9 @@ const T3CallbackPrefix = "t3:"
 var t3TopicStatusPrefixes = []string{"🔄", "❓", "👀", "✅", "❌"}
 
 const (
-	t3BoardThreadLimit      = 20
-	t3BoardMaxUTF16Units    = 3900
-	t3CallbackMaxDispatch   = 6 * time.Second
+	t3BoardThreadLimit       = 20
+	t3BoardMaxUTF16Units     = 3900
+	t3CallbackMaxDispatch    = 6 * time.Second
 	t3AnswerCheckpointBase   = "t3/cb/a/"
 	t3ControlCheckpointBase  = "t3/cb/c/"
 	t3CommandCheckpointBase  = "t3/cb/cmd/"
@@ -146,13 +146,13 @@ func NewT3WorkspaceBridge(cfg T3WorkspaceBridgeConfig) *T3WorkspaceBridge {
 		ControlThreadID:  cfg.ControlThreadID,
 	}
 	return &T3WorkspaceBridge{
-		cp:               cfg.ControlPlane,
-		repo:             cfg.Repo,
-		transport:        cfg.Transport,
-		controller:       ctrl,
-		ownerUserID:      cfg.OwnerUserID,
-		workspaceGroupID: cfg.WorkspaceGroupID,
-		logger:           logger,
+		cp:                     cfg.ControlPlane,
+		repo:                   cfg.Repo,
+		transport:              cfg.Transport,
+		controller:             ctrl,
+		ownerUserID:            cfg.OwnerUserID,
+		workspaceGroupID:       cfg.WorkspaceGroupID,
+		logger:                 logger,
 		lastTopicTitle:         map[int]string{},
 		recreatedTopicIDs:      map[string]int{},
 		answerRecords:          map[string]*t3AnswerCallbackRecord{},

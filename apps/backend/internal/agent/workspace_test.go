@@ -906,7 +906,6 @@ func TestWorkspaceRegressionsTaskAuthTitlePreservationAndUnsetGate(t *testing.T)
 	})
 }
 
-
 func TestWorkspacePostAutoRecreatesDeletedForumTopic(t *testing.T) {
 	ctx := context.Background()
 	repo := storage.NewMemory()

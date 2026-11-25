@@ -1525,7 +1525,6 @@ func (h *hookEditTransport) EditMessageText(ctx context.Context, chatID int64, m
 	return h.fakeWorkspaceTransport.EditMessageText(ctx, chatID, messageID, text, replyMarkup)
 }
 
-
 func TestT3WorkspaceBridgePostsLaunchCardAndAutoRecreatesDeletedTopic(t *testing.T) {
 	_, cp, repo, transport := setupT3WorkspaceBridge(t)
 	ctx := context.Background()
