@@ -221,6 +221,8 @@ func (a *Activities) ExecuteCodingTool(ctx context.Context, req CodingToolReques
 		accessErr = a.logSearchAccess(in)
 	case "task_update":
 		accessErr = taskUpdateAccess(in)
+	case "topic_create", "topic_update", "workspace_post":
+		accessErr = a.workspaceToolAccess(in)
 	}
 	if accessErr != nil {
 		ev.Fail(accessErr)

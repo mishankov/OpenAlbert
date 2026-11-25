@@ -31,8 +31,10 @@ type TelegramConfig struct {
 	Logger           *slog.Logger
 	Token            string
 	BaseURL          string // Optional Bot API server root; default https://api.telegram.org.
+	OwnerUserID      int64  // Optional; defaults to AllowedUserIDs[0] when unset.
 	AllowedUserIDs   []int64
 	AllowedGroupIDs  []int64 // Groups disabled by default; participants inside these groups are accepted.
+	WorkspaceGroupID int64   // Optional negative supergroup ID restricted to OwnerUserID.
 	AllowBotMessages bool    // Accept bot participants in allowed groups; private-chat bot messages remain ignored.
 	HTTPClient       *http.Client
 	PollTimeout      time.Duration
@@ -45,14 +47,17 @@ type Telegram struct {
 	ChatGPT                *ChatGPTControls
 	config                 TelegramConfig
 	client                 *http.Client
+	ownerID                int64
+	workspaceGroupID       int64
 	users                  map[int64]bool
 	groups                 map[int64]bool
 	username               string // Set by ConfigureCommands before polling starts.
 }
 type Update struct {
-	Offset      int64
-	Incoming    *domain.Incoming
-	WidgetQuery *domain.WidgetQuery
+	Offset        int64
+	Incoming      *domain.Incoming
+	WidgetQuery   *domain.WidgetQuery
+	CallbackQuery *domain.CallbackQuery
 }
 type TelegramError struct {
 	Status         int
@@ -64,7 +69,8 @@ type TelegramError struct {
 	MessageMissing bool
 }
 
-func (e *TelegramError) HTTPStatus() int { return e.Code }
+func (e *TelegramError) HTTPStatus() int        { return e.Code }
+func (e *TelegramError) IsMessageMissing() bool { return e.MessageMissing }
 
 // TelegramDeliveryError means the send may have reached Telegram, but an acknowledgement
 // was not safely received. Do not automatically retry it: that could duplicate a message.
@@ -131,6 +137,20 @@ func NewTelegram(c TelegramConfig) (*Telegram, error) {
 		}
 		t.groups[id] = true
 	}
+	if c.WorkspaceGroupID > 0 {
+		return nil, errors.New("Telegram workspace group ID must be negative")
+	}
+	if c.WorkspaceGroupID < 0 {
+		t.workspaceGroupID = c.WorkspaceGroupID
+		t.groups[c.WorkspaceGroupID] = true
+	}
+	ownerID := c.OwnerUserID
+	if ownerID == 0 {
+		ownerID = c.AllowedUserIDs[0]
+	} else if ownerID < 0 || !t.users[ownerID] {
+		return nil, errors.New("Telegram owner user ID must be in allowed user IDs")
+	}
+	t.ownerID = ownerID
 	return t, nil
 }
 
@@ -230,7 +250,7 @@ func (t *Telegram) response(ctx context.Context, req *http.Request, out any) err
 		}
 		description := strings.ToLower(envelope.Description)
 		return &TelegramError{Code: code, Status: resp.StatusCode, Description: t.safeAPIDescription(envelope.Description), Rejected: !*envelope.OK, RetryAfter: time.Duration(envelope.Parameters.RetryAfter) * time.Second,
-			NotModified:    code == 400 && strings.Contains(description, "message is not modified"),
+			NotModified:    code == 400 && (strings.Contains(description, "message is not modified") || strings.Contains(description, "topic_not_modified")),
 			MessageMissing: code == 400 && (strings.Contains(description, "message to delete not found") || strings.Contains(description, "message to edit not found"))}
 	}
 	if out != nil && json.Unmarshal(envelope.Result, out) != nil {
@@ -334,6 +354,10 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 				q.DataType = false
 			}
 			update.WidgetQuery = &q
+			if u.Callback != nil {
+				cb := callbackQuery(u.Callback)
+				update.CallbackQuery = &cb
+			}
 			out = append(out, update)
 			continue
 		}
@@ -343,13 +367,22 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 			continue
 		}
 		private := m.Chat.Type == "private"
-		if m.From.IsBot && (private || !t.config.AllowBotMessages) {
-			out = append(out, update)
-			continue
-		}
-		if (!private && (!t.groups[m.Chat.ID] || (m.Chat.Type != "group" && m.Chat.Type != "supergroup"))) || (private && (m.Chat.ID != m.From.ID || !t.users[m.From.ID])) {
-			out = append(out, update)
-			continue
+		isWorkspace := t.workspaceGroupID < 0 && m.Chat.ID == t.workspaceGroupID
+		if isWorkspace {
+			// Owner workspace supergroup only accepts non-bot messages from the configured owner.
+			if m.Chat.Type != "supergroup" || m.From.IsBot || t.ownerID <= 0 || m.From.ID != t.ownerID {
+				out = append(out, update)
+				continue
+			}
+		} else {
+			if m.From.IsBot && (private || !t.config.AllowBotMessages) {
+				out = append(out, update)
+				continue
+			}
+			if (!private && (!t.groups[m.Chat.ID] || (m.Chat.Type != "group" && m.Chat.Type != "supergroup"))) || (private && (m.Chat.ID != m.From.ID || !t.users[m.From.ID])) {
+				out = append(out, update)
+				continue
+			}
 		}
 		// Ordinary replies can also carry message_thread_id. Only forum topics
 		// have a separate conversation and an outgoing delivery thread.

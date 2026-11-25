@@ -25,6 +25,7 @@ type Config struct {
 	TelegramWidgets                                         string
 	TelegramBotToken, TelegramBaseURL                       string
 	TelegramAllowedUserIDs, TelegramAllowedGroupIDs         []int64
+	TelegramWorkspaceGroupID                                int64
 	TelegramAllowBotMessages                                bool
 	ModelsFile                                              string
 	Models                                                  domain.ModelProfiles
@@ -201,6 +202,24 @@ func load(get func(string) string) (Config, error) {
 	c.TelegramAllowedGroupIDs, err = parseIDs(get("TELEGRAM_ALLOWED_GROUP_IDS"), true)
 	if err != nil {
 		problems = append(problems, fmt.Errorf("TELEGRAM_ALLOWED_GROUP_IDS: %w", err))
+	}
+	if raw := strings.TrimSpace(get("TELEGRAM_WORKSPACE_GROUP_ID")); raw != "" {
+		id, e := strconv.ParseInt(raw, 10, 64)
+		if e != nil || id >= 0 {
+			problems = append(problems, errors.New("TELEGRAM_WORKSPACE_GROUP_ID must be a negative Telegram supergroup ID"))
+		} else {
+			c.TelegramWorkspaceGroupID = id
+			listed := false
+			for _, gid := range c.TelegramAllowedGroupIDs {
+				if gid == id {
+					listed = true
+					break
+				}
+			}
+			if !listed {
+				c.TelegramAllowedGroupIDs = append(c.TelegramAllowedGroupIDs, id)
+			}
+		}
 	}
 	duration := func(key, def string, zero bool) time.Duration {
 		v, e := time.ParseDuration(value(key, def))

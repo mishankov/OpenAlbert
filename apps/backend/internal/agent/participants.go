@@ -34,7 +34,7 @@ func (a *Activities) searchParticipants(ctx context.Context, current domain.Conv
 			return nil, err
 		}
 		scopes = []domain.Conversation{{ID: scope}}
-	} else if a.isOwnerPrivate(current) {
+	} else if a.isOwnerAuthorized(current) {
 		var err error
 		scopes, err = a.readableConversations(ctx, current)
 		if err != nil {
@@ -76,7 +76,7 @@ func (a *Activities) participantEvidence(ctx context.Context, scope string, user
 	return nil
 }
 func (a *Activities) updateParticipant(ctx context.Context, in ToolInput, p toolArgs, key string, now time.Time) (any, error) {
-	if in.Conversation.Private || (p.ConversationID != "" && p.ConversationID != in.Conversation.ID) {
+	if in.Conversation.Private || a.isWorkspaceGroup(in.Conversation) || (p.ConversationID != "" && p.ConversationID != in.Conversation.ID) {
 		return nil, errors.New("participant facts can only be changed within their original group")
 	}
 	if err := a.participantEvidence(ctx, in.Conversation.ID, p.UserID, p.SourceMessageID, p.Evidence); err != nil {
@@ -124,7 +124,7 @@ func groupAuthorMessages(messages []domain.Message) []domain.Message {
 	return out
 }
 func (a *Activities) groupParticipantContext(ctx context.Context, conv domain.Conversation, in RunInput) (string, error) {
-	if conv.Private {
+	if conv.Private || a.isWorkspaceGroup(conv) {
 		return "", nil
 	}
 	seen := map[int64]bool{}

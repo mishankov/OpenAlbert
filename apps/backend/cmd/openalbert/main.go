@@ -124,7 +124,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	telegram, err := integrations.NewTelegram(integrations.TelegramConfig{Widgets: c.TelegramWidgets, Logger: logger, Token: c.TelegramBotToken, BaseURL: c.TelegramBaseURL, AllowedUserIDs: c.TelegramAllowedUserIDs, AllowedGroupIDs: c.TelegramAllowedGroupIDs, AllowBotMessages: c.TelegramAllowBotMessages})
+	telegram, err := integrations.NewTelegram(integrations.TelegramConfig{Widgets: c.TelegramWidgets, Logger: logger, Token: c.TelegramBotToken, BaseURL: c.TelegramBaseURL, OwnerUserID: c.TelegramOwnerUserID, AllowedUserIDs: c.TelegramAllowedUserIDs, AllowedGroupIDs: c.TelegramAllowedGroupIDs, WorkspaceGroupID: c.TelegramWorkspaceGroupID, AllowBotMessages: c.TelegramAllowBotMessages})
 	if err != nil {
 		return err
 	}
@@ -152,7 +152,7 @@ func run() error {
 		}
 		defer browsers.Close()
 	}
-	activities := &agent.Activities{Codemode: true, OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: billing, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, InspectorPublicURL: c.InspectorPublicURL}
+	activities := &agent.Activities{Codemode: true, OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, WorkspaceGroupID: c.TelegramWorkspaceGroupID, Workspace: telegram, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: billing, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, InspectorPublicURL: c.InspectorPublicURL}
 	activities.Logs = logs
 	if c.ComputerSSHAddress != "" {
 		activities.Computer, err = computer.New(computer.Config{Address: c.ComputerSSHAddress, User: c.ComputerSSHUser, Password: c.ComputerSSHPassword, KeyFile: c.ComputerSSHKeyFile})
@@ -177,7 +177,8 @@ func run() error {
 	if browsers != nil {
 		activities.Widgets.PrepareCloseTask = browsers.(*browser.Manager).PrepareCloseTask
 	}
-	runtime := &orchestration.Runtime{Repo: artifacts, Activities: activities, Telegram: telegram, TTS: voice, Client: temporalClient, TaskQueue: c.TemporalTaskQueue, IdleTimeout: c.SessionIdleTimeout, MaxSteps: c.MaxAgentSteps, InitiativeInterval: c.InitiativeInterval, MemoryConsolidationInterval: c.MemoryConsolidationInterval, Logger: logger}
+	callbacks := integrations.NewCallbackRouter(c.TelegramOwnerUserID, c.TelegramWorkspaceGroupID, telegram.AnswerCallbackQuery)
+	runtime := &orchestration.Runtime{Repo: artifacts, Activities: activities, Telegram: telegram, Callbacks: callbacks, TTS: voice, Client: temporalClient, TaskQueue: c.TemporalTaskQueue, IdleTimeout: c.SessionIdleTimeout, MaxSteps: c.MaxAgentSteps, InitiativeInterval: c.InitiativeInterval, MemoryConsolidationInterval: c.MemoryConsolidationInterval, Logger: logger}
 	worker := runtime.Worker()
 	if err = worker.Start(); err != nil {
 		return errors.New("Temporal worker startup failed")

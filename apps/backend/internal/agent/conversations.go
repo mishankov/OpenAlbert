@@ -19,16 +19,20 @@ func (a *Activities) isOwnerPrivate(c domain.Conversation) bool {
 
 func (a *Activities) readableConversations(ctx context.Context, current domain.Conversation) ([]domain.Conversation, error) {
 	out := []domain.Conversation{current}
-	if !a.isOwnerPrivate(current) {
+	if !a.isOwnerAuthorized(current) {
 		return out, nil
 	}
 	all, err := a.Repo.ListConversations(ctx)
 	if err != nil {
 		return nil, err
 	}
+	personalID := a.ownerPersonalScope()
 	for _, c := range all {
+		if c.ID == current.ID {
+			continue
+		}
 		// Other allowed users' private conversations remain private.
-		if !c.Private && c.ID != current.ID {
+		if !c.Private || (personalID != "" && c.ID == personalID && a.isOwnerPrivate(c)) {
 			out = append(out, c)
 		}
 	}
@@ -39,7 +43,10 @@ func (a *Activities) readScope(ctx context.Context, current domain.Conversation,
 	if requested == "" || requested == current.ID {
 		return current.ID, nil
 	}
-	if a.isOwnerPrivate(current) {
+	if a.isOwnerAuthorized(current) {
+		if personalID := a.ownerPersonalScope(); personalID != "" && requested == personalID {
+			return personalID, nil
+		}
 		target, ok, err := a.Repo.Conversation(ctx, requested)
 		if err != nil {
 			return "", err
@@ -59,11 +66,23 @@ func (a *Activities) searchMemories(ctx context.Context, current domain.Conversa
 			return nil, err
 		}
 		scopes = []domain.Conversation{{ID: target}}
-	} else if a.isOwnerPrivate(current) {
+	} else if a.isOwnerAuthorized(current) {
 		var err error
 		scopes, err = a.readableConversations(ctx, current)
 		if err != nil {
 			return nil, err
+		}
+		if personalID := a.ownerPersonalScope(); personalID != "" {
+			hasPersonal := false
+			for _, c := range scopes {
+				if c.ID == personalID {
+					hasPersonal = true
+					break
+				}
+			}
+			if !hasPersonal {
+				scopes = append(scopes, domain.Conversation{ID: personalID, ChatID: a.OwnerUserID, OwnerID: a.OwnerUserID, Private: true})
+			}
 		}
 	}
 	out := []domain.MemoryEntry{}
