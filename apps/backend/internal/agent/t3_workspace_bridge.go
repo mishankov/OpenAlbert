@@ -33,9 +33,10 @@ const (
 	t3BoardThreadLimit      = 20
 	t3BoardMaxUTF16Units    = 3900
 	t3CallbackMaxDispatch   = 6 * time.Second
-	t3AnswerCheckpointBase  = "t3/cb/a/"
-	t3ControlCheckpointBase = "t3/cb/c/"
-	t3CommandCheckpointBase = "t3/cb/cmd/"
+	t3AnswerCheckpointBase   = "t3/cb/a/"
+	t3ControlCheckpointBase  = "t3/cb/c/"
+	t3CommandCheckpointBase  = "t3/cb/cmd/"
+	t3LaunchedCheckpointBase = "t3/launched/"
 )
 
 // T3WorkspaceBridgeConfig configures the zero-LLM bridge between the T3 Control
@@ -62,19 +63,21 @@ type T3WorkspaceBridge struct {
 	workspaceGroupID int64
 	logger           *slog.Logger
 
-	topicMu        sync.Mutex
-	lastTopicTitle map[int]string
+	topicMu           sync.Mutex
+	lastTopicTitle    map[int]string
+	recreatedTopicIDs map[string]int // old conversation_id -> newly recreated forum thread_id
 
 	boardMu       sync.Mutex
 	lastBoardText string
 
-	cbMu             sync.Mutex
-	answerRecords    map[string]*t3AnswerCallbackRecord
-	controlRecords   map[string]*t3ControlCallbackRecord
-	postedPRMessages map[string]bool
-	pendingByCommand map[string]string // command_id -> answer callback token
-	inFlightTokens   map[string]bool   // token currently waiting inside DispatchAndWait
-	tokenLocks       map[string]*sync.Mutex
+	cbMu                   sync.Mutex
+	answerRecords          map[string]*t3AnswerCallbackRecord
+	controlRecords         map[string]*t3ControlCallbackRecord
+	postedPRMessages       map[string]bool
+	postedLaunchedMessages map[string]bool
+	pendingByCommand       map[string]string // command_id -> answer callback token
+	inFlightTokens         map[string]bool   // token currently waiting inside DispatchAndWait
+	tokenLocks             map[string]*sync.Mutex
 }
 
 type t3QuestionOption struct {
@@ -150,13 +153,15 @@ func NewT3WorkspaceBridge(cfg T3WorkspaceBridgeConfig) *T3WorkspaceBridge {
 		ownerUserID:      cfg.OwnerUserID,
 		workspaceGroupID: cfg.WorkspaceGroupID,
 		logger:           logger,
-		lastTopicTitle:   map[int]string{},
-		answerRecords:    map[string]*t3AnswerCallbackRecord{},
-		controlRecords:   map[string]*t3ControlCallbackRecord{},
-		postedPRMessages: map[string]bool{},
-		pendingByCommand: map[string]string{},
-		inFlightTokens:   map[string]bool{},
-		tokenLocks:       map[string]*sync.Mutex{},
+		lastTopicTitle:         map[int]string{},
+		recreatedTopicIDs:      map[string]int{},
+		answerRecords:          map[string]*t3AnswerCallbackRecord{},
+		controlRecords:         map[string]*t3ControlCallbackRecord{},
+		postedPRMessages:       map[string]bool{},
+		postedLaunchedMessages: map[string]bool{},
+		pendingByCommand:       map[string]string{},
+		inFlightTokens:         map[string]bool{},
+		tokenLocks:             map[string]*sync.Mutex{},
 	}
 }
 
@@ -206,8 +211,28 @@ func (b *T3WorkspaceBridge) OnThreadEventHandled(ctx context.Context, event doma
 
 	if current {
 		if threadID, ok := b.workspaceTopicThreadID(event.ConversationID); ok {
-			if prefix := statusPrefixForEvent(event); prefix != "" {
+			prefix := statusPrefixForEvent(event)
+			recreated := false
+			recreateOnce := func() bool {
+				if recreated {
+					return false
+				}
+				newConvID, newTopicID, recErr := b.recreateWorkspaceTopic(ctx, event, event.ConversationID, prefix)
+				if recErr != nil {
+					errs = append(errs, recErr)
+					return false
+				}
+				event.ConversationID = newConvID
+				threadID = newTopicID
+				recreated = true
+				return true
+			}
+
+			if prefix != "" {
 				stillCurrent, err := b.syncTopicTitleForEvent(ctx, event, threadID, prefix)
+				if err != nil && isThreadMissingError(err) && recreateOnce() {
+					err = nil
+				}
 				if err != nil {
 					errs = append(errs, err)
 				}
@@ -217,9 +242,20 @@ func (b *T3WorkspaceBridge) OnThreadEventHandled(ctx context.Context, event doma
 			}
 			if current {
 				switch event.Kind {
+				case domain.T3EventThreadLaunched:
+					err := b.postLaunchedCard(ctx, event, threadID)
+					if err != nil && isThreadMissingError(err) && recreateOnce() {
+						err = b.postLaunchedCard(ctx, event, threadID)
+					}
+					if err != nil {
+						errs = append(errs, err)
+					}
 				case domain.T3EventThreadWaitingInput:
 					if event.PendingRequest != nil {
 						posted, err := b.postWaitingInputButtons(ctx, event, threadID)
+						if !posted && err != nil && isThreadMissingError(err) && recreateOnce() {
+							posted, err = b.postWaitingInputButtons(ctx, event, threadID)
+						}
 						if posted {
 							handled = true
 						}
@@ -229,7 +265,11 @@ func (b *T3WorkspaceBridge) OnThreadEventHandled(ctx context.Context, event doma
 					}
 				case domain.T3EventThreadCompleted:
 					if strings.TrimSpace(event.PRURL) != "" {
-						if err := b.postCompletedPRButtons(ctx, event, threadID); err != nil {
+						err := b.postCompletedPRButtons(ctx, event, threadID)
+						if err != nil && isThreadMissingError(err) && recreateOnce() {
+							err = b.postCompletedPRButtons(ctx, event, threadID)
+						}
+						if err != nil {
 							errs = append(errs, err)
 						}
 					}
@@ -403,6 +443,139 @@ func (b *T3WorkspaceBridge) syncTopicTitleLocked(ctx context.Context, conversati
 		return err
 	}
 	b.lastTopicTitle[threadID] = updated
+	return nil
+}
+
+func (b *T3WorkspaceBridge) recreateWorkspaceTopic(ctx context.Context, event domain.T3Event, oldConvID, prefix string) (string, int, error) {
+	b.topicMu.Lock()
+	defer b.topicMu.Unlock()
+
+	if existingTopicID, ok := b.recreatedTopicIDs[oldConvID]; ok && existingTopicID > 0 {
+		newConvID := fmt.Sprintf("telegram:group:%d:topic:%d", b.workspaceGroupID, existingTopicID)
+		if b.cp != nil && event.ThreadID != "" {
+			_, _ = b.cp.RebindThreadConversation(ctx, event.ThreadID, newConvID)
+		}
+		return newConvID, existingTopicID, nil
+	}
+
+	baseTitle := ""
+	if b.repo != nil && oldConvID != "" {
+		if conv, found, err := b.repo.Conversation(ctx, oldConvID); err == nil && found && !conv.TitleFromChat {
+			baseTitle = stripT3StatusPrefix(conv.Title)
+		}
+	}
+	if baseTitle == "" {
+		baseTitle = stripT3StatusPrefix(event.Title)
+	}
+	if baseTitle == "" {
+		baseTitle = "Задача"
+	}
+	if prefix == "" {
+		prefix = "🔄"
+	}
+	desiredTitle, err := formatTopicTitle(prefix, baseTitle)
+	if err != nil {
+		desiredTitle = "🔄 Задача"
+	}
+
+	topic, err := b.transport.CreateForumTopic(ctx, b.workspaceGroupID, desiredTitle, 0)
+	if err != nil {
+		return "", 0, err
+	}
+	name := strings.TrimSpace(topic.Name)
+	if name == "" {
+		name = desiredTitle
+	}
+	newConvID := fmt.Sprintf("telegram:group:%d:topic:%d", b.workspaceGroupID, topic.ThreadID)
+	if b.repo != nil {
+		conv := domain.Conversation{
+			ID:       newConvID,
+			Title:    name,
+			ChatID:   b.workspaceGroupID,
+			ThreadID: topic.ThreadID,
+			OwnerID:  b.ownerUserID,
+			Private:  false,
+		}
+		if err := b.repo.SaveConversation(ctx, conv); err != nil {
+			return "", 0, err
+		}
+	}
+	if b.cp != nil {
+		if event.ThreadID != "" {
+			_, _ = b.cp.RebindThreadConversation(ctx, event.ThreadID, newConvID)
+		}
+		if oldConvID != "" {
+			if threads, listErr := b.cp.ListThreads(ctx, domain.T3ThreadFilter{ConversationID: oldConvID}); listErr == nil {
+				for _, th := range threads {
+					if th.ThreadID == event.ThreadID {
+						continue
+					}
+					_, _ = b.cp.RebindThreadConversation(ctx, th.ThreadID, newConvID)
+				}
+			}
+		}
+	}
+	b.lastTopicTitle[topic.ThreadID] = name
+	if oldConvID != "" {
+		b.recreatedTopicIDs[oldConvID] = topic.ThreadID
+	}
+	return newConvID, topic.ThreadID, nil
+}
+
+func (b *T3WorkspaceBridge) postLaunchedCard(ctx context.Context, event domain.T3Event, threadID int) error {
+	dedupKey := strings.TrimSpace(event.ThreadID)
+	if dedupKey == "" {
+		return nil
+	}
+	b.cbMu.Lock()
+	if b.postedLaunchedMessages[dedupKey] {
+		b.cbMu.Unlock()
+		return nil
+	}
+	b.cbMu.Unlock()
+
+	cpKey := t3LaunchedCheckpointBase + shortCallbackToken("t3l", dedupKey)
+	if b.repo != nil {
+		if _, found, err := b.repo.LoadCheckpoint(ctx, cpKey); err == nil && found {
+			b.cbMu.Lock()
+			b.postedLaunchedMessages[dedupKey] = true
+			b.cbMu.Unlock()
+			return nil
+		}
+	}
+
+	title := stripT3StatusPrefix(event.Title)
+	if title == "" {
+		title = dedupKey
+	}
+	var msg strings.Builder
+	fmt.Fprintf(&msg, "🔄 Воркер запущен: %s", clipRunes(title, 120))
+	if model := strings.TrimSpace(event.Model); model != "" {
+		fmt.Fprintf(&msg, "\nМодель: %s", clipRunes(model, 80))
+	}
+	if branch := strings.TrimSpace(event.Branch); branch != "" {
+		fmt.Fprintf(&msg, "\nВетка: %s", clipRunes(branch, 80))
+	}
+	if link := strings.TrimSpace(event.Link); link != "" {
+		fmt.Fprintf(&msg, "\n%s", clipRunes(link, 240))
+	}
+	text := clipUTF16(msg.String(), messagefmt.TextLimit)
+	conv := domain.Conversation{
+		ID:       event.ConversationID,
+		ChatID:   b.workspaceGroupID,
+		ThreadID: threadID,
+		OwnerID:  b.ownerUserID,
+		Private:  false,
+	}
+	if _, err := b.transport.SendMessageWithButtons(ctx, conv, text, nil, nil); err != nil {
+		return err
+	}
+	b.cbMu.Lock()
+	b.postedLaunchedMessages[dedupKey] = true
+	b.cbMu.Unlock()
+	if b.repo != nil {
+		_ = b.repo.SaveCheckpoint(ctx, cpKey, json.RawMessage(`true`))
+	}
 	return nil
 }
 

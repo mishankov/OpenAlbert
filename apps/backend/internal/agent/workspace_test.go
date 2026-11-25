@@ -23,6 +23,11 @@ type fakeMissingError struct{}
 func (fakeMissingError) Error() string          { return "message to edit not found" }
 func (fakeMissingError) IsMessageMissing() bool { return true }
 
+type fakeThreadMissingError struct{}
+
+func (fakeThreadMissingError) Error() string         { return "message thread not found" }
+func (fakeThreadMissingError) IsThreadMissing() bool { return true }
+
 type fakeWorkspaceTransport struct {
 	mu           sync.Mutex
 	nextThreadID int
@@ -55,8 +60,9 @@ type fakeWorkspaceTransport struct {
 		disable bool
 	}
 
-	editErr error
-	pinErr  error
+	editErr       error
+	pinErr        error
+	deletedTopics map[int]bool
 }
 
 func (f *fakeWorkspaceTransport) CreateForumTopic(_ context.Context, _ int64, name string, iconColor int) (domain.ForumTopic, error) {
@@ -71,6 +77,9 @@ func (f *fakeWorkspaceTransport) CreateForumTopic(_ context.Context, _ int64, na
 func (f *fakeWorkspaceTransport) EditForumTopic(_ context.Context, chatID int64, threadID int, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.deletedTopics[threadID] {
+		return fakeThreadMissingError{}
+	}
 	f.editedTopics = append(f.editedTopics, struct {
 		chatID   int64
 		threadID int
@@ -96,6 +105,9 @@ func (f *fakeWorkspaceTransport) ReopenForumTopic(_ context.Context, _ int64, th
 func (f *fakeWorkspaceTransport) SendMessageWithButtons(_ context.Context, conv domain.Conversation, text string, entities []domain.TextEntity, markup *domain.InlineKeyboardMarkup) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if conv.ThreadID > 0 && f.deletedTopics[conv.ThreadID] {
+		return 0, fakeThreadMissingError{}
+	}
 	f.nextMsgID++
 	id := f.nextMsgID
 	f.sentMessages = append(f.sentMessages, struct {
@@ -892,4 +904,49 @@ func TestWorkspaceRegressionsTaskAuthTitlePreservationAndUnsetGate(t *testing.T)
 			t.Fatalf("workspace_post must not send any message when workspace is unset: %+v", transport.sentMessages)
 		}
 	})
+}
+
+
+func TestWorkspacePostAutoRecreatesDeletedForumTopic(t *testing.T) {
+	ctx := context.Background()
+	repo := storage.NewMemory()
+	transport := &fakeWorkspaceTransport{
+		nextThreadID:  100,
+		deletedTopics: map[int]bool{8: true},
+	}
+	if err := repo.SaveConversation(ctx, domain.Conversation{
+		ID:       "telegram:group:-100555:topic:8",
+		Title:    "🔄 Polka · баг #64",
+		ChatID:   -100555,
+		ThreadID: 8,
+		OwnerID:  7,
+	}); err != nil {
+		t.Fatalf("save old topic: %v", err)
+	}
+	act := &Activities{
+		Repo:             repo,
+		Workspace:        transport,
+		OwnerUserID:      7,
+		WorkspaceGroupID: -100555,
+	}
+	raw, err := act.executeWorkspaceTool(ctx, ToolInput{
+		Conversation: domain.Conversation{ID: "telegram:group:-100555:topic:0", ChatID: -100555, OwnerID: 7},
+		Call: domain.ToolCall{
+			Name:      "workspace_post",
+			Arguments: json.RawMessage(`{"conversation_id":"telegram:group:-100555:topic:8","text":"Стартовый бриф"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("workspace_post should recreate deleted topic: %v", err)
+	}
+	res := raw.(map[string]any)
+	if res["recreated"] != true || res["conversation_id"] != "telegram:group:-100555:topic:101" {
+		t.Fatalf("unexpected workspace_post result: %+v", res)
+	}
+	if len(transport.createdTopics) != 1 || transport.createdTopics[0].Name != "🔄 Polka · баг #64" {
+		t.Fatalf("expected recreated topic with previous title, got %+v", transport.createdTopics)
+	}
+	if len(transport.sentMessages) != 1 || transport.sentMessages[0].conv.ThreadID != 101 {
+		t.Fatalf("expected message delivered to recreated topic 101, got %+v", transport.sentMessages)
+	}
 }

@@ -186,6 +186,11 @@ func (a *Activities) workspaceToolAccess(in ToolInput) error {
 	return nil
 }
 
+func isThreadMissingError(err error) bool {
+	var tm interface{ IsThreadMissing() bool }
+	return errors.As(err, &tm) && tm.IsThreadMissing()
+}
+
 func isWorkspaceTool(name string) bool {
 	return name == "topic_create" || name == "topic_update" || name == "workspace_post"
 }
@@ -415,25 +420,72 @@ func (a *Activities) executeWorkspaceTool(ctx context.Context, in ToolInput) (an
 			return nil, errors.New("workspace_post text must not be empty")
 		}
 		var lastMessageID int64
+		recreated := false
 		for i, part := range parts {
 			var partMarkup *domain.InlineKeyboardMarkup
 			if i == len(parts)-1 {
 				partMarkup = markup
 			}
 			msgID, err := transport.SendMessageWithButtons(ctx, target, part.Text, part.Entities, partMarkup)
+			if err != nil && i == 0 && !recreated && target.ThreadID > 0 && a.isWorkspaceGroup(target) && isThreadMissingError(err) {
+				oldConvID := target.ID
+				title := strings.TrimSpace(target.Title)
+				if title == "" {
+					title = "🔄 Задача"
+				}
+				if validTitle, vErr := validateTopicTitle(title); vErr == nil {
+					title = validTitle
+				} else {
+					title = "🔄 Задача"
+				}
+				topic, createErr := transport.CreateForumTopic(ctx, a.WorkspaceGroupID, title, 0)
+				if createErr != nil {
+					return nil, createErr
+				}
+				name := strings.TrimSpace(topic.Name)
+				if name == "" {
+					name = title
+				}
+				target = domain.Conversation{
+					ID:       fmt.Sprintf("telegram:group:%d:topic:%d", a.WorkspaceGroupID, topic.ThreadID),
+					Title:    name,
+					ChatID:   a.WorkspaceGroupID,
+					ThreadID: topic.ThreadID,
+					OwnerID:  a.OwnerUserID,
+					Private:  false,
+				}
+				if a.Repo != nil {
+					if saveErr := a.Repo.SaveConversation(ctx, target); saveErr != nil {
+						return nil, saveErr
+					}
+				}
+				if a.T3 != nil {
+					if threads, listErr := a.T3.ListThreads(ctx, domain.T3ThreadFilter{ConversationID: oldConvID}); listErr == nil {
+						for _, th := range threads {
+							_, _ = a.T3.RebindThreadConversation(ctx, th.ThreadID, target.ID)
+						}
+					}
+				}
+				recreated = true
+				msgID, err = transport.SendMessageWithButtons(ctx, target, part.Text, part.Entities, partMarkup)
+			}
 			if err != nil {
 				return nil, err
 			}
 			lastMessageID = msgID
 		}
-		return map[string]any{
+		out := map[string]any{
 			"state":           "sent",
 			"message_id":      lastMessageID,
 			"conversation_id": target.ID,
 			"chat_id":         target.ChatID,
 			"thread_id":       target.ThreadID,
 			"parts":           len(parts),
-		}, nil
+		}
+		if recreated {
+			out["recreated"] = true
+		}
+		return out, nil
 
 	default:
 		return nil, errors.New("unknown workspace tool")

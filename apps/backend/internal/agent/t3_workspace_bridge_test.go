@@ -1524,3 +1524,67 @@ func (h *hookEditTransport) EditMessageText(ctx context.Context, chatID int64, m
 	}
 	return h.fakeWorkspaceTransport.EditMessageText(ctx, chatID, messageID, text, replyMarkup)
 }
+
+
+func TestT3WorkspaceBridgePostsLaunchCardAndAutoRecreatesDeletedTopic(t *testing.T) {
+	_, cp, repo, transport := setupT3WorkspaceBridge(t)
+	ctx := context.Background()
+
+	transport.nextThreadID = 200
+	transport.deletedTopics = map[int]bool{8: true}
+
+	if err := repo.SaveConversation(ctx, domain.Conversation{
+		ID:       "telegram:group:-100555:topic:8",
+		Title:    "🔄 Polka · баг #64",
+		ChatID:   -100555,
+		ThreadID: 8,
+		OwnerID:  7,
+	}); err != nil {
+		t.Fatalf("save old topic: %v", err)
+	}
+	if _, err := repo.UpsertT3Thread(ctx, domain.T3ThreadPatch{
+		ThreadID:       "th-polka-64",
+		EnvironmentID:  "env-mac",
+		ConversationID: "telegram:group:-100555:topic:8",
+		Title:          "Polka: исправить баг #64",
+		Status:         "running",
+		At:             time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("upsert thread: %v", err)
+	}
+
+	_, err := cp.IngestEvent(ctx, domain.T3Event{
+		EventID:       "evt-launch-polka",
+		EnvironmentID: "env-mac",
+		ThreadID:      "th-polka-64",
+		Kind:          domain.T3EventThreadLaunched,
+		Status:        "running",
+		Title:         "Polka: исправить баг #64",
+		Model:         "gemini-4-neon",
+		Link:          "[Polka](t3-thread://v2/env-mac/th-polka-64)",
+		OccurredAt:    time.Now().UTC(),
+	}, nil)
+	if err != nil {
+		t.Fatalf("IngestEvent launch: %v", err)
+	}
+
+	if len(transport.createdTopics) != 1 || transport.createdTopics[0].ThreadID != 201 {
+		t.Fatalf("expected deleted topic 8 to be recreated as 201, got %+v", transport.createdTopics)
+	}
+	rebound, err := cp.Thread(ctx, "th-polka-64")
+	if err != nil {
+		t.Fatalf("Thread: %v", err)
+	}
+	if rebound.ConversationID != "telegram:group:-100555:topic:201" {
+		t.Fatalf("expected thread rebound to new topic 201, got %q", rebound.ConversationID)
+	}
+	foundLaunchCard := false
+	for _, m := range transport.sentMessages {
+		if m.conv.ThreadID == 201 && strings.Contains(m.text, "Воркер запущен") && strings.Contains(m.text, "t3-thread://v2/env-mac/th-polka-64") {
+			foundLaunchCard = true
+		}
+	}
+	if !foundLaunchCard {
+		t.Fatalf("expected launch card in recreated topic 201, got %+v", transport.sentMessages)
+	}
+}

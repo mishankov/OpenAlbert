@@ -1459,6 +1459,14 @@ func (s *Server) handleBridgeTick(ctx context.Context, sess *agent.Session) (any
 	} else {
 		replyText = "bridge ok (standby)"
 	}
+	if sess != nil && sess.MCP != nil && sess.MCP.HasRemoteTool("t3_thread_organize") {
+		if _, err := sess.MCP.CallRemote(ctx, "t3_thread_organize", map[string]any{
+			"action":       "snooze",
+			"snoozedUntil": "2099-01-01T00:00:00Z",
+		}); err != nil {
+			s.logger.Debug("bridge tick auto-snooze failed", "session_id", sess.ID, "error", err)
+		}
+	}
 	_ = s.transport.Notify("session/update", map[string]any{
 		"sessionId": sess.ID,
 		"update": map[string]any{
