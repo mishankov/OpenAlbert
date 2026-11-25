@@ -317,6 +317,37 @@ func TestZeroLLMBridgeTickAndSingletonInteractiveCoherence(t *testing.T) {
 		t.Fatalf("standby tick must not call LLM, got %d", llmCalls.Load())
 	}
 
+	// T3 Code ACP wrapped envelope (<t3_code_instructions> + <user_request> + [T3 Code: ...] + <runtime_info>)
+	// MUST ALSO intercept with 0 LLM calls!
+	wrappedTick := "<t3_code_instructions>\n## T3 Code interaction mode: Default\n</t3_code_instructions>\n" +
+		"<user_request>\n[T3 Code: the agent in T3 thread \"parent-1\" sent this message, not the user.]\n\n" +
+		config.DefaultBridgeTickPrompt + "\n</user_request>\n" +
+		"<runtime_info>running in T3 Code</runtime_info>"
+	wrappedResp := call1("tick-wrapped", "session/prompt", map[string]any{
+		"sessionId": s1.SessionID,
+		"prompt":    []map[string]any{{"type": "text", "text": wrappedTick}},
+	})
+	if !strings.Contains(string(wrappedResp.Result), `"end_turn"`) {
+		t.Fatalf("unexpected wrapped tick response: %s", wrappedResp.Result)
+	}
+	if llmCalls.Load() != 0 {
+		t.Fatalf("T3-wrapped bridge tick MUST make 0 LLM calls, got %d", llmCalls.Load())
+	}
+
+	// Normal prompt inside <user_request> that merely mentions the tick marker must NOT be intercepted.
+	wrappedNonTick := "<t3_code_instructions>mode</t3_code_instructions>\n" +
+		"<user_request>\nPlease explain what " + config.DefaultBridgeTickPrompt + " does.\n</user_request>"
+	wrappedNonTickResp := call2("prompt-wrapped-non-tick", "session/prompt", map[string]any{
+		"sessionId": s2.SessionID,
+		"prompt":    []map[string]any{{"type": "text", "text": wrappedNonTick}},
+	})
+	if !strings.Contains(string(wrappedNonTickResp.Result), `"end_turn"`) {
+		t.Fatalf("unexpected wrapped non-tick response: %s", wrappedNonTickResp.Result)
+	}
+	if llmCalls.Load() != 1 {
+		t.Fatalf("wrapped non-tick prompt must reach ordinary LLM path, got %d LLM calls", llmCalls.Load())
+	}
+
 	// Padded tick prompt must NOT be intercepted; it must go through the ordinary interactive ACP LLM path.
 	paddedResp := call2("prompt-padded", "session/prompt", map[string]any{
 		"sessionId": s2.SessionID,
@@ -325,7 +356,7 @@ func TestZeroLLMBridgeTickAndSingletonInteractiveCoherence(t *testing.T) {
 	if !strings.Contains(string(paddedResp.Result), `"end_turn"`) {
 		t.Fatalf("unexpected padded prompt response: %s", paddedResp.Result)
 	}
-	if llmCalls.Load() != 1 {
+	if llmCalls.Load() != 2 {
 		t.Fatalf("padded tick marker must reach ordinary LLM path, got %d LLM calls", llmCalls.Load())
 	}
 
@@ -337,8 +368,8 @@ func TestZeroLLMBridgeTickAndSingletonInteractiveCoherence(t *testing.T) {
 	if !strings.Contains(string(interResp.Result), `"end_turn"`) {
 		t.Fatalf("unexpected interactive prompt response: %s", interResp.Result)
 	}
-	if llmCalls.Load() != 2 {
-		t.Fatalf("expected 2 total LLM calls (padded + interactive), got %d", llmCalls.Load())
+	if llmCalls.Load() != 3 {
+		t.Fatalf("expected 3 total LLM calls (wrapped non-tick + padded + interactive), got %d", llmCalls.Load())
 	}
 	if joined := strings.Join(updates2(), ""); !strings.Contains(joined, "Interactive reply!") {
 		t.Fatalf("expected interactive reply text, got %q", joined)

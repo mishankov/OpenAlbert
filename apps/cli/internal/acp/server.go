@@ -1374,7 +1374,77 @@ func (s *Server) isBridgeTickPrompt(req promptParams) bool {
 	if tick == "" {
 		tick = config.DefaultBridgeTickPrompt
 	}
-	return req.assembledText == tick
+	return matchesBridgeTick(req.assembledText, tick)
+}
+
+// matchesBridgeTick returns true when raw is either the exact tick sentinel or
+// a T3 Code ACP prompt envelope whose extracted user request payload is the
+// exact tick sentinel (optionally preceded by a T3 Code system metadata line
+// such as "[T3 Code: ...]" or "[Scheduled ...]").
+func matchesBridgeTick(raw, tick string) bool {
+	if tick == "" {
+		return false
+	}
+	if raw == tick {
+		return true
+	}
+	candidate := raw
+	fromEnvelope := false
+	if inner, ok := extractSingleUserRequestEnvelope(raw); ok {
+		candidate = strings.TrimSpace(inner)
+		fromEnvelope = true
+	}
+	stripped, hadMetaPrefix := stripT3SystemMetadataPrefix(candidate)
+	if !fromEnvelope && !hadMetaPrefix {
+		return false
+	}
+	return stripped == tick
+}
+
+func extractSingleUserRequestEnvelope(raw string) (string, bool) {
+	lower := strings.ToLower(raw)
+	const openTag = "<user_request>"
+	const closeTag = "</user_request>"
+	start := strings.Index(lower, openTag)
+	if start < 0 {
+		return "", false
+	}
+	// Reject ambiguous prompts with multiple <user_request> blocks.
+	if strings.Contains(lower[start+len(openTag):], openTag) {
+		return "", false
+	}
+	endRel := strings.Index(lower[start+len(openTag):], closeTag)
+	if endRel < 0 {
+		return "", false
+	}
+	innerStart := start + len(openTag)
+	innerEnd := innerStart + endRel
+	return raw[innerStart:innerEnd], true
+}
+
+func stripT3SystemMetadataPrefix(text string) (string, bool) {
+	strippedAny := false
+	cur := text
+	for {
+		trimmed := strings.TrimLeft(cur, "\r\n")
+		if !(strings.HasPrefix(trimmed, "[T3 Code:") || strings.HasPrefix(trimmed, "[Scheduled")) {
+			break
+		}
+		nl := strings.IndexByte(trimmed, '\n')
+		if nl < 0 {
+			break
+		}
+		line := strings.TrimSpace(trimmed[:nl])
+		if !strings.HasSuffix(line, "]") {
+			break
+		}
+		cur = strings.TrimLeft(trimmed[nl+1:], "\r\n")
+		strippedAny = true
+	}
+	if strippedAny {
+		return strings.TrimSpace(cur), true
+	}
+	return text, false
 }
 
 func (s *Server) handleBridgeTick(ctx context.Context, sess *agent.Session) (any, error) {
