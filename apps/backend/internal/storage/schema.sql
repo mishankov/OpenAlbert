@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS openalbert_progress (
     id text PRIMARY KEY,
     data jsonb NOT NULL
 );
-CREATE INDEX IF NOT EXISTS openalbert_progress_ready ON openalbert_progress(id) WHERE data->'delivery'->>'state'='ready';
+DROP INDEX IF EXISTS openalbert_progress_ready;
+CREATE INDEX IF NOT EXISTS openalbert_progress_due ON openalbert_progress((data->>'started_at'),(data->>'turn_id')) WHERE data->'delivery'->>'state'='ready' OR (data->'delivery'->>'state'='suspended' AND COALESCE(data->'conversation'->>'delivery_channel','')<>'desktop');
 CREATE INDEX IF NOT EXISTS openalbert_outgoing_turn ON openalbert_outgoing((data->>'turn_id'),(data->'conversation'->>'id'));
 
 ALTER TABLE openalbert_messages ADD COLUMN IF NOT EXISTS recorded_at timestamptz;
