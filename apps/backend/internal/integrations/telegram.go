@@ -67,10 +67,12 @@ type TelegramError struct {
 	RetryAfter     time.Duration
 	NotModified    bool
 	MessageMissing bool
+	ThreadMissing  bool
 }
 
 func (e *TelegramError) HTTPStatus() int        { return e.Code }
 func (e *TelegramError) IsMessageMissing() bool { return e.MessageMissing }
+func (e *TelegramError) IsThreadMissing() bool  { return e.ThreadMissing }
 
 // TelegramDeliveryError means the send may have reached Telegram, but an acknowledgement
 // was not safely received. Do not automatically retry it: that could duplicate a message.
@@ -251,7 +253,8 @@ func (t *Telegram) response(ctx context.Context, req *http.Request, out any) err
 		description := strings.ToLower(envelope.Description)
 		return &TelegramError{Code: code, Status: resp.StatusCode, Description: t.safeAPIDescription(envelope.Description), Rejected: !*envelope.OK, RetryAfter: time.Duration(envelope.Parameters.RetryAfter) * time.Second,
 			NotModified:    code == 400 && (strings.Contains(description, "message is not modified") || strings.Contains(description, "topic_not_modified")),
-			MessageMissing: code == 400 && (strings.Contains(description, "message to delete not found") || strings.Contains(description, "message to edit not found"))}
+			MessageMissing: code == 400 && (strings.Contains(description, "message to delete not found") || strings.Contains(description, "message to edit not found")),
+			ThreadMissing:  code == 400 && (strings.Contains(description, "message thread not found") || strings.Contains(description, "topic_deleted") || strings.Contains(description, "topic_id_invalid"))}
 	}
 	if out != nil && json.Unmarshal(envelope.Result, out) != nil {
 		return errors.New("invalid Telegram result")

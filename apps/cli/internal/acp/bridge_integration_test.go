@@ -19,6 +19,7 @@ import (
 )
 
 func TestZeroLLMBridgeTickAndSingletonInteractiveCoherence(t *testing.T) {
+	var snoozeCalls atomic.Int32
 	// Fake T3 Code MCP server providing the minimal T3 tools.
 	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -61,6 +62,11 @@ func TestZeroLLMBridgeTickAndSingletonInteractiveCoherence(t *testing.T) {
 				out = map[string]any{"providers": []map[string]any{{"providerInstanceId": "antigravity", "driverKind": "antigravity", "displayName": "Antigravity", "models": []map[string]any{{"id": "gemini-4-neon"}}}}}
 			case "t3_thread_read":
 				out = map[string]any{"thread": map[string]any{"threadId": "th-1", "status": "completed"}}
+			case "t3_thread_organize":
+				if p.Arguments["action"] == "snooze" && p.Arguments["snoozedUntil"] != "" {
+					snoozeCalls.Add(1)
+				}
+				out = map[string]any{"ok": true}
 			default:
 				out = map[string]any{"ok": true}
 			}
@@ -294,6 +300,9 @@ func TestZeroLLMBridgeTickAndSingletonInteractiveCoherence(t *testing.T) {
 	}
 	if joined := strings.Join(updates1(), ""); !strings.Contains(joined, "bridge ok") {
 		t.Fatalf("expected minimal 'bridge ok' ACP chunk, got %q", joined)
+	}
+	if snoozeCalls.Load() < 1 {
+		t.Fatalf("expected bridge tick to auto-snooze thread via t3_thread_organize, got %d snooze calls", snoozeCalls.Load())
 	}
 
 	// Instance 2 starts against the SAME StateDir -> lock already held -> stays interactive-only!

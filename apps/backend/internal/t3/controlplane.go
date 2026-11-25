@@ -347,6 +347,30 @@ func (cp *ControlPlane) Thread(ctx context.Context, threadID string) (domain.T3T
 	return th, nil
 }
 
+// RebindThreadConversation updates a tracked thread's bound conversation_id
+// (e.g. after recreating a deleted Telegram forum topic) without altering status.
+func (cp *ControlPlane) RebindThreadConversation(ctx context.Context, threadID, conversationID string) (domain.T3Thread, error) {
+	id := strings.TrimSpace(threadID)
+	convID := strings.TrimSpace(conversationID)
+	if id == "" || convID == "" {
+		return domain.T3Thread{}, fmt.Errorf("%w: thread_id and conversation_id are required", ErrInvalidInput)
+	}
+	existing, found, err := cp.store.T3Thread(ctx, id)
+	if err != nil {
+		return domain.T3Thread{}, err
+	}
+	if !found {
+		return domain.T3Thread{}, ErrThreadNotFound
+	}
+	return cp.store.UpsertT3Thread(ctx, domain.T3ThreadPatch{
+		ThreadID:               existing.ThreadID,
+		EnvironmentID:          existing.EnvironmentID,
+		ConversationID:         convID,
+		PreserveExistingStatus: true,
+		At:                     cp.now().UTC(),
+	})
+}
+
 // Command returns a single persisted T3 command by ID.
 func (cp *ControlPlane) Command(ctx context.Context, commandID string) (domain.T3Command, bool, error) {
 	id := strings.TrimSpace(commandID)
@@ -1042,6 +1066,13 @@ func (cp *ControlPlane) IngestEvent(ctx context.Context, event domain.T3Event, r
 
 	enriched := enrichEventWithThread(event, thread)
 	suppressWake := cp.notifyThreadEvent(ctx, enriched)
+
+	// Observers (such as T3WorkspaceBridge) may recreate a deleted Telegram topic
+	// and rebind thread.ConversationID before owner wakes are queued.
+	if refreshed, found, refreshErr := cp.store.T3Thread(ctx, event.ThreadID); refreshErr == nil && found {
+		thread = refreshed
+		enriched = enrichEventWithThread(event, thread)
+	}
 
 	if isActionableEvent(enriched.Kind) {
 		if suppressWake {
