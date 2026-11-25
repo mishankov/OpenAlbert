@@ -102,6 +102,16 @@ type Manager struct {
 // (as opposed to an application-level tool error returned via isError=true).
 var ErrMCPTransport = errors.New("mcp transport unavailable")
 
+// RPCError represents a JSON-RPC error returned by a reachable MCP server.
+type RPCError struct {
+	Code    int
+	Message string
+}
+
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("mcp error %d: %s", e.Code, e.Message)
+}
+
 // ToolError represents an application-level error returned by an MCP tool (isError=true).
 type ToolError struct {
 	Tool    string
@@ -431,6 +441,10 @@ func (m *Manager) CallRemote(ctx context.Context, remoteName string, args any) (
 		"name":      bt.RemoteName,
 		"arguments": parsed,
 	}, &res); err != nil {
+		var rpcErr *RPCError
+		if errors.As(err, &rpcErr) && (rpcErr.Code == -32602 || rpcErr.Code == -32601) {
+			return nil, &ToolError{Tool: remoteName, Message: rpcErr.Error()}
+		}
 		return nil, fmt.Errorf("%w: %v", ErrMCPTransport, err)
 	}
 	var texts []string
@@ -598,7 +612,7 @@ func (s *stdioConn) Call(ctx context.Context, method string, params any, out any
 	select {
 	case resp := <-ch:
 		if resp.Error != nil {
-			return fmt.Errorf("mcp error %d: %s", resp.Error.Code, resp.Error.Message)
+			return &RPCError{Code: resp.Error.Code, Message: resp.Error.Message}
 		}
 		if out != nil && len(resp.Result) > 0 {
 			return json.Unmarshal(resp.Result, out)
@@ -750,7 +764,7 @@ func (h *httpConn) Call(ctx context.Context, method string, params any, out any)
 		}
 	}
 	if rpcResp.Error != nil {
-		return fmt.Errorf("mcp error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		return &RPCError{Code: rpcResp.Error.Code, Message: rpcResp.Error.Message}
 	}
 	if out != nil && len(rpcResp.Result) > 0 {
 		return json.Unmarshal(rpcResp.Result, out)

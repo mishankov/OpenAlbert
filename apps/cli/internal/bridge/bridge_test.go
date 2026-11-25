@@ -1251,3 +1251,28 @@ func TestBridgeStateEdgeCases(t *testing.T) {
 		}
 	})
 }
+
+
+func TestNormalizeModelSelectionMapsModelIDAndProviderInstanceID(t *testing.T) {
+	got := normalizeModelSelection(map[string]any{
+		"provider_instance_id": "antigravity",
+		"model_id":             "gemini-4-neon",
+	})
+	if got["instanceId"] != "antigravity" || got["model"] != "gemini-4-neon" {
+		t.Fatalf("unexpected normalized modelSelection: %+v", got)
+	}
+	if _, hasOldModelID := got["model_id"]; hasOldModelID {
+		t.Fatalf("normalized modelSelection must not retain model_id key: %+v", got)
+	}
+	if _, hasOldProvID := got["provider_instance_id"]; hasOldProvID {
+		t.Fatalf("normalized modelSelection must not retain provider_instance_id key: %+v", got)
+	}
+
+	parsed := parseLaunchResponse(
+		json.RawMessage(`{"threadId":"th-1","modelSelection":{"instanceId":"antigravity","model":"gemini-4-neon"}}`),
+		threadLaunchPayload{ModelSelection: map[string]any{"provider_instance_id": "antigravity", "model_id": "gemini-4-neon"}},
+	)
+	if parsed.Model != "gemini-4-neon" || parsed.ProviderInstanceID != "antigravity" {
+		t.Fatalf("unexpected parsed launch response: %+v", parsed)
+	}
+}

@@ -395,3 +395,48 @@ func TestConnectHTTPMCPProtocolVersionNegotiationAndImageResult(t *testing.T) {
 		t.Fatalf("expected image_attached metadata in MCP output, got %s", out)
 	}
 }
+
+
+func TestCallRemoteInvalidParamsReturnsToolErrorNotTransport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case "initialize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"protocolVersion": "2024-11-05"}})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]any{
+					"tools": []map[string]any{{"name": "t3_thread_launch", "inputSchema": map[string]any{"type": "object"}}},
+				},
+			})
+		case "tools/call":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": req.ID,
+				"error": map[string]any{"code": -32602, "message": "Invalid parameters"},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	mgr, warnings := Connect(context.Background(), []ServerConfig{{Name: "t3-code", Type: "http", URL: srv.URL}}, nil)
+	defer mgr.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	_, err := mgr.CallRemote(context.Background(), "t3_thread_launch", map[string]any{})
+	if err == nil {
+		t.Fatal("expected error for JSON-RPC -32602")
+	}
+	if strings.Contains(err.Error(), ErrMCPTransport.Error()) {
+		t.Fatalf("JSON-RPC -32602 must NOT wrap ErrMCPTransport, got: %v", err)
+	}
+	var te *ToolError
+	if !strings.Contains(err.Error(), "-32602") || func() bool { _, ok := err.(*ToolError); te, _ = err.(*ToolError); return !ok }() || te == nil {
+		t.Fatalf("expected *ToolError with -32602, got %T: %v", err, err)
+	}
+}
