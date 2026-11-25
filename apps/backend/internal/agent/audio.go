@@ -102,7 +102,7 @@ func (a *Activities) PrepareAudio(ctx context.Context, in RunInput) (jobs []Audi
 		}()
 		defer func() { close(stop); <-done }()
 	}
-	if err = a.Repo.StartSession(ctx, domain.Session{ID: in.SessionID, ConversationID: in.ConversationID, Status: "active", CreatedAt: time.Now().UTC()}); err != nil {
+	if err = a.Repo.StartSession(ctx, domain.Session{ID: in.SessionID, ConversationID: in.ConversationID, Status: "active", Trigger: "message", CreatedAt: time.Now().UTC()}); err != nil {
 		return
 	}
 	for _, id := range in.IncomingIDs {

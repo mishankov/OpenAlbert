@@ -190,6 +190,8 @@ def main():
     plan = check_pair({"OPENAI_AUTH_MODE":"siwc", "LLM_API_KEY":""})
     assert plan["services"]["openalbert"]["environment"]["OPENAI_AUTH_MODE"] == "siwc"
     assert plan["services"]["openalbert"]["environment"]["LLM_API_KEY"] == ""
+    disabled_consolidation = check_pair({"MEMORY_CONSOLIDATION_INTERVAL": "0"})
+    assert disabled_consolidation["services"]["openalbert"]["environment"]["MEMORY_CONSOLIDATION_INTERVAL"] == "0"
     app = current["services"]["openalbert"]["environment"]
     assert app["LLM_CONFIG_FILE"] == "/etc/openalbert/models.toml"
     assert "LLM_MODEL" not in app and "LLM_BASE_URL" not in app

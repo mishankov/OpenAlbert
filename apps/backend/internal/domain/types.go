@@ -195,6 +195,7 @@ type Session struct {
 	ID             string    `json:"id"`
 	ConversationID string    `json:"conversation_id"`
 	Status         string    `json:"status"`
+	Trigger        string    `json:"trigger,omitempty"`
 	Summary        string    `json:"summary,omitempty"`
 	AnalysisError  string    `json:"analysis_error,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -253,6 +254,7 @@ type Repository interface {
 	LoadCheckpoint(context.Context, string) (json.RawMessage, bool, error)
 	SaveCheckpoint(context.Context, string, json.RawMessage) error
 	ClaimCheckpoint(context.Context, string, json.RawMessage) (bool, error)
+	DeleteCheckpointsByPrefix(context.Context, string) error
 	ClaimTranscription(context.Context, string, string) (SpeechText, bool, bool, error)
 	CompleteTranscription(context.Context, string, string, SpeechText) (bool, error)
 	ReleaseTranscription(context.Context, string, string) error
@@ -297,20 +299,28 @@ type Repository interface {
 	SetProgressDelivery(context.Context, string, int64, ProgressDelivery) (Progress, bool, error)
 	SaveArtifact(context.Context, Artifact) error
 	Artifact(context.Context, string, string) (Artifact, bool, error)
+	SaveMemoryConsolidation(context.Context, MemoryConsolidationReport) (MemoryConsolidationReport, error)
+	ListMemoryConsolidations(context.Context, string, int) ([]MemoryConsolidationReport, error)
+}
+
+type MemoryProvenance struct {
+	SourceMessageID string `json:"source_message_id,omitempty"`
+	Evidence        string `json:"evidence,omitempty"`
 }
 
 type MemoryEntry struct {
-	SubjectUserID   int64     `json:"subject_user_id,omitempty"`
-	SourceMessageID string    `json:"source_message_id,omitempty"`
-	Evidence        string    `json:"evidence,omitempty"`
-	OriginSource    string    `json:"origin_source,omitempty"`
-	CreatedAt       time.Time `json:"created_at,omitzero"`
-	ID              string    `json:"id"`
-	Scope           string    `json:"scope"`
-	Content         string    `json:"content"`
-	Source          string    `json:"source"`
-	Kind            string    `json:"kind"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	SubjectUserID   int64              `json:"subject_user_id,omitempty"`
+	SourceMessageID string             `json:"source_message_id,omitempty"`
+	Evidence        string             `json:"evidence,omitempty"`
+	Provenance      []MemoryProvenance `json:"provenance,omitempty"`
+	OriginSource    string             `json:"origin_source,omitempty"`
+	CreatedAt       time.Time          `json:"created_at,omitzero"`
+	ID              string             `json:"id"`
+	Scope           string             `json:"scope"`
+	Content         string             `json:"content"`
+	Source          string             `json:"source"`
+	Kind            string             `json:"kind"`
+	UpdatedAt       time.Time          `json:"updated_at"`
 }
 type Participant struct {
 	Scope       string    `json:"scope"`
@@ -338,9 +348,12 @@ type Knowledge interface {
 	Soul(context.Context) (string, error)
 	UpdateSoul(context.Context, string, string) error
 	Search(context.Context, string, string) ([]MemoryEntry, error)
+	ListMemory(context.Context, string) ([]MemoryEntry, error)
 	Read(context.Context, string, string) (MemoryEntry, error)
 	Update(context.Context, MemoryEntry) error
 	Delete(context.Context, string, string) error
+	ApplyMemoryMutation(context.Context, MemoryMutation) (bool, string, error)
+	PruneArchive(context.Context, string, time.Time) error
 	Skills(context.Context) ([]Skill, error)
 	ReadSkill(context.Context, string) (Skill, error)
 	ProposeSkill(context.Context, string, string, string) error

@@ -101,3 +101,12 @@ INSERT INTO openalbert_public_timeline(kind,source_id,conversation_id)
 -- Status polling reads only this conversation's pending inbox/public progress.
 CREATE INDEX IF NOT EXISTS openalbert_incoming_scope_pending ON openalbert_incoming((data->'conversation'->>'id')) WHERE NOT handled;
 CREATE INDEX IF NOT EXISTS openalbert_progress_scope_active ON openalbert_progress((data->'conversation'->>'id')) WHERE data->>'status'='active';
+
+CREATE TABLE IF NOT EXISTS openalbert_memory_consolidations (
+    seq bigserial UNIQUE,
+    id text PRIMARY KEY,
+    scope text NOT NULL,
+    started_at timestamptz NOT NULL,
+    data jsonb NOT NULL
+);
+CREATE INDEX IF NOT EXISTS openalbert_memory_consolidations_scope ON openalbert_memory_consolidations(scope, seq DESC);

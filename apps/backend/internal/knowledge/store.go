@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -505,7 +506,17 @@ func (s *Store) rebuildProfile(scope string) error {
 	if err != nil {
 		return err
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
+	sort.Slice(entries, func(i, j int) bool {
+		iProfile := entries[i].Kind == "profile"
+		jProfile := entries[j].Kind == "profile"
+		if iProfile != jProfile {
+			return iProfile
+		}
+		if !entries[i].UpdatedAt.Equal(entries[j].UpdatedAt) {
+			return entries[i].UpdatedAt.After(entries[j].UpdatedAt)
+		}
+		return entries[i].ID < entries[j].ID
+	})
 	var b strings.Builder
 	b.WriteString("# User profile\n\n")
 	for _, e := range entries {
@@ -514,6 +525,284 @@ func (s *Store) rebuildProfile(scope string) error {
 		}
 	}
 	return s.write(filepath.Join(scopeDir(scope), "USER.md"), []byte(b.String()))
+}
+
+func memoryEntryEqual(a, b domain.MemoryEntry) bool {
+	return a.ID == b.ID &&
+		a.Scope == b.Scope &&
+		a.UpdatedAt.Equal(b.UpdatedAt) &&
+		a.CreatedAt.Equal(b.CreatedAt) &&
+		a.Content == b.Content &&
+		a.Kind == b.Kind &&
+		a.Source == b.Source &&
+		a.OriginSource == b.OriginSource &&
+		a.SubjectUserID == b.SubjectUserID &&
+		a.SourceMessageID == b.SourceMessageID &&
+		a.Evidence == b.Evidence &&
+		slices.Equal(a.Provenance, b.Provenance)
+}
+
+func archivePath(scope, runID string, exp domain.MemoryEntry, now time.Time) string {
+	version := hash(exp.UpdatedAt.UTC().Format(time.RFC3339Nano) + "\x00" + exp.Kind + "\x00" + exp.Source + "\x00" + exp.Content)
+	return filepath.Join(scopeDir(scope), "archive", now.UTC().Format("2006-01-02"), hash(runID), hash(exp.ID)+"-"+version[:16]+".md")
+}
+
+// ApplyMemoryMutation atomically verifies every expected snapshot, archives the
+// verified bytes, and applies the update/deletes under a single store lock so
+// concurrent live writes cannot be overwritten or resurrected. It also reconciles
+// an interrupted retry of the same RunID where the survivor was already updated
+// or a subset of entries was already archived and deleted.
+func (s *Store) ApplyMemoryMutation(ctx context.Context, mut domain.MemoryMutation) (bool, string, error) {
+	if err := ctx.Err(); err != nil {
+		return false, "", err
+	}
+	if err := nonempty(mut.Scope); err != nil {
+		return false, "", err
+	}
+	if err := nonempty(mut.RunID); err != nil {
+		return false, "", err
+	}
+	if len(mut.Expected) == 0 {
+		return false, "missing_ids", nil
+	}
+	now := mut.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	expectedByID := make(map[string]domain.MemoryEntry, len(mut.Expected))
+	rawByID := make(map[string][]byte, len(mut.Expected))
+	liveByID := make(map[string]domain.MemoryEntry, len(mut.Expected))
+	missingByID := make(map[string]bool)
+	for _, exp := range mut.Expected {
+		if err := nonempty(exp.ID); err != nil {
+			return false, "", err
+		}
+		if exp.Scope != mut.Scope {
+			return false, "unknown_id", nil
+		}
+		expectedByID[exp.ID] = exp
+		raw, err := s.read(memoryPath(mut.Scope, exp.ID))
+		if errors.Is(err, fs.ErrNotExist) {
+			missingByID[exp.ID] = true
+			continue
+		}
+		if err != nil {
+			return false, "", err
+		}
+		parsed, err := parseMemory(raw)
+		if err != nil {
+			return false, "", err
+		}
+		if parsed.Scope != mut.Scope || parsed.ID != exp.ID {
+			return false, "", errors.New("memory scope or ID mismatch")
+		}
+		rawByID[exp.ID] = raw
+		liveByID[exp.ID] = parsed
+	}
+
+	archivedForRun := func(exp domain.MemoryEntry) bool {
+		path, err := s.safePath(archivePath(mut.Scope, mut.RunID, exp, now))
+		if err != nil {
+			return false
+		}
+		_, err = os.Stat(path)
+		return err == nil
+	}
+
+	var subjectID int64
+	if mut.Update != nil {
+		u := *mut.Update
+		if err := nonempty(u.ID); err != nil {
+			return false, "", err
+		}
+		if u.Scope != mut.Scope {
+			return false, "", errors.New("memory scope mismatch")
+		}
+		if strings.TrimSpace(u.Content) == "" {
+			return false, "", errors.New("memory content is required")
+		}
+		if u.SubjectUserID < 0 {
+			return false, "", errors.New("invalid participant user_id")
+		}
+		if u.SubjectUserID > 0 {
+			if _, err := s.participant(mut.Scope, u.SubjectUserID); err != nil {
+				return false, "", err
+			}
+		}
+		subjectID = u.SubjectUserID
+
+		// Reconcile an interrupted retry where this exact update already landed
+		// on disk before the absorbed entries finished deleting. Validate every
+		// remaining absorbed entry first so a concurrent live edit aborts the
+		// retry without deleting other entries or reporting the merge applied.
+		if current, ok := liveByID[u.ID]; ok && memoryEntryEqual(current, u) {
+			for _, delID := range mut.DeleteIDs {
+				if missingByID[delID] {
+					continue
+				}
+				exp, ok := expectedByID[delID]
+				if !ok || !memoryEntryEqual(liveByID[delID], exp) {
+					return false, "concurrent_modification", nil
+				}
+			}
+			for _, delID := range mut.DeleteIDs {
+				if missingByID[delID] {
+					continue
+				}
+				exp := expectedByID[delID]
+				if !archivedForRun(exp) {
+					if err := s.write(archivePath(mut.Scope, mut.RunID, exp, now), rawByID[delID]); err != nil {
+						return false, "", err
+					}
+				}
+				path, err := s.safePath(memoryPath(mut.Scope, delID))
+				if err != nil {
+					return false, "", err
+				}
+				if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return false, "", err
+				}
+			}
+			if subjectID > 0 {
+				return true, "", s.rebuildParticipant(mut.Scope, subjectID)
+			}
+			return true, "", s.rebuildProfile(mut.Scope)
+		}
+
+		// Normal path: every expected entry must still exist and match its snapshot.
+		for _, exp := range mut.Expected {
+			if missingByID[exp.ID] {
+				return false, "missing", nil
+			}
+			if !memoryEntryEqual(liveByID[exp.ID], exp) {
+				return false, "concurrent_modification", nil
+			}
+		}
+		if old, ok := liveByID[u.ID]; ok && old.SubjectUserID != u.SubjectUserID {
+			return false, "", errors.New("memory cannot change its participant")
+		}
+		for _, exp := range mut.Expected {
+			if err := s.write(archivePath(mut.Scope, mut.RunID, exp, now), rawByID[exp.ID]); err != nil {
+				return false, "", err
+			}
+		}
+		b, err := marshalMemory(u)
+		if err != nil {
+			return false, "", err
+		}
+		if err := s.write(memoryPath(mut.Scope, u.ID), b); err != nil {
+			return false, "", err
+		}
+		for _, delID := range mut.DeleteIDs {
+			path, err := s.safePath(memoryPath(mut.Scope, delID))
+			if err != nil {
+				return false, "", err
+			}
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return false, "", err
+			}
+		}
+		if subjectID > 0 {
+			return true, "", s.rebuildParticipant(mut.Scope, subjectID)
+		}
+		return true, "", s.rebuildProfile(mut.Scope)
+	}
+
+	// Pure delete path: allow already-archived missing entries on retry, while
+	// rejecting concurrent modifications or deletions by another writer.
+	subjects := map[int64]bool{}
+	for _, exp := range mut.Expected {
+		subjects[exp.SubjectUserID] = true
+		if missingByID[exp.ID] {
+			if !archivedForRun(exp) {
+				return false, "missing", nil
+			}
+			continue
+		}
+		if !memoryEntryEqual(liveByID[exp.ID], exp) {
+			return false, "concurrent_modification", nil
+		}
+	}
+	for _, exp := range mut.Expected {
+		if missingByID[exp.ID] {
+			continue
+		}
+		if err := s.write(archivePath(mut.Scope, mut.RunID, exp, now), rawByID[exp.ID]); err != nil {
+			return false, "", err
+		}
+	}
+	for _, delID := range mut.DeleteIDs {
+		if missingByID[delID] {
+			continue
+		}
+		path, err := s.safePath(memoryPath(mut.Scope, delID))
+		if err != nil {
+			return false, "", err
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return false, "", err
+		}
+	}
+	for uid := range subjects {
+		if uid > 0 {
+			if err := s.rebuildParticipant(mut.Scope, uid); err != nil {
+				return false, "", err
+			}
+		} else {
+			if err := s.rebuildProfile(mut.Scope); err != nil {
+				return false, "", err
+			}
+		}
+	}
+	return true, "", nil
+}
+
+// PruneArchive removes dated archive directories strictly older than cutoff's UTC date.
+func (s *Store) PruneArchive(ctx context.Context, scope string, cutoff time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := nonempty(scope); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rel := filepath.Join(scopeDir(scope), "archive")
+	dir, err := s.safePath(rel)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	cutoffDate := time.Date(cutoff.UTC().Year(), cutoff.UTC().Month(), cutoff.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		day, err := time.Parse("2006-01-02", entry.Name())
+		if err != nil {
+			continue
+		}
+		if day.Before(cutoffDate) {
+			target, err := s.safePath(filepath.Join(rel, entry.Name()))
+			if err != nil {
+				return err
+			}
+			if err := os.RemoveAll(target); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 func (s *Store) Delete(ctx context.Context, scope, id string) error {
 	if err := ctx.Err(); err != nil {

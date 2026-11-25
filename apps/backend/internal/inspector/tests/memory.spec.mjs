@@ -13,6 +13,7 @@ async function fixture(page, { empty = false } = {}) {
     requests.push(u);
     if (u.pathname.endsWith("/soul")) return route.fulfill({ json: { soul: "# OpenAlbert\n\nТы — OpenAlbert. Отвечай по-русски. <script>window.SOUL_XSS=true</script>" } });
     if (u.pathname.endsWith("/group")) return route.fulfill({ json: { group_id: u.searchParams.get("conversation_id") === "group:empty" ? -9 : -8, group: u.searchParams.get("conversation_id") === "group:empty" ? "" : "# Правила группы\nОтвечай по обращению. <script>window.GROUP_XSS=true</script>" } });
+    if (u.pathname.endsWith("/consolidations")) return route.fulfill({ json: { consolidations: [] } });
     if (u.pathname.endsWith("/sessions")) return route.fulfill({ json: { sessions: [], next_before: 0 } });
     if (u.pathname.endsWith("/conversations")) return route.fulfill({ json: { conversations: empty ? [] : [{ id: "personal:7", private: true, chat_id: 7, title: "Личный разговор" }, { id: "group:8", chat_id: -8, title: "Команда OpenAlbert" }, { id: "group:8:topic:9", chat_id: -8, thread_id: 9, title: "Топик команды" }, { id: "group:empty", chat_id: -9, title: "Пустой разговор" }] } });
     if (u.pathname.includes("/sessions/")) return route.fulfill({ status: 404, json: {} });
@@ -799,4 +800,57 @@ test("аналитика памяти: закладка другого разг�
   await page.locator("#memory-scope").selectOption("group:empty");
   await expect(page.locator("#memory-analytics")).toContainText("В этом разговоре пока нет записей памяти");
   await expect(page.locator("#memory-tab-entries-count")).toHaveText("");
+});
+
+test("история консолидации: отчёт, операции, клавиатура и защита от XSS", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await fixture(page);
+  await expect(page.locator("#memory-consolidations")).toBeHidden();
+  await page.route("**/api/inspect/memory/consolidations?*", (route) => {
+    const scope = new URL(route.request().url()).searchParams.get("conversation_id");
+    if (scope !== "personal:7") return route.fulfill({ json: { consolidations: [] } });
+    return route.fulfill({
+      json: {
+        consolidations: [{
+          id: "run-1",
+          scope: "personal:7",
+          trigger: "threshold",
+          started_at: "2026-11-25T10:00:00Z",
+          completed_at: "2026-11-25T10:01:00Z",
+          status: "completed",
+          before_count: 25,
+          after_count: 14,
+          profile_chars_before: 6500,
+          profile_chars_after: 3100,
+          profile_chars_delta: -3400,
+          operations: [
+            { phase: "profile", op: "merge", ids: ["a", "b"], result_id: "a", status: "applied", reason: "дубликат <script>window.CONSOL_XSS=true</script>" },
+          ],
+        }],
+      },
+    });
+  });
+  await page.keyboard.press("Alt+r");
+  const section = page.locator("#memory-consolidations");
+  await expect(section).toBeVisible();
+  const summary = section.locator("summary");
+  await expect(summary).toHaveAttribute("aria-keyshortcuts", "Enter Space");
+  await summary.focus();
+  await page.keyboard.press("Enter");
+  await expect(section).toHaveAttribute("open", "");
+  await expect(section).toContainText("Записей: 25 → 14");
+  await expect(section).toContainText("-3400");
+  await expect(section).toContainText("profile/merge");
+  await expect(section).toContainText("<script>window.CONSOL_XSS=true</script>");
+  expect(await page.evaluate(() => window.CONSOL_XSS)).toBeUndefined();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await summary.focus();
+  await page.keyboard.press("Space");
+  await expect(section).not.toHaveAttribute("open", "");
+  await page.locator("#memory-scope").selectOption("group:8");
+  await expect(section).toBeHidden();
+  expect(errors).toEqual([]);
 });

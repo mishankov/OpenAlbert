@@ -73,8 +73,10 @@ func CompactContext(messages []domain.Message, turnID string) []domain.Message {
 }
 
 type analysisContext struct {
-	Existing   []domain.MemoryEntry `json:"existing_memories"`
-	Transcript []domain.Message     `json:"transcript"`
+	SessionTrigger        string               `json:"session_trigger"`
+	ProfileAndPreferences []domain.MemoryEntry `json:"profile_and_preferences,omitempty"`
+	Existing              []domain.MemoryEntry `json:"existing_memories"`
+	Transcript            []domain.Message     `json:"transcript"`
 }
 
 func (a *Activities) fitAnalysisContext(ctx context.Context, instructions string, payload analysisContext) ([]domain.Message, analysisContext, error) {
@@ -120,7 +122,8 @@ func (a *Activities) fitAnalysisContext(ctx context.Context, instructions string
 			return messages, payload, nil
 		}
 		// Retain a suffix of complete transcript records; never clip through JSON
-		// or discard the newest entry. Deletion checks use the original transcript.
+		// or discard the newest entry. Never drop profile/preference rules: fail
+		// with ErrAnalysisContextLimit if the minimum transcript cannot fit with them.
 		if len(payload.Transcript) > 1 {
 			start++
 			payload.Transcript = transcript[start:]
