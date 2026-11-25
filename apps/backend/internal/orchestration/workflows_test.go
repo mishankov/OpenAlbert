@@ -69,8 +69,8 @@ func (m *scriptedModel) count() int { m.mu.Lock(); defer m.mu.Unlock(); return m
 
 type fakeSearch struct{}
 
-func (fakeSearch) Search(context.Context, string) ([]domain.SearchResult, error) {
-	return []domain.SearchResult{{Title: "Release", URL: "https://example.com", Snippet: "new release"}}, nil
+func (fakeSearch) Search(context.Context, domain.SearchQuery) (domain.SearchResponse, error) {
+	return domain.SearchResponse{Provider: "yandex", Results: []domain.SearchResult{{Title: "Release", URL: "https://example.com", Snippet: "new release"}}}, nil
 }
 func (fakeSearch) Read(context.Context, string) (string, error) { return "Official release page", nil }
 

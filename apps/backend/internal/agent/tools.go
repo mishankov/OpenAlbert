@@ -54,7 +54,7 @@ func Definitions() []domain.Tool {
 		{Name: "group_read", Description: "Read the current GROUP.md for a known allowed Telegram group selected by conversation_id from conversation_list. One file is shared by ALL topics of that group. Missing or empty file means no extra group rules. Only in the installation owner's interactive private chat. Read before editing to preserve existing rules. Its contents should be suitable for group participants to see; does not read USER.md or private memories.", Parameters: schema(`"conversation_id":{"type":"string"}`, "conversation_id")},
 		{Name: "group_update", Description: "Edit GROUP.md when the owner asks to change a group's behavior from their interactive private chat. Select conversation_id with conversation_list; ask if the group is ambiguous. The file applies to the WHOLE group including all topics. Read with group_read first. Replace one exact old_text fragment with new_text, preserving unrelated rules; old_text must match once. For an empty or missing file use old_text=\"\" to create it. To clear rules replace the entire current text with new_text=\"\". Maximum 4000 characters. Store only the requested group-facing instructions, never copy the owner's private profile, history or reasons. Use this instead of merely saving a private preference. Confirm only after success, identifying the group; changes apply to the next prepared turn, including existing sessions. Behavior depends on model compliance; no mechanical mention filter. Never use for group participants, other private users or background runs.", Parameters: schema(`"conversation_id":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}`, "conversation_id", "old_text", "new_text")},
 		{Name: "report_progress", Description: "Record progress for the current interactive request, without finishing the turn. Only private Telegram chats show a temporary status message; groups and group topics keep progress internal. Use during lengthy work at meaningful stage changes: briefly state what you have actually done, what you are doing next, or a concrete obstacle. Plain text, at most 600 characters, in the user's language. Do not invent findings, percentages, completion estimates or activity; do not include internal reasoning. The application delays the first status by 30 seconds, coalesces updates and edits at most once a minute; it may suppress quick requests. This is not a reply or delivery confirmation. Continue working and use the appropriate available delivery tool for the final answer, including send_widget for a requested widget. Never use reply tools for intermediate progress.", Parameters: schema(`"text":{"type":"string"}`, "text")},
-		{Name: "web_search", Description: "Search the public web with Yandex; returns sources. Read sources before asserting facts.", Parameters: schema(`"query":{"type":"string"}`, "query")},
+		{Name: "web_search", Description: "Search the public web; returns an array [{\"title\",\"url\",\"snippet\"}]. Never include private user data or secrets in queries. Read sources before asserting facts.", Parameters: schema(`"query":{"type":"string"}`, "query")},
 		{Name: "web_read", Description: "Fetch plain text from a known public HTTP(S) URL. Use for static articles, documentation or plain-text files when only their text is needed. Does not run JavaScript or share browser cookies. HTML extraction discards link destinations and flattens headings, lists and tables; long results may be truncated. For search results, catalogs, following links, structured tables or JavaScript content, use the listed browser tools. An HTTP success may contain a CAPTCHA or an empty page; check that the requested content is actually present. Private network addresses are forbidden.", Parameters: schema(`"url":{"type":"string"}`, "url")},
 		{Name: "send_message", Description: sendMessageDescription, Parameters: schema(`"text":{"type":"string","description":"Default user-facing reply in Markdown: headings, emphasis, links, lists and code. Use an empty string for an artifact without a caption. For native tables, formulas or collapsible sections use send_rich_message."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
 		{Name: "send_rich_message", Description: sendRichMessageDescription, Parameters: schema(`"text":{"type":"string","description":"User-facing Rich Markdown: native tables, formulas, collapsible details and other rich blocks. Use an empty string for an artifact without a caption."},"artifact_id":{"type":"string","description":"Optional ID of a saved artifact in this conversation to attach."}`, "text")},
@@ -176,6 +176,22 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 	if in.Call.Name == "logs_search" {
 		return a.searchLogs(ctx, in)
 	}
+	if in.Call.Name == "web_search" {
+		if !a.searchEnabled() {
+			return nil, errors.New("web_search API tool is disabled; use listed browser tools to find sources or web_read for a known public URL")
+		}
+		if len(in.Call.Arguments) > 100000 {
+			return nil, errors.New("tool arguments too large")
+		}
+		var q domain.SearchQuery
+		if err := json.Unmarshal(in.Call.Arguments, &q); err != nil {
+			return nil, errors.New("invalid tool JSON")
+		}
+		if strings.TrimSpace(q.Query) == "" {
+			return nil, errors.New("query required")
+		}
+		return a.Search.Search(ctx, q)
+	}
 	if strings.HasPrefix(in.Call.Name, "browser_") {
 		return a.executeBrowser(ctx, in)
 	}
@@ -203,14 +219,6 @@ func (a *Activities) execute(ctx context.Context, in ToolInput) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"state": "updated", "group_id": target.ChatID, "conversation_id": target.ID, "scope": "whole_group", "applies": "next_turn"}, nil
-	case "web_search":
-		if !a.searchEnabled() {
-			return nil, errors.New("web_search API tool is disabled; use listed browser tools to find sources or web_read for a known public URL")
-		}
-		if strings.TrimSpace(p.Query) == "" {
-			return nil, errors.New("query required")
-		}
-		return a.Search.Search(ctx, p.Query)
 	case "web_read":
 		return a.Search.Read(ctx, p.URL)
 	case "send_message", "send_rich_message":
@@ -573,6 +581,43 @@ func (a *Activities) searchEnabled() bool {
 	}
 	return true
 }
+
+func (a *Activities) searchProvider() string {
+	if !a.searchEnabled() {
+		return ""
+	}
+	if provider, ok := a.Search.(interface{ SearchProvider() string }); ok {
+		return provider.SearchProvider()
+	}
+	return "custom"
+}
+
+func (a *Activities) webSearchDefinition() domain.Tool {
+	if a.searchProvider() == "exa" {
+		fallback := "web_read for known public URLs"
+		if a.Browser != nil {
+			fallback = "listed browser tools or web_read"
+		}
+		return domain.Tool{
+			Name: "web_search",
+			Description: "Search the public web with Exa; returns an array [{\"title\",\"url\",\"published_date\",\"highlights\"}]. " +
+				"Use first for documentation, GitHub, technical research, pricing, news and general web discovery; follow up with web_read or browser tools when full page content is needed. " +
+				"Keep searches focused (typically 1-3 queries). Default mode is auto (balanced quality with livecrawl); use mode=lite for fast cache-only lookups. num_results defaults to 5 (max 10). " +
+				"PRIVACY: Never include private user data, personal names/identifiers, secrets, tokens or private conversation details in search queries (third-party search has no Zero Data Retention on this plan). " +
+				"For local Russian marketplaces/classifieds/job boards (e.g. market.yandex.ru, avito.ru, hh.ru), interactive catalogs, tables or JS-heavy sites, prefer browser tools or web_read. " +
+				"If web_search returns http_402 (credits exhausted), stop calling web_search in this turn and fall back to " + fallback + ".",
+			Parameters: schema(
+				`"query":{"type":"string","description":"Natural-language or keyword search query (1-1000 chars). Never include private user data or secrets."},"mode":{"type":"string","enum":["auto","lite"],"description":"Search mode: auto (default, balanced + livecrawl) or lite (faster, lower-cost cache-only)."},"num_results":{"type":"integer","minimum":1,"maximum":10,"description":"Number of results to return (default 5, max 10)."},"include_domains":{"type":"array","items":{"type":"string"},"maxItems":10,"description":"Optional allowlist of domains or host/path prefixes (max 10)."},"exclude_domains":{"type":"array","items":{"type":"string"},"maxItems":10,"description":"Optional denylist of domains (max 10)."},"start_published_date":{"type":"string","description":"Optional lower publication date bound (YYYY-MM-DD or RFC3339)."},"end_published_date":{"type":"string","description":"Optional upper publication date bound (YYYY-MM-DD or RFC3339)."}`,
+				"query",
+			),
+		}
+	}
+	return domain.Tool{
+		Name:        "web_search",
+		Description: "Search the public web with Yandex; returns an array [{\"title\",\"url\",\"snippet\"}]. Never include private user data or secrets in queries. Read sources before asserting facts.",
+		Parameters:  schema(`"query":{"type":"string"}`, "query"),
+	}
+}
 func visibleMessageText(text string) bool {
 	for _, r := range text {
 		if unicode.IsGraphic(r) && !unicode.IsSpace(r) && !unicode.IsMark(r) {
@@ -617,9 +662,14 @@ func (a *Activities) toolDefinitions() []domain.Tool {
 		if (tool.Name == "send_widget" || tool.Name == "edit_widget_data") && a.Widgets == nil {
 			continue
 		}
-		if tool.Name != "web_search" || a.searchEnabled() {
-			available = append(available, tool)
+		if tool.Name == "web_search" {
+			if !a.searchEnabled() {
+				continue
+			}
+			available = append(available, a.webSearchDefinition())
+			continue
 		}
+		available = append(available, tool)
 	}
 	return available
 }

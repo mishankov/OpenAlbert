@@ -262,6 +262,21 @@ def handler_for(state):
                     state.searches += 1
                 xml = '<yandexsearch><response><results><grouping><group><doc><url>https://example.com</url><title>Local result</title><passages><passage>Smoke result</passage></passages></doc></group></grouping></results></response></yandexsearch>'
                 self.json({"rawData": base64.b64encode(xml.encode()).decode()})
+            elif self.path == "/exa/search":
+                assert self.headers.get("x-api-key") == "smoke-exa-key", "missing Exa API key header"
+                assert body.get("type") in ("auto", "lite"), f"unexpected Exa search type: {body.get('type')!r}"
+                assert 1 <= int(body.get("numResults", 0)) <= 10, f"unexpected Exa numResults: {body.get('numResults')!r}"
+                contents = body.get("contents") or {}
+                assert "summary" not in contents and "text" not in contents, f"costly Exa contents enabled: {contents!r}"
+                assert "highlights" in contents, "Exa highlights missing"
+                with state.lock:
+                    state.searches += 1
+                self.json({
+                    "requestId": "smoke_exa_req_1",
+                    "resolvedSearchType": body.get("type", "auto"),
+                    "results": [{"url": "https://example.com", "title": "Local Exa result", "highlights": ["Smoke Exa result"]}],
+                    "costDollars": {"total": 0.007},
+                })
             else:
                 self.send_error(404)
     return Handler
@@ -272,7 +287,9 @@ def main():
     parser.add_argument("--port", type=int, default=18089)
     parser.add_argument("--host-address", default="host.docker.internal",
                         help="Host name reachable from containers; Docker Desktop default")
-    parser.add_argument("--without-search", action="store_true", help="Prove startup without any Yandex credentials")
+    parser.add_argument("--without-search", action="store_true", help="Prove startup without any search provider credentials")
+    parser.add_argument("--search-provider", choices=("exa", "yandex"), default="exa",
+                        help="Synthetic search provider to exercise when search is enabled")
     parser.add_argument("--with-browser", action="store_true", help="Exercise real Chromium on public example.com and screenshot persistence")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="openalbert-smoke-settings-") as directory:
@@ -313,15 +330,21 @@ def smoke(args, settings_directory):
     volume = "openalbert_" + db
     bucket = marker
     # Every external key/endpoint is replaced. No dotenv secret is read by fake APIs.
+    search_provider = getattr(args, "search_provider", "exa")
     env.update(TELEGRAM_BOT_TOKEN="smoke-token", TELEGRAM_ALLOWED_USER_IDS="42", TELEGRAM_OWNER_USER_ID="42",
                TELEGRAM_ALLOWED_GROUP_IDS="", LLM_API_KEY="smoke-key",
-               YANDEX_API_KEY="smoke-key", YANDEX_FOLDER_ID="smoke-folder",
+               WEB_SEARCH_PROVIDER="", EXA_API_KEY="", EXA_SEARCH_URL="",
+               YANDEX_API_KEY="", YANDEX_FOLDER_ID="", YANDEX_SEARCH_URL="",
                SESSION_IDLE_TIMEOUT="2s", INITIATIVE_INTERVAL="0", MEMORY_CONSOLIDATION_INTERVAL="0", TASK_MIN_INTERVAL="1s",
                MAX_AGENT_STEPS="12", TELEGRAM_BASE_URL=f"http://{args.host_address}:{args.port}",
-               YANDEX_SEARCH_URL=f"http://{args.host_address}:{args.port}/search",
                TEMPORAL_TASK_QUEUE=marker)
-    if args.without_search:
-        env.update(YANDEX_API_KEY="", YANDEX_FOLDER_ID="", YANDEX_SEARCH_URL="")
+    if not args.without_search:
+        if search_provider == "yandex":
+            env.update(YANDEX_API_KEY="smoke-key", YANDEX_FOLDER_ID="smoke-folder",
+                       YANDEX_SEARCH_URL=f"http://{args.host_address}:{args.port}/search")
+        else:
+            env.update(EXA_API_KEY="smoke-exa-key",
+                       EXA_SEARCH_URL=f"http://{args.host_address}:{args.port}/exa/search")
     state = FakeState(marker, args.without_search, args.with_browser)
     server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), handler_for(state))
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -359,7 +382,7 @@ def smoke(args, settings_directory):
             assert sql("SELECT count(*) FROM openalbert_artifacts WHERE octet_length(content)=0") == str(2 if args.with_browser else 1), "artifact body should live in S3"
             assert len(state.sent) == 2 and all(str(message["chat_id"]) == "42" for message in state.sent), "unexpected deliveries"
             assert {"rich" if "rich_message" in message else "ordinary" for message in state.sent} == {"ordinary", "rich"}, "both reply formats must reach Telegram"
-            assert state.searches == (0 if args.without_search else 1), "Yandex adapter was not called exactly once"
+            assert state.searches == (0 if args.without_search else 1), "search adapter was not called exactly once"
             assert state.analyses > 0, "post-session analysis did not run"
             knowledge = run(cmd + ["exec", "-T", "openalbert", "sh", "-c", "find /data/knowledge -type f -exec cat {} \\;"], env)
             assert marker + " preference" in knowledge, "automatic memory not saved"

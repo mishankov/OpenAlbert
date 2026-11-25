@@ -14,6 +14,11 @@ import (
 	"openalbert/apps/backend/internal/telemetry"
 )
 
+type toolTraceOutput struct {
+	output string
+	search *domain.SearchTrace
+}
+
 // Inspection must not change whether a side effect succeeds. Failed trace writes
 // are operational warnings; the durable tool checkpoints remain authoritative.
 func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any, event *telemetry.Event) func(output any, err error, name string) {
@@ -34,7 +39,11 @@ func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any,
 	}
 	tr.StartedAt = time.Now().UTC()
 	tr.Status = "running"
-	tr.Input, _ = json.Marshal(input)
+	if tr.Kind == "tool" && tr.Name == "web_search" {
+		tr.Input, _ = json.Marshal(domain.SanitizeWebSearchTraceInput(input, a.searchProvider()))
+	} else {
+		tr.Input, _ = json.Marshal(input)
+	}
 	save := func() {
 		c, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
@@ -44,6 +53,10 @@ func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any,
 	}
 	save()
 	return func(output any, err error, name string) {
+		if wrapped, ok := output.(toolTraceOutput); ok {
+			tr.Search = wrapped.search
+			output = wrapped.output
+		}
 		if name != "" {
 			tr.Name = name
 		}
@@ -64,7 +77,15 @@ func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any,
 		now := time.Now().UTC()
 		tr.EndedAt = &now
 		tr.Status = "completed"
-		tr.Output, _ = json.Marshal(output)
+		toolFailed := false
+		if value, ok := output.(string); ok && tr.Kind == "tool" && ToolFailed(value) {
+			toolFailed = true
+		}
+		if tr.Kind == "tool" && tr.Name == "web_search" {
+			tr.Output, _ = json.Marshal(sanitizeWebSearchTraceOutput(output, tr.Search, err != nil || toolFailed))
+		} else {
+			tr.Output, _ = json.Marshal(sanitizeTraceOutput(output))
+		}
 		if err != nil {
 			tr.Status = "failed"
 			if temporal.IsCanceledError(err) || ctx.Err() != nil {
@@ -72,7 +93,7 @@ func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any,
 			}
 			tr.Error = err.Error()
 		}
-		if value, ok := output.(string); ok && tr.Kind == "tool" && ToolFailed(value) {
+		if toolFailed {
 			tr.Status = "failed"
 			tr.Error = "Tool returned an error; see output"
 		}
@@ -81,26 +102,75 @@ func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any,
 }
 
 func traceMessages(messages []domain.Message) []domain.Message {
-	// Keep exact text and tool calls, but avoid duplicating binary image data in
-	// every model snapshot. The original artifact remains available in storage.
-	out := append([]domain.Message(nil), messages...)
-	for i := range out {
-		if len(out[i].Images) > 0 {
-			out[i].Images = make([]string, len(messages[i].Images))
-			for j := range out[i].Images {
-				out[i].Images[j] = "[image supplied to model; binary omitted from inspection snapshot]"
-			}
+	return domain.SanitizeTraceMessages(messages)
+}
+
+// SanitizeTraceMessages prepares a safe inspection copy of model messages.
+func SanitizeTraceMessages(messages []domain.Message) []domain.Message {
+	return domain.SanitizeTraceMessages(messages)
+}
+
+// SanitizeTraceCompletion prepares a safe inspection copy of a model completion.
+func SanitizeTraceCompletion(comp domain.Completion) domain.Completion {
+	return domain.SanitizeTraceCompletion(comp)
+}
+
+func sanitizeTraceOutput(output any) any {
+	switch v := output.(type) {
+	case ModelOutput:
+		if len(v.Message.ToolCalls) == 0 && len(v.Message.ResponsesItems) == 0 {
+			return v
+		}
+		out := v
+		out.Message = domain.SanitizeTraceMessageToolCalls(v.Message)
+		return out
+	case domain.Completion:
+		return domain.SanitizeTraceCompletion(v)
+	default:
+		return output
+	}
+}
+
+func sanitizeAnalysisTraceMessages(messages []domain.Message, extraRedactedIDs map[string]bool) []domain.Message {
+	out := domain.SanitizeTraceMessagesWithRedactedIDs(messages, extraRedactedIDs)
+	for i, msg := range out {
+		if msg.Role != "user" || strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		var payload map[string]json.RawMessage
+		if json.Unmarshal([]byte(msg.Content), &payload) != nil {
+			continue
+		}
+		rawTranscript, ok := payload["transcript"]
+		if !ok {
+			continue
+		}
+		var transcript []domain.Message
+		if json.Unmarshal(rawTranscript, &transcript) != nil {
+			continue
+		}
+		encodedTranscript, err := json.Marshal(domain.SanitizeTraceMessagesWithRedactedIDs(transcript, extraRedactedIDs))
+		if err != nil {
+			continue
+		}
+		payload["transcript"] = encodedTranscript
+		if encodedPayload, err := json.Marshal(payload); err == nil {
+			out[i].Content = string(encodedPayload)
 		}
 	}
 	return out
 }
 
-func (a *Activities) analysisModelCall(ctx context.Context, session domain.Session, messages []domain.Message) (out domain.Completion, err error) {
+func (a *Activities) analysisModelCall(ctx context.Context, session domain.Session, messages []domain.Message, extraRedactedIDs ...map[string]bool) (out domain.Completion, err error) {
+	var redactedIDs map[string]bool
+	if len(extraRedactedIDs) > 0 {
+		redactedIDs = extraRedactedIDs[0]
+	}
 	ctx = telemetry.WithFields(ctx, map[string]any{"session_id": session.ID, "turn_id": "analysis/" + session.ID, "conversation_id": session.ConversationID, "trigger": "analysis"})
 	ctx = domain.WithModelRole(ctx, domain.RoleAnalysis)
 	event := a.event(ctx, "llm.complete")
 	ctx = event.Context()
-	finish := a.startTrace(ctx, domain.Trace{SessionID: session.ID, TurnID: "analysis/" + session.ID, Trigger: "analysis", Kind: "analysis", Name: string(domain.RoleAnalysis), ModelRole: domain.RoleAnalysis}, map[string]any{"messages": traceMessages(messages), "context_stage": "before_profile_fitting"}, event)
+	finish := a.startTrace(ctx, domain.Trace{SessionID: session.ID, TurnID: "analysis/" + session.ID, Trigger: "analysis", Kind: "analysis", Name: string(domain.RoleAnalysis), ModelRole: domain.RoleAnalysis}, map[string]any{"messages": sanitizeAnalysisTraceMessages(messages, redactedIDs), "context_stage": "before_profile_fitting"}, event)
 	defer func() {
 		if out.Usage.Model == "" {
 			out.Usage.Model = out.Model

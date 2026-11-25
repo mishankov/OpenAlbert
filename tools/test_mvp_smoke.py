@@ -30,6 +30,7 @@ class DevelopmentSmokeTests(unittest.TestCase):
         }
         for values in service_env.values():
             values.extend([f"LLM_API_KEY={secret}", f"TELEGRAM_BOT_TOKEN={secret}",
+                           f"EXA_API_KEY={secret}", f"EXA_SEARCH_URL=https://{secret}.example",
                            f"YANDEX_SEARCH_URL=https://{secret}.example", f"UNRELATED_SETTING={secret}"])
         commands = []
         overrides = []
@@ -106,9 +107,10 @@ class DevelopmentSmokeTests(unittest.TestCase):
         startup_env = next(env for command, env in commands if "up" in command)
         self.assertEqual(startup_env["LLM_API_KEY"], "smoke-key")
         self.assertEqual(startup_env["TELEGRAM_BOT_TOKEN"], "smoke-token")
-        self.assertEqual(startup_env["YANDEX_API_KEY"], "smoke-key")
+        self.assertEqual(startup_env["EXA_API_KEY"], "smoke-exa-key")
         self.assertEqual(startup_env["TELEGRAM_BASE_URL"], "http://host.docker.internal:18089")
-        self.assertEqual(startup_env["YANDEX_SEARCH_URL"], "http://host.docker.internal:18089/search")
+        self.assertEqual(startup_env["EXA_SEARCH_URL"], "http://host.docker.internal:18089/exa/search")
+        self.assertEqual(startup_env["YANDEX_API_KEY"], "")
 
     def test_missing_or_ambiguous_running_service_fails_before_inspection(self):
         for containers in ("", "first\nsecond"):

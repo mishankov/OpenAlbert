@@ -203,6 +203,9 @@ service:openalbert operation:turn.complete
 
 # Компактная таблица с уже нормализованными полями
  service:openalbert | fields _time, service, level, _msg, turn_id
+
+# Расход Exa Search за выбранный период (без кэшированных повторов Temporal)
+service:openalbert operation:tool.execute tool:web_search search_provider:exa NOT cached:true | stats sum(search_cost_usd) as total_usd, count() as searches
 ```
 
 Старые записи не переписываются: у них остаются прежние `event.line.*`, `event.attrs.compose_service` и `event.tag`. Новые поля и сообщения появляются после пересоздания контейнеров; в широком временном диапазоне могут одновременно присутствовать обе схемы. Для применения изменения общей конфигурации драйвера нужен `docker compose up -d` (для локальной разработки — `docker compose --project-directory . -f deploy/compose.local.yaml up -d --build`), обычного `restart` недостаточно. Существующие volumes и история сохраняются.

@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -29,6 +30,9 @@ type Config struct {
 	Models                                                  domain.ModelProfiles
 	STTBaseURL, STTAPIKey, STTModel, STTRevision            string
 	TTSBaseURL, TTSAPIKey, TTSModel, TTSVoice               string
+	WebSearchProvider                                       string
+	ExaAPIKey, ExaEndpoint                                  string
+	ExaMonthlyBudgetUSD                                     float64
 	YandexAPIKey, YandexFolderID, YandexEndpoint            string
 	KnowledgeDir, SoulFile, HTTPAddr                        string
 	SessionIdleTimeout, TaskMinInterval, InitiativeInterval time.Duration
@@ -63,6 +67,7 @@ func load(get func(string) string) (Config, error) {
 		TTSBaseURL: value("TTS_BASE_URL", ""), TTSAPIKey: value("TTS_API_KEY", ""), TTSModel: value("TTS_MODEL", "piper"), TTSVoice: value("TTS_VOICE", "ru_RU-dmitri-medium"),
 		DatabaseURL: value("DATABASE_URL", ""), TemporalAddress: value("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: value("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: value("TEMPORAL_TASK_QUEUE", "openalbert"),
 		TelegramBotToken: value("TELEGRAM_BOT_TOKEN", ""), TelegramBaseURL: value("TELEGRAM_BASE_URL", ""), ModelsFile: value("LLM_CONFIG_FILE", ""),
+		WebSearchProvider: strings.ToLower(value("WEB_SEARCH_PROVIDER", "")), ExaAPIKey: value("EXA_API_KEY", ""), ExaEndpoint: value("EXA_SEARCH_URL", ""),
 		YandexAPIKey: value("YANDEX_API_KEY", ""), YandexEndpoint: value("YANDEX_SEARCH_URL", ""), YandexFolderID: value("YANDEX_FOLDER_ID", ""), KnowledgeDir: value("KNOWLEDGE_DIR", "./container_data/knowledge"), SoulFile: value("SOUL_FILE", ""), HTTPAddr: value("HTTP_ADDR", ":8080"),
 		S3Endpoint: value("S3_ENDPOINT", "localhost:9000"), S3AccessKey: value("S3_ACCESS_KEY", ""), S3SecretKey: value("S3_SECRET_KEY", ""), S3Bucket: value("S3_BUCKET", "openalbert"),
 		InspectorPublicURL:  value("INSPECTOR_PUBLIC_URL", "http://localhost:8080/inspect/"),
@@ -132,8 +137,42 @@ func load(get func(string) string) (Config, error) {
 			problems = append(problems, fmt.Errorf("%s is required", r.name))
 		}
 	}
+	if c.WebSearchProvider != "" && c.WebSearchProvider != "exa" && c.WebSearchProvider != "yandex" {
+		problems = append(problems, errors.New("WEB_SEARCH_PROVIDER must be empty, exa, or yandex"))
+	}
+	if c.ExaEndpoint != "" {
+		if u, e := url.Parse(c.ExaEndpoint); e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			problems = append(problems, errors.New("EXA_SEARCH_URL must be an HTTP(S) URL without credentials, query or fragment"))
+		}
+	}
+	if c.YandexEndpoint != "" {
+		if u, e := url.Parse(c.YandexEndpoint); e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			problems = append(problems, errors.New("YANDEX_SEARCH_URL must be an HTTP(S) URL without credentials, query or fragment"))
+		}
+	}
+	var budgetErr error
+	c.ExaMonthlyBudgetUSD, budgetErr = strconv.ParseFloat(value("EXA_MONTHLY_BUDGET_USD", "10"), 64)
+	if budgetErr != nil || math.IsNaN(c.ExaMonthlyBudgetUSD) || math.IsInf(c.ExaMonthlyBudgetUSD, 0) || c.ExaMonthlyBudgetUSD <= 0 || c.ExaMonthlyBudgetUSD > 100000 {
+		problems = append(problems, errors.New("EXA_MONTHLY_BUDGET_USD must be a positive number up to 100000"))
+	}
+	hasExa := c.ExaAPIKey != ""
+	hasYandex := c.YandexAPIKey != "" || c.YandexFolderID != ""
 	if (c.YandexAPIKey == "") != (c.YandexFolderID == "") {
-		problems = append(problems, errors.New("set both YANDEX_API_KEY and YANDEX_FOLDER_ID to enable search, or leave both empty"))
+		problems = append(problems, errors.New("set both YANDEX_API_KEY and YANDEX_FOLDER_ID to enable Yandex search, or leave both empty"))
+	}
+	switch c.WebSearchProvider {
+	case "":
+		if hasExa && hasYandex {
+			problems = append(problems, errors.New("configure either Exa or Yandex search credentials, or set WEB_SEARCH_PROVIDER"))
+		}
+	case "exa":
+		if !hasExa {
+			problems = append(problems, errors.New("EXA_API_KEY is required when WEB_SEARCH_PROVIDER=exa"))
+		}
+	case "yandex":
+		if c.YandexAPIKey == "" || c.YandexFolderID == "" {
+			problems = append(problems, errors.New("YANDEX_API_KEY and YANDEX_FOLDER_ID are required when WEB_SEARCH_PROVIDER=yandex"))
+		}
 	}
 	var err error
 	c.TelegramAllowedUserIDs, err = parseIDs(get("TELEGRAM_ALLOWED_USER_IDS"), false)

@@ -116,7 +116,11 @@ func run() error {
 			return err
 		}
 	}
-	search, err := integrations.NewSearch(integrations.YandexConfig{APIKey: c.YandexAPIKey, FolderID: c.YandexFolderID, Endpoint: c.YandexEndpoint})
+	search, err := integrations.NewSearch(integrations.SearchConfig{
+		Provider: c.WebSearchProvider,
+		Exa:      integrations.ExaConfig{APIKey: c.ExaAPIKey, Endpoint: c.ExaEndpoint, MonthlyBudgetUSD: c.ExaMonthlyBudgetUSD},
+		Yandex:   integrations.YandexConfig{APIKey: c.YandexAPIKey, FolderID: c.YandexFolderID, Endpoint: c.YandexEndpoint},
+	})
 	if err != nil {
 		return err
 	}
@@ -195,13 +199,21 @@ func run() error {
 	(&desktopapi.API{Repo: artifacts, Memory: knowledgeStore, OwnerID: c.TelegramOwnerUserID, Token: c.DesktopAPIToken, Billing: billing, Activities: activities, Logger: logger}).Register(mux)
 	inspector.Register(mux, repo, artifacts)
 	inspector.RegisterMemory(mux, repo, knowledgeStore)
+	inspector.RegisterSearch(mux, repo, search, c.ExaMonthlyBudgetUSD)
 	runtime.Start(ctx)
 	defer runtime.Wait()
 	defer cancel()
 	ready.Store(true)
+	searchProvider := ""
+	if p, ok := search.(interface{ SearchProvider() string }); ok {
+		searchProvider = p.SearchProvider()
+	}
 	event := telemetry.Start(ctx, logger, "application.started")
 	event.Set("model_routes", c.Models.Routes)
-	event.Set("web_search_enabled", c.YandexAPIKey != "")
+	event.Set("web_search_enabled", searchProvider != "")
+	if searchProvider != "" {
+		event.Set("web_search_provider", searchProvider)
+	}
 	event.Set("log_search_enabled", logs != nil)
 	event.Set("browser_enabled", c.BrowserEnabled)
 	event.Set("computer_enabled", activities.Computer != nil)

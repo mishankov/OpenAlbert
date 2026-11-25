@@ -135,7 +135,7 @@ func (a *API) llmComplete(w http.ResponseWriter, r *http.Request) {
 		inRaw, _ := json.Marshal(map[string]any{
 			"model":    req.Model,
 			"options":  req.Options,
-			"messages": req.Messages,
+			"messages": agent.SanitizeTraceMessages(req.Messages),
 			"tools":    req.Tools,
 		})
 		t := domain.Trace{
@@ -217,7 +217,7 @@ func (a *API) llmComplete(w http.ResponseWriter, r *http.Request) {
 	ev.End(nil)
 
 	if trace != nil {
-		outRaw, _ := json.Marshal(comp)
+		outRaw, _ := json.Marshal(agent.SanitizeTraceCompletion(comp))
 		name := comp.Usage.Model
 		if name == "" {
 			name = comp.Model

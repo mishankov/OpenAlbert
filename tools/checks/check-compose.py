@@ -192,6 +192,15 @@ def main():
     assert plan["services"]["openalbert"]["environment"]["LLM_API_KEY"] == ""
     disabled_consolidation = check_pair({"MEMORY_CONSOLIDATION_INTERVAL": "0"})
     assert disabled_consolidation["services"]["openalbert"]["environment"]["MEMORY_CONSOLIDATION_INTERVAL"] == "0"
+    exa_env = {
+        "WEB_SEARCH_PROVIDER": "exa",
+        "EXA_API_KEY": "exa-test-only",
+        "EXA_SEARCH_URL": "https://exa.example/search",
+        "EXA_MONTHLY_BUDGET_USD": "25",
+    }
+    exa_checked = check_pair(exa_env)
+    exa_app = exa_checked["services"]["openalbert"]["environment"]
+    assert all(exa_app[key] == value for key, value in exa_env.items()), "Exa search settings were lost"
     app = current["services"]["openalbert"]["environment"]
     assert app["LLM_CONFIG_FILE"] == "/etc/openalbert/models.toml"
     assert "LLM_MODEL" not in app and "LLM_BASE_URL" not in app

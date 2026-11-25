@@ -154,11 +154,11 @@ func TestYandexContractAndXML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := y.Search(context.Background(), "golang")
+	out, err := y.Search(context.Background(), domain.SearchQuery{Query: "golang"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) != 1 || out[0].Title != "Go docs" || out[0].Snippet != "A & B" {
+	if out.Provider != "yandex" || len(out.Results) != 1 || out.Results[0].Title != "Go docs" || out.Results[0].Snippet != "A & B" {
 		t.Fatalf("bad parsed search: %+v", out)
 	}
 }
@@ -476,7 +476,7 @@ func TestOpenAIAllowsExplicitEmptyFinalStop(t *testing.T) {
 
 func TestWebReaderRemainsAvailableWithoutYandex(t *testing.T) {
 	requests := 0
-	search, err := NewSearch(YandexConfig{Web: WebConfig{Resolver: publicResolver(), HTTPClient: &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+	search, err := NewSearch(SearchConfig{Web: WebConfig{Resolver: publicResolver(), HTTPClient: &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
 		requests++
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader("<html><body>Public linked page</body></html>")), Request: r}, nil
 	})}}})
@@ -486,7 +486,7 @@ func TestWebReaderRemainsAvailableWithoutYandex(t *testing.T) {
 	if search.(interface{ SearchEnabled() bool }).SearchEnabled() {
 		t.Fatal("search was enabled without credentials")
 	}
-	if _, err = search.Search(context.Background(), "anything"); !errors.Is(err, ErrSearchDisabled) {
+	if _, err = search.Search(context.Background(), domain.SearchQuery{Query: "anything"}); !errors.Is(err, ErrSearchDisabled) {
 		t.Fatalf("unexpected disabled result: %v", err)
 	}
 	if requests != 0 {
@@ -496,7 +496,7 @@ func TestWebReaderRemainsAvailableWithoutYandex(t *testing.T) {
 	if err != nil || !strings.Contains(text, "Public linked page") || requests != 1 {
 		t.Fatalf("URL reading unavailable: %q %v requests=%d", text, err, requests)
 	}
-	if _, err = NewSearch(YandexConfig{APIKey: "key-only"}); err == nil {
+	if _, err = NewSearch(SearchConfig{Yandex: YandexConfig{APIKey: "key-only"}}); err == nil {
 		t.Fatal("partial provider credentials accepted")
 	}
 }

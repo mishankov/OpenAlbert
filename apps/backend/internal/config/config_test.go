@@ -145,7 +145,7 @@ func TestRequiredOwnerAndSecrets(t *testing.T) {
 	}
 }
 func TestInvalidSettingsNeverEchoInput(t *testing.T) {
-	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_CONFIG_FILE", "INSPECTOR_PUBLIC_URL", "VICTORIALOGS_URL", "DATABASE_URL", "S3_SECURE", "TELEGRAM_ALLOW_BOT_MESSAGES", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX"} {
+	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_CONFIG_FILE", "INSPECTOR_PUBLIC_URL", "VICTORIALOGS_URL", "DATABASE_URL", "S3_SECURE", "TELEGRAM_ALLOW_BOT_MESSAGES", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX", "WEB_SEARCH_PROVIDER", "EXA_SEARCH_URL", "EXA_MONTHLY_BUDGET_USD"} {
 		t.Run(key, func(t *testing.T) {
 			env := validEnv(t)
 			env[key] = "secret-bad-value"
@@ -182,6 +182,41 @@ func TestSearchCredentialsAreOptionalButMustBeComplete(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExaAndProviderSelectionSettings(t *testing.T) {
+	t.Run("exa only with default budget", func(t *testing.T) {
+		env := validEnv(t)
+		delete(env, "YANDEX_API_KEY")
+		delete(env, "YANDEX_FOLDER_ID")
+		env["EXA_API_KEY"] = "exa-secret"
+		cfg, err := load(func(k string) string { return env[k] })
+		if err != nil || cfg.ExaAPIKey != "exa-secret" || cfg.ExaMonthlyBudgetUSD != 10 {
+			t.Fatalf("exa config failed: %+v %v", cfg, err)
+		}
+	})
+	t.Run("both providers require explicit selector", func(t *testing.T) {
+		env := validEnv(t)
+		env["EXA_API_KEY"] = "exa-secret"
+		if _, err := load(func(k string) string { return env[k] }); err == nil || strings.Contains(err.Error(), "exa-secret") {
+			t.Fatalf("ambiguous dual search config accepted or leaked: %v", err)
+		}
+		env["WEB_SEARCH_PROVIDER"] = "exa"
+		env["EXA_MONTHLY_BUDGET_USD"] = "25.5"
+		cfg, err := load(func(k string) string { return env[k] })
+		if err != nil || cfg.WebSearchProvider != "exa" || cfg.ExaMonthlyBudgetUSD != 25.5 {
+			t.Fatalf("explicit provider selection failed: %+v %v", cfg, err)
+		}
+	})
+	t.Run("explicit exa requires key", func(t *testing.T) {
+		env := validEnv(t)
+		delete(env, "YANDEX_API_KEY")
+		delete(env, "YANDEX_FOLDER_ID")
+		env["WEB_SEARCH_PROVIDER"] = "exa"
+		if _, err := load(func(k string) string { return env[k] }); err == nil {
+			t.Fatal("WEB_SEARCH_PROVIDER=exa accepted without EXA_API_KEY")
+		}
+	})
 }
 
 func TestOwnerUsesFirstAllowedIDOrExplicitAllowedID(t *testing.T) {
