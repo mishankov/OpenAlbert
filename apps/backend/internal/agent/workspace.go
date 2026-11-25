@@ -357,6 +357,7 @@ func (a *Activities) executeWorkspaceTool(ctx context.Context, in ToolInput) (an
 				return nil, err
 			}
 			conv.Title = title
+			conv.TitleFromChat = false
 			conv.OwnerID = a.OwnerUserID
 			if err := a.Repo.SaveConversation(ctx, conv); err != nil {
 				return nil, err
@@ -568,6 +569,7 @@ func (c *WorkspaceController) UpdateTopicPrefix(ctx context.Context, threadID in
 			}
 		}
 		conv.Title = name
+		conv.TitleFromChat = false
 		if c.OwnerUserID > 0 {
 			conv.OwnerID = c.OwnerUserID
 		}

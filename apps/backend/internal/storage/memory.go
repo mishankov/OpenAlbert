@@ -76,8 +76,9 @@ func (m *Memory) AcceptIncoming(ctx context.Context, in domain.Incoming, offset 
 	}
 	canonical := in.Conversation
 	canonical.DeliveryChannel = ""
-	if existing, exists := m.conversations[in.Conversation.ID]; exists && existing.ThreadID > 0 && existing.Title != "" {
+	if existing, exists := m.conversations[in.Conversation.ID]; exists && existing.ThreadID > 0 && existing.Title != "" && !existing.TitleFromChat && !(in.Conversation.TitleFromChat && existing.Title == in.Conversation.Title) {
 		canonical.Title = existing.Title
+		canonical.TitleFromChat = false
 	}
 	m.conversations[in.Conversation.ID] = canonical
 	if _, ok := m.incoming[in.ID]; ok {

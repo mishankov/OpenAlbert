@@ -267,16 +267,22 @@ type telegramFile struct {
 	Size     int64  `json:"file_size"`
 }
 type telegramMessage struct {
-	ID             int64                `json:"message_id"`
-	ThreadID       int                  `json:"message_thread_id"`
-	IsTopicMessage bool                 `json:"is_topic_message"`
-	Date           int64                `json:"date"`
-	Text           string               `json:"text"`
-	Caption        string               `json:"caption"`
-	ReplyTo        *telegramMessage     `json:"reply_to_message"`
-	Quote          *domain.MessageQuote `json:"quote"`
-	RichMessage    json.RawMessage      `json:"rich_message"`
-	From           *struct {
+	ID                int64                `json:"message_id"`
+	ThreadID          int                  `json:"message_thread_id"`
+	IsTopicMessage    bool                 `json:"is_topic_message"`
+	Date              int64                `json:"date"`
+	Text              string               `json:"text"`
+	Caption           string               `json:"caption"`
+	ReplyTo           *telegramMessage     `json:"reply_to_message"`
+	Quote             *domain.MessageQuote `json:"quote"`
+	RichMessage       json.RawMessage      `json:"rich_message"`
+	ForumTopicCreated *struct {
+		Name string `json:"name"`
+	} `json:"forum_topic_created"`
+	ForumTopicEdited *struct {
+		Name string `json:"name"`
+	} `json:"forum_topic_edited"`
+	From *struct {
 		ID        int64  `json:"id"`
 		FirstName string `json:"first_name"`
 		LastName  string `json:"last_name"`
@@ -303,6 +309,28 @@ func telegramMessageText(m *telegramMessage) string {
 		return m.Caption
 	}
 	return messagefmt.RichMessageText(m.RichMessage)
+}
+
+func telegramForumTopicName(m *telegramMessage) string {
+	if m == nil {
+		return ""
+	}
+	if m.ForumTopicEdited != nil {
+		if name := strings.TrimSpace(m.ForumTopicEdited.Name); name != "" {
+			return name
+		}
+	}
+	if m.ForumTopicCreated != nil {
+		if name := strings.TrimSpace(m.ForumTopicCreated.Name); name != "" {
+			return name
+		}
+	}
+	if m.ReplyTo != nil && m.ReplyTo.ForumTopicCreated != nil {
+		if name := strings.TrimSpace(m.ReplyTo.ForumTopicCreated.Name); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 func telegramReplyContext(m *telegramMessage) *domain.ReplyContext {
@@ -390,7 +418,16 @@ func (t *Telegram) Poll(ctx context.Context, offset int64) ([]Update, error) {
 		if m.IsTopicMessage {
 			threadID = m.ThreadID
 		}
-		conv := domain.Conversation{Title: m.Chat.Title, ChatID: m.Chat.ID, ThreadID: threadID, OwnerID: m.From.ID, Private: private}
+		convTitle := m.Chat.Title
+		titleFromChat := false
+		if threadID > 0 {
+			if topicName := telegramForumTopicName(m); topicName != "" {
+				convTitle = topicName
+			} else {
+				titleFromChat = true
+			}
+		}
+		conv := domain.Conversation{Title: convTitle, TitleFromChat: titleFromChat, ChatID: m.Chat.ID, ThreadID: threadID, OwnerID: m.From.ID, Private: private}
 		if private {
 			conv.ID = fmt.Sprintf("personal:%d", m.From.ID)
 		} else {

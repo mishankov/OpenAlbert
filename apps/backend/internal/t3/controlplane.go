@@ -42,6 +42,13 @@ type EventObserver interface {
 	OnHostUpdated(ctx context.Context, host domain.T3Host) error
 }
 
+// HandledEventObserver may optionally be implemented by an EventObserver when
+// it handles a thread_waiting_input event directly (for example, posting
+// zero-LLM inline buttons) so ControlPlane skips queueing an LLM wake turn.
+type HandledEventObserver interface {
+	OnThreadEventHandled(ctx context.Context, event domain.T3Event) (handled bool, err error)
+}
+
 // Config configures a ControlPlane instance.
 type Config struct {
 	OwnerUserID              int64
@@ -188,12 +195,45 @@ func (cp *ControlPlane) notifyHostUpdated(ctx context.Context, host domain.T3Hos
 	}
 }
 
-func (cp *ControlPlane) notifyThreadEvent(ctx context.Context, event domain.T3Event) {
+func (cp *ControlPlane) notifyThreadEvent(ctx context.Context, event domain.T3Event) bool {
+	suppressWake := false
 	for _, obs := range cp.snapshotObservers() {
+		if h, ok := obs.(HandledEventObserver); ok {
+			handled, err := h.OnThreadEventHandled(ctx, event)
+			if err != nil && cp.logger != nil {
+				cp.logger.Warn("T3 observer OnThreadEvent failed", "event_id", event.EventID, "thread_id", event.ThreadID, "error", err.Error())
+			}
+			if handled && event.Kind == domain.T3EventThreadWaitingInput {
+				suppressWake = true
+			}
+			continue
+		}
 		if err := obs.OnThreadEvent(ctx, event); err != nil && cp.logger != nil {
 			cp.logger.Warn("T3 observer OnThreadEvent failed", "event_id", event.EventID, "thread_id", event.ThreadID, "error", err.Error())
 		}
 	}
+	return suppressWake
+}
+
+func (cp *ControlPlane) notifyHandledObservers(ctx context.Context, event domain.T3Event) bool {
+	if event.Kind != domain.T3EventThreadWaitingInput {
+		return false
+	}
+	suppressWake := false
+	for _, obs := range cp.snapshotObservers() {
+		h, ok := obs.(HandledEventObserver)
+		if !ok {
+			continue
+		}
+		handled, err := h.OnThreadEventHandled(ctx, event)
+		if err != nil && cp.logger != nil {
+			cp.logger.Warn("T3 observer OnThreadEvent replay failed", "event_id", event.EventID, "thread_id", event.ThreadID, "error", err.Error())
+		}
+		if handled {
+			suppressWake = true
+		}
+	}
+	return suppressWake
 }
 
 // RegisterHostRequest matches POST /api/v1/t3/hosts/register.
@@ -305,6 +345,15 @@ func (cp *ControlPlane) Thread(ctx context.Context, threadID string) (domain.T3T
 		return domain.T3Thread{}, ErrThreadNotFound
 	}
 	return th, nil
+}
+
+// Command returns a single persisted T3 command by ID.
+func (cp *ControlPlane) Command(ctx context.Context, commandID string) (domain.T3Command, bool, error) {
+	id := strings.TrimSpace(commandID)
+	if id == "" {
+		return domain.T3Command{}, false, nil
+	}
+	return cp.store.T3Command(ctx, id)
 }
 
 // SubscribeCommands registers an SSE listener for environmentID. When a host
@@ -628,9 +677,6 @@ func (cp *ControlPlane) RecordCommandResult(ctx context.Context, commandID strin
 	}
 	_, _, _ = cp.store.TouchT3Host(ctx, envID, now)
 
-	if transitioned {
-		cp.resolveWaiters(cmd.ID, commandOutcome{Command: cmd, Thread: updatedThread})
-	}
 	if updatedThread == nil && cmd.Action == domain.T3ActionThreadLaunch && cmd.Status == domain.T3CommandStatusSucceeded {
 		var res struct {
 			ThreadID string `json:"thread_id"`
@@ -645,12 +691,100 @@ func (cp *ControlPlane) RecordCommandResult(ctx context.Context, commandID strin
 			}
 		}
 	}
+	if transitioned && updatedThread != nil {
+		cp.notifyCommandThreadUpdate(ctx, cmd, *updatedThread, now)
+	} else if !transitioned && cmd.Action == domain.T3ActionThreadRespond && cmd.Status == domain.T3CommandStatusSucceeded {
+		// Replaying a succeeded thread_respond result (e.g. after a crash between
+		// DB commit and observer delivery) retries idempotent observer finalization.
+		var payload struct {
+			ThreadID string `json:"thread_id"`
+		}
+		if len(cmd.Payload) > 0 && json.Unmarshal(cmd.Payload, &payload) == nil && strings.TrimSpace(payload.ThreadID) != "" {
+			if th, ok, err := cp.store.T3Thread(ctx, strings.TrimSpace(payload.ThreadID)); err == nil && ok {
+				cp.notifyCommandThreadUpdate(ctx, cmd, th, now)
+			}
+		}
+	}
 	if updatedThread != nil && updatedThread.ConversationID != "" {
-		if err := cp.flushPendingWakes(ctx, *updatedThread, now); err != nil {
+		if err := cp.flushPendingWakes(ctx, *updatedThread, now, transitioned); err != nil {
+			if transitioned {
+				cp.resolveWaiters(cmd.ID, commandOutcome{Command: cmd, Thread: updatedThread})
+			}
 			return err
 		}
 	}
+	if transitioned {
+		cp.resolveWaiters(cmd.ID, commandOutcome{Command: cmd, Thread: updatedThread})
+	}
 	return nil
+}
+
+func (cp *ControlPlane) notifyCommandThreadUpdate(ctx context.Context, cmd domain.T3Command, thread domain.T3Thread, now time.Time) {
+	if cmd.Status != domain.T3CommandStatusSucceeded {
+		return
+	}
+	switch cmd.Action {
+	case domain.T3ActionThreadLaunch:
+		switch strings.ToLower(strings.TrimSpace(thread.Status)) {
+		case "", "running", "starting", "queued":
+			cp.notifyThreadEvent(ctx, domain.T3Event{
+				EventID:            "cmd:" + cmd.ID,
+				EnvironmentID:      thread.EnvironmentID,
+				ThreadID:           thread.ThreadID,
+				Kind:               domain.T3EventThreadLaunched,
+				Status:             firstNonEmpty(thread.Status, "running"),
+				Title:              thread.Title,
+				Link:               thread.Link,
+				ProjectID:          thread.ProjectID,
+				ProviderInstanceID: thread.ProviderInstanceID,
+				Model:              thread.Model,
+				Branch:             thread.Branch,
+				PRURL:              thread.PRURL,
+				Summary:            thread.LastSummary,
+				OccurredAt:         now,
+				ConversationID:     thread.ConversationID,
+				TaskID:             thread.TaskID,
+			})
+		}
+	case domain.T3ActionThreadControl:
+		cp.notifyThreadEvent(ctx, domain.T3Event{
+			EventID:            "cmd:" + cmd.ID,
+			EnvironmentID:      thread.EnvironmentID,
+			ThreadID:           thread.ThreadID,
+			Kind:               domain.T3EventThreadProgress,
+			Status:             thread.Status,
+			Title:              thread.Title,
+			Link:               thread.Link,
+			ProjectID:          thread.ProjectID,
+			ProviderInstanceID: thread.ProviderInstanceID,
+			Model:              thread.Model,
+			Branch:             thread.Branch,
+			PRURL:              thread.PRURL,
+			Summary:            thread.LastSummary,
+			OccurredAt:         now,
+			ConversationID:     thread.ConversationID,
+			TaskID:             thread.TaskID,
+		})
+	case domain.T3ActionThreadRespond:
+		cp.notifyThreadEvent(ctx, domain.T3Event{
+			EventID:            "cmd:" + cmd.ID,
+			EnvironmentID:      thread.EnvironmentID,
+			ThreadID:           thread.ThreadID,
+			Kind:               domain.T3EventThreadProgress,
+			Status:             thread.Status,
+			Title:              thread.Title,
+			Link:               thread.Link,
+			ProjectID:          thread.ProjectID,
+			ProviderInstanceID: thread.ProviderInstanceID,
+			Model:              thread.Model,
+			Branch:             thread.Branch,
+			PRURL:              thread.PRURL,
+			Summary:            thread.LastSummary,
+			OccurredAt:         now,
+			ConversationID:     thread.ConversationID,
+			TaskID:             thread.TaskID,
+		})
+	}
 }
 
 func buildCommandThreadEffect(cmd domain.T3Command, now time.Time) *domain.T3CommandThreadEffect {
@@ -815,11 +949,8 @@ func (cp *ControlPlane) IngestEvent(ctx context.Context, event domain.T3Event, r
 		occurredAt = now
 		event.OccurredAt = occurredAt
 	}
-	status := strings.TrimSpace(event.Status)
-	if status == "" {
-		status = defaultStatusForEvent(event.Kind)
-		event.Status = status
-	}
+	status := effectiveStatusForEvent(event.Kind, event.Status)
+	event.Status = status
 	// Ownership comes strictly from the persisted thread, never from event input.
 	event.ConversationID = ""
 	event.TaskID = ""
@@ -892,9 +1023,16 @@ func (cp *ControlPlane) IngestEvent(ctx context.Context, event domain.T3Event, r
 	}
 	if dup {
 		// Retry any previously failed wake idempotently by event_id without
-		// re-mutating the thread or re-invoking observers.
+		// re-mutating the thread or re-invoking standard observers.
 		if isActionableEvent(stored.Event.Kind) && stored.WokenAt == nil {
-			if err := cp.deliverEventWake(ctx, enrichEventWithThread(stored.Event, thread), thread, now); err != nil {
+			enriched := enrichEventWithThread(stored.Event, thread)
+			if cp.notifyHandledObservers(ctx, enriched) {
+				if err := cp.store.MarkT3EventWoken(ctx, stored.Event.EventID, now); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+			if err := cp.deliverEventWake(ctx, enriched, thread, now); err != nil {
 				return true, err
 			}
 		}
@@ -903,9 +1041,15 @@ func (cp *ControlPlane) IngestEvent(ctx context.Context, event domain.T3Event, r
 	_, _, _ = cp.store.TouchT3Host(ctx, event.EnvironmentID, now)
 
 	enriched := enrichEventWithThread(event, thread)
-	cp.notifyThreadEvent(ctx, enriched)
+	suppressWake := cp.notifyThreadEvent(ctx, enriched)
 
 	if isActionableEvent(enriched.Kind) {
+		if suppressWake {
+			if err := cp.store.MarkT3EventWoken(ctx, event.EventID, now); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
 		if err := cp.deliverEventWake(ctx, enriched, thread, now); err != nil {
 			return false, err
 		}
@@ -925,20 +1069,31 @@ func enrichEventWithThread(event domain.T3Event, thread domain.T3Thread) domain.
 	enriched.Model = firstNonEmpty(event.Model, thread.Model)
 	enriched.Branch = firstNonEmpty(event.Branch, thread.Branch)
 	enriched.PRURL = firstNonEmpty(event.PRURL, thread.PRURL)
-	if enriched.Status == "" {
-		enriched.Status = defaultStatusForEvent(enriched.Kind)
-	}
+	enriched.Status = effectiveStatusForEvent(enriched.Kind, enriched.Status)
 	return enriched
 }
 
-func (cp *ControlPlane) flushPendingWakes(ctx context.Context, thread domain.T3Thread, now time.Time) error {
+func (cp *ControlPlane) flushPendingWakes(ctx context.Context, thread domain.T3Thread, now time.Time, notifyObservers bool) error {
 	pending, err := cp.store.PendingWakeT3Events(ctx, thread.ThreadID)
 	if err != nil {
 		return err
 	}
 	var firstErr error
 	for _, ev := range pending {
-		if err := cp.deliverEventWake(ctx, enrichEventWithThread(ev, thread), thread, now); err != nil && firstErr == nil {
+		enriched := enrichEventWithThread(ev, thread)
+		suppressWake := false
+		if notifyObservers {
+			suppressWake = cp.notifyThreadEvent(ctx, enriched)
+		} else {
+			suppressWake = cp.notifyHandledObservers(ctx, enriched)
+		}
+		if suppressWake {
+			if err := cp.store.MarkT3EventWoken(ctx, ev.EventID, now); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := cp.deliverEventWake(ctx, enriched, thread, now); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -965,6 +1120,30 @@ func (cp *ControlPlane) deliverEventWake(ctx context.Context, event domain.T3Eve
 		return cp.store.MarkT3EventWoken(ctx, event.EventID, now)
 	}
 	return nil
+}
+
+func effectiveStatusForEvent(kind, rawStatus string) string {
+	st := strings.TrimSpace(rawStatus)
+	lower := strings.ToLower(st)
+	switch kind {
+	case domain.T3EventThreadCompleted:
+		if lower == "" || lower == "idle" {
+			return "completed"
+		}
+	case domain.T3EventThreadFailed:
+		if lower == "" || lower == "idle" {
+			return "failed"
+		}
+	case domain.T3EventThreadWaitingInput:
+		if lower == "" || lower == "idle" {
+			return "waiting_input"
+		}
+	default:
+		if st == "" {
+			return defaultStatusForEvent(kind)
+		}
+	}
+	return st
 }
 
 func defaultStatusForEvent(kind string) string {

@@ -62,7 +62,7 @@ func isT3Tool(name string) bool {
 }
 
 func (a *Activities) isT3AuthorizedConversation(c domain.Conversation) bool {
-	return a.isOwnerPrivate(c)
+	return a.isOwnerAuthorized(c)
 }
 
 func (a *Activities) t3Access(in ToolInput) error {

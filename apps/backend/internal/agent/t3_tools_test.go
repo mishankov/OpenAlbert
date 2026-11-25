@@ -93,12 +93,49 @@ func TestT3ToolsAuthorizationAndCodingAccess(t *testing.T) {
 	}
 
 	// Unauthorized contexts blocked even on checkpoint replay (same RunKey + Call.ID as owner call above!).
+	a.WorkspaceGroupID = -100555
+	ownerWorkspaceTopic := domain.Conversation{
+		ID:       "telegram:group:-100555:topic:42",
+		Title:    "Agent Work",
+		ChatID:   -100555,
+		ThreadID: 42,
+		OwnerID:  owner.OwnerID,
+		Private:  false,
+	}
+	nonOwnerWorkspaceTopic := domain.Conversation{
+		ID:       "telegram:group:-100555:topic:42",
+		Title:    "Agent Work",
+		ChatID:   -100555,
+		ThreadID: 42,
+		OwnerID:  999,
+		Private:  false,
+	}
+
+	// Owner Workspace Supergroup topic: all 7 tools advertised and executable!
+	wsCount := 0
+	for _, def := range a.toolsForTurn(Turn{Conversation: ownerWorkspaceTopic}) {
+		if isT3Tool(def.Name) {
+			wsCount++
+		}
+	}
+	if wsCount != 7 {
+		t.Fatalf("expected 7 t3 tools advertised in owner workspace topic, got %d", wsCount)
+	}
+	wsIn := in
+	wsIn.RunKey = "t3-workspace-owner"
+	wsIn.Conversation = ownerWorkspaceTopic
+	if out, err := a.ToolCall(ctx, wsIn); err != nil || strings.Contains(out, `"error"`) || !strings.Contains(out, `"MacBook"`) {
+		t.Fatalf("owner workspace t3_hosts failed: %s %v", out, err)
+	}
+
 	for _, tc := range []struct {
 		name       string
 		conv       domain.Conversation
 		initiative bool
 	}{
 		{"group", domain.Conversation{ID: "group:-100", ChatID: -100, OwnerID: owner.OwnerID}, false},
+		{"non_owner_workspace", nonOwnerWorkspaceTopic, false},
+		{"workspace_initiative", ownerWorkspaceTopic, true},
 		{"other_private", domain.Conversation{ID: "personal:999", Private: true, ChatID: 999, OwnerID: 999}, false},
 		{"spoofed_private", domain.Conversation{ID: "spoof", Private: true, ChatID: 999, OwnerID: owner.OwnerID}, false},
 		{"initiative", owner, true},
