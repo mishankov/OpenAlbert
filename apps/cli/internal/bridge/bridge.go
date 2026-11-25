@@ -906,7 +906,13 @@ func normalizeModelSelection(in map[string]any) map[string]any {
 	for k, v := range in {
 		switch k {
 		case "provider_instance_id", "instance_id":
-			out["instanceId"] = v
+			if _, exists := out["instanceId"]; !exists {
+				out["instanceId"] = v
+			}
+		case "model_id":
+			if _, exists := out["model"]; !exists {
+				out["model"] = v
+			}
 		default:
 			out[k] = v
 		}
@@ -1072,7 +1078,12 @@ func parseLaunchResponse(raw json.RawMessage, req threadLaunchPayload) launchRes
 		Model              string `json:"model"`
 		ProviderInstanceID string `json:"providerInstanceId"`
 		SnakeProviderID    string `json:"provider_instance_id"`
-		Thread             *struct {
+		ModelSelection     *struct {
+			Model      string `json:"model"`
+			InstanceID string `json:"instanceId"`
+			Provider   string `json:"provider"`
+		} `json:"modelSelection"`
+		Thread *struct {
 			ThreadID           string `json:"threadId"`
 			LatestRunID        string `json:"latestRunId"`
 			ID                 string `json:"id"`
@@ -1097,6 +1108,10 @@ func parseLaunchResponse(raw json.RawMessage, req threadLaunchPayload) launchRes
 		Model:              flat.Model,
 		ProviderInstanceID: firstNonEmpty(flat.ProviderInstanceID, flat.SnakeProviderID),
 	}
+	if flat.ModelSelection != nil {
+		out.Model = firstNonEmpty(out.Model, flat.ModelSelection.Model)
+		out.ProviderInstanceID = firstNonEmpty(out.ProviderInstanceID, flat.ModelSelection.InstanceID, flat.ModelSelection.Provider)
+	}
 	if flat.Thread != nil {
 		out.ThreadID = firstNonEmpty(out.ThreadID, flat.Thread.ThreadID, flat.Thread.ID)
 		out.RunID = firstNonEmpty(out.RunID, flat.Thread.LatestRunID)
@@ -1110,8 +1125,11 @@ func parseLaunchResponse(raw json.RawMessage, req threadLaunchPayload) launchRes
 	}
 	if req.ModelSelection != nil {
 		if out.Model == "" {
-			if m, ok := req.ModelSelection["model"].(string); ok {
-				out.Model = m
+			for _, k := range []string{"model", "model_id"} {
+				if m, ok := req.ModelSelection[k].(string); ok && m != "" {
+					out.Model = m
+					break
+				}
 			}
 		}
 		if out.ProviderInstanceID == "" {
