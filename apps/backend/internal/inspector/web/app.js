@@ -638,8 +638,12 @@ function route() {
     state.routeTrace = "";
     const params = new URLSearchParams(location.hash.split("?")[1] || "");
     const requested = params.get("conversation_id");
-    if (requested) state.memoryScope = requested;
-    else if (!state.memoryScope) state.memoryScope = state.data?.session.conversation_id || "";
+    if (requested && !isCodingScope(requested)) state.memoryScope = requested;
+    else if (isCodingScope(requested) || isCodingScope(state.memoryScope)) state.memoryScope = "";
+    else if (!state.memoryScope) {
+      const sessionScope = state.data?.session.conversation_id || "";
+      if (sessionScope && !isCodingScope(sessionScope)) state.memoryScope = sessionScope;
+    }
     state.memoryTab = params.get("tab") === "analytics" ? "analytics" : "entries";
     memoryShell();
     loadSoul();
@@ -803,22 +807,84 @@ function setMemoryTab(tab, { focusTab = false, forceReload = false } = {}) {
   }
 }
 
+function isCodingScope(id) {
+  return String(id || "").startsWith("coding:");
+}
+
+function isPersonalConversation(c) {
+  return String(c?.id || "").startsWith("personal:") || !!c?.private;
+}
+
+function isKnownEmptyMemoryConversation(c) {
+  return typeof c?.memory_count === "number" && c.memory_count === 0 && !c.has_profile;
+}
+
+function sortMemoryConversations(conversations) {
+  return [...(conversations || [])]
+    .filter((c) => c?.id && !isCodingScope(c.id))
+    .sort((a, b) => {
+      const aPersonal = isPersonalConversation(a);
+      const bPersonal = isPersonalConversation(b);
+      if (aPersonal !== bPersonal) return aPersonal ? -1 : 1;
+      const aEmpty = isKnownEmptyMemoryConversation(a);
+      const bEmpty = isKnownEmptyMemoryConversation(b);
+      if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
+      const aHasCount = typeof a.memory_count === "number";
+      const bHasCount = typeof b.memory_count === "number";
+      if (aHasCount && bHasCount && a.memory_count !== b.memory_count) {
+        return b.memory_count - a.memory_count;
+      }
+      if (a.last_updated_at && b.last_updated_at && a.last_updated_at !== b.last_updated_at) {
+        return b.last_updated_at.localeCompare(a.last_updated_at);
+      }
+      return 0;
+    });
+}
+
+function formatMemoryScopeOption(c) {
+  const title = c.title || (isPersonalConversation(c) ? "Личный разговор" : "Групповой разговор");
+  const count = typeof c.memory_count === "number" ? ` (${fmtNum(c.memory_count)} зап.)` : "";
+  return `<option value="${esc(c.id)}" ${c.id === state.memoryScope ? "selected" : ""}>${esc(title)}${esc(count)} · ${esc(c.id)}</option>`;
+}
+
 function populateMemoryScopes(conversations) {
-  if (!state.memoryScope) state.memoryScope = conversations[0]?.id || "";
-  const choices = [...conversations];
+  const visible = sortMemoryConversations(conversations);
+  if (!state.memoryScope || isCodingScope(state.memoryScope)) {
+    state.memoryScope =
+      visible.find((c) => isPersonalConversation(c))?.id || visible[0]?.id || "";
+  }
+  const choices = [...visible];
   // Keep a bookmarked scope accessible even if its conversation metadata is gone.
   if (state.memoryScope && !choices.some((c) => c.id === state.memoryScope))
     choices.push({ id: state.memoryScope, title: "Разговор без метаданных" });
-  $("#memory-scope").innerHTML = choices.length
-    ? choices
-        .map(
-          (c) =>
-            `<option value="${esc(c.id)}" ${c.id === state.memoryScope ? "selected" : ""}>${esc(c.title || (c.private ? "Личный разговор" : "Групповой разговор"))} · ${esc(c.id)}</option>`,
-        )
-        .join("")
-    : '<option value="">Разговоров пока нет</option>';
-  $("#memory-scope").disabled = !choices.length;
-  return conversations.find((c) => c.id === state.memoryScope);
+
+  const select = $("#memory-scope");
+  if (!choices.length) {
+    select.innerHTML = '<option value="">Разговоров пока нет</option>';
+    select.disabled = true;
+    return undefined;
+  }
+  const primary = [];
+  const empty = [];
+  for (const c of choices) {
+    if (isKnownEmptyMemoryConversation(c) && !isPersonalConversation(c)) {
+      empty.push(c);
+    } else {
+      primary.push(c);
+    }
+  }
+  if (empty.length && primary.length) {
+    const primaryLabel = primary.some((c) => !isKnownEmptyMemoryConversation(c))
+      ? "С памятью"
+      : "Основной разговор";
+    select.innerHTML = `<optgroup label="${esc(primaryLabel)}">${primary.map(formatMemoryScopeOption).join("")}</optgroup><optgroup label="${esc(`Без записей памяти (${empty.length})`)}">${empty.map(formatMemoryScopeOption).join("")}</optgroup>`;
+  } else if (empty.length) {
+    select.innerHTML = `<optgroup label="${esc(`Без записей памяти (${empty.length})`)}">${empty.map(formatMemoryScopeOption).join("")}</optgroup>`;
+  } else {
+    select.innerHTML = choices.map(formatMemoryScopeOption).join("");
+  }
+  select.disabled = false;
+  return visible.find((c) => c.id === state.memoryScope);
 }
 
 function memoryShell() {

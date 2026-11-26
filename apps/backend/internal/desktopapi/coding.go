@@ -90,13 +90,6 @@ func (a *API) llmComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.SessionID != "" && a.Repo != nil {
-		if status, code, msg, ok := a.checkCodingSession(r.Context(), req.SessionID, resolveCodingConversationID(req.ConversationID, req.SessionID), true); !ok {
-			fail(w, status, code, msg)
-			return
-		}
-	}
-
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Time{})
 
@@ -116,17 +109,6 @@ func (a *API) llmComplete(w http.ResponseWriter, r *http.Request) {
 	if providerSessionID == "" {
 		providerSessionID = "ephemeral-" + agent.ID("coding-ephemeral", turnID, fmt.Sprint(req.Step), time.Now().UTC().Format(time.RFC3339Nano))
 	}
-	ctx = domain.WithModelRole(domain.WithModelTurn(domain.WithModelSession(ctx, providerSessionID), turnID), domain.RoleCoding)
-	ctx = telemetry.WithFields(ctx, map[string]any{
-		"conversation_id": convID,
-		"session_id":      req.SessionID,
-		"turn_id":         turnID,
-		"trigger":         "coding",
-	})
-	ev := telemetry.Start(ctx, a.logger(), "llm.complete")
-	ctx = ev.Context()
-	ev.Set("step", req.Step)
-	ev.Set("model_requested", req.Model)
 
 	startedAt := time.Now().UTC()
 	var trace *domain.Trace
@@ -153,9 +135,41 @@ func (a *API) llmComplete(w http.ResponseWriter, r *http.Request) {
 			StartedAt: startedAt,
 			Input:     inRaw,
 		}
+		// Atomically validate the active coding session and record the running
+		// trace under the session row lock so stale-session cleanup cannot close
+		// a session whose next model turn has already been admitted.
+		if err := a.Repo.SyncCodingSession(r.Context(), domain.CodingSyncBatch{
+			SessionID:      req.SessionID,
+			ConversationID: convID,
+			OwnerID:        a.OwnerID,
+			Traces:         []domain.Trace{t},
+		}); err != nil {
+			switch {
+			case errors.Is(err, domain.ErrSessionForbidden):
+				fail(w, 403, "forbidden", err.Error())
+			case errors.Is(err, domain.ErrSessionClosed):
+				fail(w, 409, "session_closed", err.Error())
+			case errors.Is(err, domain.ErrSessionConflict):
+				fail(w, 409, "conflict", err.Error())
+			default:
+				internal(w)
+			}
+			return
+		}
 		trace = &t
-		_ = a.Repo.SaveTrace(ctx, *trace)
 	}
+
+	ctx = domain.WithModelRole(domain.WithModelTurn(domain.WithModelSession(ctx, providerSessionID), turnID), domain.RoleCoding)
+	ctx = telemetry.WithFields(ctx, map[string]any{
+		"conversation_id": convID,
+		"session_id":      req.SessionID,
+		"turn_id":         turnID,
+		"trigger":         "coding",
+	})
+	ev := telemetry.Start(ctx, a.logger(), "llm.complete")
+	ctx = ev.Context()
+	ev.Set("step", req.Step)
+	ev.Set("model_requested", req.Model)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-store")

@@ -474,3 +474,84 @@ func TestFlushSyncRollsOverGenerationOnSessionClosed409(t *testing.T) {
 		t.Fatalf("unexpected sync retry paths: %+v", paths)
 	}
 }
+
+func TestRunTurnRecoversFromSessionClosed409OnCompleteStream(t *testing.T) {
+	var (
+		mu              sync.Mutex
+		created         []string
+		completeSessIDs []string
+		syncPaths       []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/coding/sessions":
+			var req struct {
+				SessionID string `json:"session_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			created = append(created, req.SessionID)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case r.URL.Path == "/api/v1/llm/complete":
+			var req serverclient.CompleteRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			completeSessIDs = append(completeSessIDs, req.SessionID)
+			mu.Unlock()
+			// Simulate server-side stale closure of g1 between user turns.
+			if req.SessionID == "sess-stale" {
+				w.WriteHeader(409)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "session_closed", "message": "Coding session is already closed"}})
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			raw, _ := json.Marshal(serverclient.StreamEvent{
+				Type:       "done",
+				Completion: &serverclient.Completion{Model: req.Model, Message: serverclient.Message{Role: "assistant", Content: "Recovered on g2"}},
+			})
+			fmt.Fprintf(w, "data: %s\n\n", raw)
+			flusher.Flush()
+		case strings.HasSuffix(r.URL.Path, "/sync"):
+			mu.Lock()
+			syncPaths = append(syncPaths, r.URL.Path)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	}))
+	defer srv.Close()
+
+	sess := &Session{
+		ID:               "sess-stale",
+		ServerSessionID:  "sess-stale",
+		Generation:       1,
+		RemoteRegistered: true,
+		CWD:              t.TempDir(),
+		Model:            "proxy/gpt-5.4",
+		Mode:             ModeDefault,
+		Client:           serverclient.New(srv.URL, "tok", 5*time.Second),
+		Store:            session.NewStore(t.TempDir()),
+		SyncInspector:    true,
+	}
+	stopReason, err := sess.RunTurn(context.Background(), "Continue work", nil, nil)
+	if err != nil || stopReason != "end_turn" {
+		t.Fatalf("RunTurn failed to recover from 409 session_closed: stop=%q err=%v", stopReason, err)
+	}
+	if sess.ServerSessionID != "sess-stale-g2" || sess.Generation != 2 || !sess.IsRemoteRegistered() {
+		t.Fatalf("expected rolled over generation -g2, got id=%q gen=%d reg=%v", sess.ServerSessionID, sess.Generation, sess.IsRemoteRegistered())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(completeSessIDs) != 2 || completeSessIDs[0] != "sess-stale" || completeSessIDs[1] != "sess-stale-g2" {
+		t.Fatalf("unexpected complete session sequence: %+v", completeSessIDs)
+	}
+	if len(created) != 1 || created[0] != "sess-stale-g2" {
+		t.Fatalf("expected lazy creation of g2 after rollover, got %+v", created)
+	}
+	if len(syncPaths) == 0 || syncPaths[len(syncPaths)-1] != "/api/v1/coding/sessions/sess-stale-g2/sync" {
+		t.Fatalf("expected sync to target g2, got %+v", syncPaths)
+	}
+}

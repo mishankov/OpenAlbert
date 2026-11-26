@@ -779,12 +779,20 @@ func (s *Server) buildSession(ctx context.Context, sessionID, cwd string, mcpCon
 		}
 	}
 
+	remoteRegistered := false
+	if existing != nil && !existing.Closed {
+		remoteRegistered = existing.RemoteRegistered || len(existing.Messages) > 0 || existing.TurnCounter > 0
+	}
+
 	var sess *agent.Session
 	remoteSkillReader := func(rctx context.Context, name string) (string, error) {
 		args, _ := json.Marshal(map[string]string{"name": name})
 		skillSessID := ""
 		if s.cfg.SyncInspector {
 			if sess != nil {
+				if err := sess.EnsureRemoteSession(rctx); err != nil {
+					s.logger.Warn("failed to create remote Inspector session", "session_id", sess.CurrentServerSessionID(), "error", err)
+				}
 				skillSessID = sess.CurrentServerSessionID()
 			} else {
 				skillSessID = serverSessionID
@@ -794,6 +802,18 @@ func (s *Server) buildSession(ctx context.Context, sessionID, cwd string, mcpCon
 			SessionID: skillSessID,
 			Arguments: args,
 		})
+		if err != nil && s.cfg.SyncInspector && sess != nil {
+			var apiErr *serverclient.APIError
+			if errors.As(err, &apiErr) && apiErr.Status == 409 && apiErr.Code == "session_closed" {
+				if recErr := sess.RecoverClosedSession(rctx); recErr != nil {
+					s.logger.Warn("failed to rollover closed Inspector session", "session_id", sess.CurrentServerSessionID(), "error", recErr)
+				}
+				res, err = s.client.ExecuteTool(rctx, "skill_read", serverclient.ToolRequest{
+					SessionID: sess.CurrentServerSessionID(),
+					Arguments: args,
+				})
+			}
+		}
 		if err != nil {
 			return "", err
 		}
@@ -819,6 +839,7 @@ func (s *Server) buildSession(ctx context.Context, sessionID, cwd string, mcpCon
 		ServerSessionID:     serverSessionID,
 		Generation:          generation,
 		Closed:              false,
+		RemoteRegistered:    remoteRegistered,
 		CWD:                 cwd,
 		Title:               title,
 		Model:               model,
@@ -840,38 +861,15 @@ func (s *Server) buildSession(ctx context.Context, sessionID, cwd string, mcpCon
 		SyncInspector:       s.cfg.SyncInspector,
 		MaxSteps:            s.cfg.MaxSteps,
 	}
-	// Persist locally BEFORE creating any remote Inspector session so a local
-	// persistence failure never strands an open remote session.
+	// Persist locally so ACP session/load and settings updates work immediately.
+	// Remote Inspector session registration is deferred until the first real
+	// prompt so unprompted probes and zero-LLM bridge ticks never create empty
+	// coding conversations on the server.
 	if err := sess.Save(); err != nil {
 		if sess.MCP != nil {
 			sess.MCP.Close()
 		}
 		return nil, fmt.Errorf("persist session %q: %w", sessionID, err)
-	}
-	if s.cfg.SyncInspector {
-		for attempt := 0; attempt < 5; attempt++ {
-			err := s.client.CreateCodingSession(ctx, serverSessionID, "coding:"+sessionID, title, cwd)
-			if err == nil {
-				break
-			}
-			// If the remote server already closed this generation (e.g. a previous
-			// close succeeded on the server but the response was lost), advance to
-			// a fresh generation under the same coding:<sessionID> conversation.
-			var apiErr *serverclient.APIError
-			if errors.As(err, &apiErr) && apiErr.Status == 409 && apiErr.Code == "session_closed" {
-				generation++
-				serverSessionID = fmt.Sprintf("%s-g%d", sessionID, generation)
-				sess.Generation = generation
-				sess.ServerSessionID = serverSessionID
-				for i := range sess.PendingSyncTraces {
-					sess.PendingSyncTraces[i].SessionID = serverSessionID
-				}
-				_ = sess.Save()
-				continue
-			}
-			s.logger.Warn("failed to create remote Inspector session", "session_id", serverSessionID, "error", err)
-			break
-		}
 	}
 	s.mu.Lock()
 	prev := s.sessions[sessionID]

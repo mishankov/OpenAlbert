@@ -298,14 +298,16 @@ func (c *Client) CompleteStream(ctx context.Context, payload CompleteRequest, on
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var apiErr struct {
 			Error struct {
+				Code    string `json:"code"`
 				Message string `json:"message"`
 			} `json:"error"`
 		}
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 16<<10)).Decode(&apiErr)
-		if apiErr.Error.Message != "" {
-			return Completion{}, fmt.Errorf("llm gateway error (%d): %s", resp.StatusCode, apiErr.Error.Message)
+		return Completion{}, &APIError{
+			Status:  resp.StatusCode,
+			Code:    apiErr.Error.Code,
+			Message: apiErr.Error.Message,
 		}
-		return Completion{}, fmt.Errorf("llm gateway returned HTTP %d", resp.StatusCode)
 	}
 
 	scanner := bufio.NewScanner(io.LimitReader(resp.Body, 64<<20))

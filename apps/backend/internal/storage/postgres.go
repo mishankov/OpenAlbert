@@ -483,6 +483,97 @@ func (s *Store) SyncCodingSession(ctx context.Context, batch domain.CodingSyncBa
 	}
 	return tx.Commit(ctx)
 }
+
+// CloseStaleCodingSessions closes active coding:* sessions whose latest known
+// activity (session creation, recorded message, or trace start/end) is strictly
+// older than cutoff. It locks candidate rows with FOR UPDATE SKIP LOCKED so it
+// never races with or blocks an in-flight SyncCodingSession, and never touches
+// non-coding conversations managed by SessionWorkflow.
+func (s *Store) CloseStaleCodingSessions(ctx context.Context, cutoff time.Time, limit int) ([]domain.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cutoff = cutoff.UTC()
+	maxClose := limitValue(limit)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `SELECT id, data FROM openalbert_sessions WHERE conversation_id LIKE 'coding:%' AND data->>'status'='active' ORDER BY seq FOR UPDATE SKIP LOCKED`)
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct {
+		id   string
+		sess domain.Session
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		sess, err := decode[domain.Session](raw)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, candidate{id: id, sess: sess})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	closed := []domain.Session{}
+	for _, cand := range candidates {
+		if len(closed) >= maxClose {
+			break
+		}
+		if cand.sess.Status != "active" || !strings.HasPrefix(cand.sess.ConversationID, "coding:") {
+			continue
+		}
+		lastActivity := cand.sess.CreatedAt.UTC()
+		if !lastActivity.IsZero() && !lastActivity.Before(cutoff) {
+			continue
+		}
+		var lastMsgAt *time.Time
+		if err := tx.QueryRow(ctx, `SELECT MAX(recorded_at) FROM openalbert_messages WHERE session_id=$1`, cand.id).Scan(&lastMsgAt); err != nil {
+			return nil, err
+		}
+		var lastTraceAt *time.Time
+		if err := tx.QueryRow(ctx, `SELECT MAX(GREATEST(started_at, COALESCE(openalbert_rfc3339_timestamptz(data->>'ended_at'), started_at))) FROM openalbert_traces WHERE session_id=$1`, cand.id).Scan(&lastTraceAt); err != nil {
+			return nil, err
+		}
+		if lastMsgAt != nil && lastMsgAt.UTC().After(lastActivity) {
+			lastActivity = lastMsgAt.UTC()
+		}
+		if lastTraceAt != nil && lastTraceAt.UTC().After(lastActivity) {
+			lastActivity = lastTraceAt.UTC()
+		}
+		if lastActivity.IsZero() || !lastActivity.Before(cutoff) {
+			continue
+		}
+		tag, err := tx.Exec(ctx, `UPDATE openalbert_sessions SET data=jsonb_set(data,'{status}','"closed"'::jsonb) WHERE id=$1 AND data->>'status'='active'`, cand.id)
+		if err != nil {
+			return nil, err
+		}
+		if tag.RowsAffected() > 0 {
+			cand.sess.Status = "closed"
+			closed = append(closed, cand.sess)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return closed, nil
+}
+
 func (s *Store) EndSession(ctx context.Context, id, summary string) error {
 	tag, err := s.pool.Exec(ctx, "UPDATE openalbert_sessions SET data=jsonb_set(jsonb_set(data,'{status}','\"closed\"'::jsonb),'{summary}',to_jsonb($2::text)) WHERE id=$1 AND (data->>'status'='active' OR (COALESCE(data->>'summary','')='' AND $2<>''))", id, summary)
 	if err != nil {

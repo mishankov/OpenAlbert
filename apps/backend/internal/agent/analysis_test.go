@@ -449,6 +449,16 @@ func TestAnalysisSkipsBackupEventsAndNoOpInitiatives(t *testing.T) {
 			session: domain.Session{ID: "init-noop", ConversationID: "personal:7", Trigger: "initiative"},
 			msgs:    []domain.Message{{Role: "assistant", Content: "Nothing to do"}},
 		},
+		{
+			name:    "empty-coding",
+			session: domain.Session{ID: "coding-empty", ConversationID: "coding:coding-empty", Trigger: "coding"},
+			msgs:    nil,
+		},
+		{
+			name:    "empty-personal",
+			session: domain.Session{ID: "personal-empty", ConversationID: "personal:7", Trigger: "message"},
+			msgs:    nil,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, repo, k, _ := fixture(t)

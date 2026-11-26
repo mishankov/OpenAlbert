@@ -372,7 +372,9 @@ return { skill: sk.name, mcp, mem, out: sh.stdout };
 		t.Fatalf("missing expected ACP updates: cmds=%v diff=%v msgChunk=%v", hasCmds, hasDiff, hasMsgChunk)
 	}
 
-	// 5. Reopen the closed session via session/load on a fresh server instance and verify generation -g2 is created under the same coding:<id> conversation.
+	// 5. Reopen the closed session via session/load on a fresh server instance:
+	// loading alone must NOT eagerly create generation -g2; the first real prompt
+	// lazily creates -g2 under the same coding:<id> conversation and closes it on exit.
 	c2r, c2w := io.Pipe()
 	s2r, s2w := io.Pipe()
 	srv2 := NewServer(cfg, c2r, s2w, nil)
@@ -380,6 +382,7 @@ return { skill: sk.name, mcp, mem, out: sh.stdout };
 	go func() { srv2Done <- srv2.Run(context.Background()) }()
 
 	loadDone := make(chan rpcEnvelope, 1)
+	prompt2Done := make(chan rpcEnvelope, 1)
 	var replayUpdates []string
 	var replayMu sync.Mutex
 	go func() {
@@ -396,6 +399,9 @@ return { skill: sk.name, mcp, mem, out: sh.stdout };
 				if string(env.ID) == `"load-1"` {
 					loadDone <- env
 				}
+				if string(env.ID) == `"prompt-2"` {
+					prompt2Done <- env
+				}
 			}
 		}
 	}()
@@ -409,6 +415,28 @@ return { skill: sk.name, mcp, mem, out: sh.stdout };
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for session/load")
 	}
+
+	wantGen2 := newOut.SessionID + "-g2|coding:" + newOut.SessionID
+	mu.Lock()
+	for _, s := range createdSessions {
+		if s == wantGen2 {
+			mu.Unlock()
+			t.Fatalf("session/load eagerly created generation %q before first real prompt", wantGen2)
+		}
+	}
+	mu.Unlock()
+
+	p2, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "prompt-2", "method": "session/prompt", "params": map[string]any{"sessionId": newOut.SessionID, "prompt": []map[string]any{{"type": "text", "text": "Follow-up after reload"}}}})
+	_, _ = c2w.Write(append(p2, '\n'))
+	select {
+	case resp := <-prompt2Done:
+		if resp.Error != nil || !strings.Contains(string(resp.Result), `"end_turn"`) {
+			t.Fatalf("prompt after session/load failed: %s %+v", resp.Result, resp.Error)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for prompt after session/load")
+	}
+
 	_ = c2w.Close()
 	if err := <-srv2Done; err != nil {
 		t.Fatalf("srv2 exited with error: %v", err)
@@ -423,8 +451,8 @@ return { skill: sk.name, mcp, mem, out: sh.stdout };
 
 	mu.Lock()
 	createdCopy := append([]string(nil), createdSessions...)
+	closedCopy := append([]string(nil), closedSessions...)
 	mu.Unlock()
-	wantGen2 := newOut.SessionID + "-g2|coding:" + newOut.SessionID
 	foundGen2 := false
 	for _, s := range createdCopy {
 		if s == wantGen2 {
@@ -432,7 +460,10 @@ return { skill: sk.name, mcp, mem, out: sh.stdout };
 		}
 	}
 	if !foundGen2 {
-		t.Fatalf("expected reopened session to create generation %q, got %+v", wantGen2, createdCopy)
+		t.Fatalf("expected reopened session prompt to create generation %q, got %+v", wantGen2, createdCopy)
+	}
+	if len(closedCopy) != 2 {
+		t.Fatalf("expected both g1 and g2 coding sessions to close on exit, got %+v", closedCopy)
 	}
 }
 
@@ -787,13 +818,24 @@ func TestCancelDuringReplacementWaitAndReconcileLostCloseAck(t *testing.T) {
 	cfg := config.Config{ServerURL: oaSrv.URL, Token: "tok", SyncInspector: true, StateDir: stateDir, MaxSteps: 5, RequestTimeout: 10 * time.Second}
 	srv := NewServer(cfg, c2sR, s2cW, nil)
 
-	// P1-6: load reconciles 409 session_closed to generation -g2 and persists it.
+	// P1-6: load does NOT eagerly create a remote session; lazy registration on the
+	// first real prompt reconciles 409 session_closed to generation -g2 and persists it.
 	_, sess, err := srv.handleSessionLoad(context.Background(), json.RawMessage(`{"sessionId":"lost-ack-1","cwd":`+fmt.Sprintf("%q", workspace)+`}`))
 	if err != nil {
 		t.Fatalf("handleSessionLoad failed: %v", err)
 	}
-	if sess.ServerSessionID != "lost-ack-1-g2" || sess.Generation != 2 {
-		t.Fatalf("expected reconciled generation -g2, got id=%q gen=%d", sess.ServerSessionID, sess.Generation)
+	mu.Lock()
+	if len(createdIDs) != 0 {
+		ids := append([]string(nil), createdIDs...)
+		mu.Unlock()
+		t.Fatalf("session/load must not eagerly create remote session, got %v", ids)
+	}
+	mu.Unlock()
+	if err := sess.EnsureRemoteSession(context.Background()); err != nil {
+		t.Fatalf("EnsureRemoteSession failed: %v", err)
+	}
+	if sess.ServerSessionID != "lost-ack-1-g2" || sess.Generation != 2 || !sess.IsRemoteRegistered() {
+		t.Fatalf("expected reconciled generation -g2, got id=%q gen=%d reg=%v", sess.ServerSessionID, sess.Generation, sess.IsRemoteRegistered())
 	}
 
 	// P1-3: cancel arriving while replacement prompt waits for previous prompt's cleanup cancels the replacement before RunTurn.
@@ -2008,5 +2050,243 @@ func TestServerRound11AssistantSaveErrorAndMidScriptChildSyncPersistence(t *test
 	_ = c2sW.Close()
 	if err := <-srvDone; err != nil {
 		t.Fatalf("server exit error: %v", err)
+	}
+}
+
+func TestLazyCodingSessionRegistrationSkipsUnpromptedAndBridgeTicks(t *testing.T) {
+	var (
+		mu          sync.Mutex
+		codingCalls []string
+	)
+	oaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/llm/models":
+			_ = json.NewEncoder(w).Encode(serverclient.ModelsResponse{
+				DefaultModel: "proxy/gpt-5.4",
+				Models:       []serverclient.CatalogModel{{ID: "proxy/gpt-5.4", Provider: "proxy", Model: "gpt-5.4", ContextWindowTokens: 128000, MaxOutputTokens: 8192, Default: true}},
+			})
+		case r.URL.Path == "/api/v1/agent/context":
+			_ = json.NewEncoder(w).Encode(serverclient.AgentContext{OwnerID: 42, Soul: "ok"})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/coding/sessions"):
+			mu.Lock()
+			codingCalls = append(codingCalls, r.Method+" "+r.URL.Path)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	}))
+	defer oaSrv.Close()
+
+	stateDir := t.TempDir()
+	workspace := t.TempDir()
+	cfg := config.Config{
+		ServerURL:        oaSrv.URL,
+		Token:            "tok",
+		SyncInspector:    true,
+		Bridge:           true,
+		BridgeTickPrompt: config.DefaultBridgeTickPrompt,
+		StateDir:         stateDir,
+		MaxSteps:         5,
+		RequestTimeout:   10 * time.Second,
+	}
+
+	runServer := func(fn func(call func(id, method string, params any) rpcEnvelope)) {
+		t.Helper()
+		c2sR, c2sW := io.Pipe()
+		s2cR, s2cW := io.Pipe()
+		srv := NewServer(cfg, c2sR, s2cW, nil)
+		done := make(chan error, 1)
+		go func() { done <- srv.Run(context.Background()) }()
+
+		var respMu sync.Mutex
+		resps := map[string]chan rpcEnvelope{}
+		go func() {
+			sc := bufio.NewScanner(s2cR)
+			sc.Buffer(make([]byte, 4096), 8<<20)
+			for sc.Scan() {
+				var env rpcEnvelope
+				if json.Unmarshal(sc.Bytes(), &env) == nil && len(env.ID) > 0 && env.Method == "" {
+					var key string
+					if json.Unmarshal(env.ID, &key) != nil {
+						key = string(env.ID)
+					}
+					respMu.Lock()
+					ch := resps[key]
+					delete(resps, key)
+					respMu.Unlock()
+					if ch != nil {
+						ch <- env
+					}
+				}
+			}
+		}()
+
+		call := func(id, method string, params any) rpcEnvelope {
+			ch := make(chan rpcEnvelope, 1)
+			respMu.Lock()
+			resps[id] = ch
+			respMu.Unlock()
+			raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+			_, _ = c2sW.Write(append(raw, '\n'))
+			select {
+			case r := <-ch:
+				if r.Error != nil {
+					t.Fatalf("RPC %s failed: %+v", method, r.Error)
+				}
+				return r
+			case <-time.After(10 * time.Second):
+				t.Fatalf("timeout waiting for %s", method)
+				return rpcEnvelope{}
+			}
+		}
+
+		fn(call)
+		_ = c2sW.Close()
+		if err := <-done; err != nil {
+			t.Fatalf("server exit error: %v", err)
+		}
+	}
+
+	// 1. Unprompted session/new + set_mode + exit must make 0 remote coding session calls.
+	var unpromptedID string
+	runServer(func(call func(id, method string, params any) rpcEnvelope) {
+		res := call("new-1", "session/new", map[string]any{"cwd": workspace})
+		var out struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(res.Result, &out)
+		unpromptedID = out.SessionID
+		call("mode-1", "session/set_mode", map[string]any{"sessionId": unpromptedID, "modeId": "plan"})
+	})
+
+	// 2. session/new + zero-LLM bridge tick + exit must make 0 remote coding session calls.
+	runServer(func(call func(id, method string, params any) rpcEnvelope) {
+		res := call("new-2", "session/new", map[string]any{"cwd": workspace})
+		var out struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(res.Result, &out)
+		tickRes := call("tick-1", "session/prompt", map[string]any{
+			"sessionId": out.SessionID,
+			"prompt":    []map[string]any{{"type": "text", "text": config.DefaultBridgeTickPrompt}},
+		})
+		if !strings.Contains(string(tickRes.Result), `"end_turn"`) {
+			t.Fatalf("unexpected bridge tick result: %s", tickRes.Result)
+		}
+	})
+
+	// 3. session/load of an unprompted session + exit must also make 0 remote coding session calls.
+	runServer(func(call func(id, method string, params any) rpcEnvelope) {
+		call("load-1", "session/load", map[string]any{"sessionId": unpromptedID, "cwd": workspace})
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(codingCalls) != 0 {
+		t.Fatalf("expected 0 remote coding session calls for unprompted/bridge-tick/reload-only sessions, got %+v", codingCalls)
+	}
+}
+
+func TestSlashSkillRecoversFromSessionClosed409(t *testing.T) {
+	var (
+		mu             sync.Mutex
+		skillReadSess  []string
+		completePrompt string
+		completeSess   string
+	)
+	oaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/llm/models":
+			_ = json.NewEncoder(w).Encode(serverclient.ModelsResponse{
+				DefaultModel: "proxy/gpt-5.4",
+				Models:       []serverclient.CatalogModel{{ID: "proxy/gpt-5.4", Provider: "proxy", Model: "gpt-5.4", ContextWindowTokens: 128000, MaxOutputTokens: 8192, Default: true}},
+			})
+		case r.URL.Path == "/api/v1/agent/context":
+			_ = json.NewEncoder(w).Encode(serverclient.AgentContext{
+				OwnerID: 42,
+				Soul:    "ok",
+				Skills:  []serverclient.ServerSkill{{Name: "deploy-check", Description: "Verify deployment"}},
+			})
+		case r.URL.Path == "/api/v1/agent/tools/skill_read":
+			var req serverclient.ToolRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			skillReadSess = append(skillReadSess, req.SessionID)
+			mu.Unlock()
+			if req.SessionID == "stale-skill-sess" {
+				w.WriteHeader(409)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "session_closed", "message": "Coding session is already closed"}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(serverclient.ToolResult{
+				Output: json.RawMessage(`{"content":"Always verify healthz before reporting ready."}`),
+			})
+		case r.URL.Path == "/api/v1/llm/complete":
+			var req serverclient.CompleteRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			completeSess = req.SessionID
+			if len(req.Messages) > 0 {
+				completePrompt = req.Messages[len(req.Messages)-1].Content
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			raw, _ := json.Marshal(serverclient.StreamEvent{
+				Type:       "done",
+				Completion: &serverclient.Completion{Model: req.Model, Message: serverclient.Message{Role: "assistant", Content: "Checked healthz."}},
+			})
+			fmt.Fprintf(w, "data: %s\n\n", raw)
+			flusher.Flush()
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	}))
+	defer oaSrv.Close()
+
+	stateDir := t.TempDir()
+	workspace := t.TempDir()
+	store := session.NewStore(stateDir)
+	if err := store.Save(session.Record{
+		ID:               "stale-skill-sess",
+		ServerSessionID:  "stale-skill-sess",
+		Generation:       1,
+		RemoteRegistered: true,
+		CWD:              workspace,
+		Title:            "workspace",
+		Model:            "proxy/gpt-5.4",
+		Mode:             "default",
+		TurnCounter:      1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	defer c2sW.Close()
+	go func() { _, _ = io.Copy(io.Discard, s2cR) }()
+
+	cfg := config.Config{ServerURL: oaSrv.URL, Token: "tok", SyncInspector: true, StateDir: stateDir, MaxSteps: 5, RequestTimeout: 10 * time.Second}
+	srv := NewServer(cfg, c2sR, s2cW, nil)
+	_, sess, err := srv.handleSessionLoad(context.Background(), json.RawMessage(`{"sessionId":"stale-skill-sess","cwd":`+fmt.Sprintf("%q", workspace)+`}`))
+	if err != nil {
+		t.Fatalf("handleSessionLoad failed: %v", err)
+	}
+	stopReason, err := sess.RunTurn(context.Background(), "/deploy-check api", nil, nil)
+	if err != nil || stopReason != "end_turn" {
+		t.Fatalf("RunTurn failed: stop=%q err=%v", stopReason, err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(skillReadSess) != 2 || skillReadSess[0] != "stale-skill-sess" || skillReadSess[1] != "stale-skill-sess-g2" {
+		t.Fatalf("expected skill_read rollover from g1 to g2, got %+v", skillReadSess)
+	}
+	if completeSess != "stale-skill-sess-g2" {
+		t.Fatalf("expected completion on g2, got %q", completeSess)
+	}
+	if !strings.Contains(completePrompt, "Always verify healthz before reporting ready.") {
+		t.Fatalf("expected expanded server skill instructions in completion prompt, got %q", completePrompt)
 	}
 }

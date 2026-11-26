@@ -31,6 +31,7 @@ type Runtime struct {
 	Client                      client.Client
 	TaskQueue                   string
 	IdleTimeout                 time.Duration
+	CodingSessionStaleTimeout   time.Duration
 	MaxSteps                    int
 	InitiativeInterval          time.Duration
 	MemoryConsolidationInterval time.Duration
@@ -38,7 +39,10 @@ type Runtime struct {
 	wg                          sync.WaitGroup
 	voice                       *voiceSynthesis
 	lastConsolidationCheck      time.Time
+	lastCodingReapCheck         time.Time
 }
+
+const codingSessionReapInterval = 5 * time.Minute
 
 func (r *Runtime) Worker() worker.Worker {
 	w := worker.New(r.Client, r.TaskQueue, worker.Options{MaxConcurrentActivityExecutionSize: 4, MaxConcurrentWorkflowTaskExecutionSize: 4, WorkerStopTimeout: 15 * time.Second})
@@ -295,6 +299,15 @@ func (r *Runtime) DispatchOnce(ctx context.Context) error {
 			}
 		}
 	}
+	if r.CodingSessionStaleTimeout > 0 {
+		now := time.Now().UTC()
+		if r.lastCodingReapCheck.IsZero() || now.Sub(r.lastCodingReapCheck) >= codingSessionReapInterval {
+			r.lastCodingReapCheck = now
+			if err := r.ReapStaleCodingSessions(ctx, now); err != nil {
+				r.record(ctx, "coding.sessions.reap", err)
+			}
+		}
+	}
 	sessions, err := r.Repo.PendingAnalysis(ctx, 50)
 	if err != nil {
 		return err
@@ -333,6 +346,32 @@ func (r *Runtime) DispatchOnce(ctx context.Context) error {
 	}
 	return nil
 }
+
+// ReapStaleCodingSessions closes orphaned active coding:* sessions that have
+// had no recorded activity for at least CodingSessionStaleTimeout so they can
+// flow into normal post-session analysis without affecting live sessions.
+func (r *Runtime) ReapStaleCodingSessions(ctx context.Context, now time.Time) error {
+	if r.CodingSessionStaleTimeout <= 0 || r.Repo == nil {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	cutoff := now.UTC().Add(-r.CodingSessionStaleTimeout)
+	closed, err := r.Repo.CloseStaleCodingSessions(ctx, cutoff, 50)
+	if err != nil {
+		return err
+	}
+	if len(closed) > 0 {
+		ev := telemetry.Start(ctx, r.Logger, "coding.sessions.reap")
+		ev.Set("closed_count", len(closed))
+		ev.Set("stale_timeout_seconds", int64(r.CodingSessionStaleTimeout.Seconds()))
+		ev.Set("cutoff", cutoff.Format(time.RFC3339))
+		ev.End(nil)
+	}
+	return nil
+}
+
 func (r *Runtime) deliver(ctx context.Context) {
 	for ctx.Err() == nil {
 		if err := r.DeliverOnce(ctx); err != nil {

@@ -359,3 +359,41 @@ func TestTelegramWorkspaceGroupSetting(t *testing.T) {
 		}
 	})
 }
+
+func TestCodingSessionStaleTimeoutSetting(t *testing.T) {
+	t.Run("defaults to conservative 24h", func(t *testing.T) {
+		env := validEnv(t)
+		cfg, err := load(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.CodingSessionStaleTimeout != 24*time.Hour {
+			t.Fatalf("got %v, want 24h", cfg.CodingSessionStaleTimeout)
+		}
+	})
+	t.Run("accepts 0 to disable and custom positive durations", func(t *testing.T) {
+		for _, tc := range []struct {
+			raw  string
+			want time.Duration
+		}{
+			{"0", 0},
+			{"12h", 12 * time.Hour},
+		} {
+			env := validEnv(t)
+			env["CODING_SESSION_STALE_TIMEOUT"] = tc.raw
+			cfg, err := load(func(k string) string { return env[k] })
+			if err != nil || cfg.CodingSessionStaleTimeout != tc.want {
+				t.Fatalf("raw=%q: got %v err=%v want %v", tc.raw, cfg.CodingSessionStaleTimeout, err, tc.want)
+			}
+		}
+	})
+	t.Run("rejects negative or invalid durations", func(t *testing.T) {
+		for _, raw := range []string{"-1h", "not-a-duration"} {
+			env := validEnv(t)
+			env["CODING_SESSION_STALE_TIMEOUT"] = raw
+			if _, err := load(func(k string) string { return env[k] }); err == nil {
+				t.Fatalf("raw=%q should fail", raw)
+			}
+		}
+	})
+}

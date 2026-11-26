@@ -363,6 +363,7 @@ type Repository interface {
 	Session(context.Context, string) (Session, bool, error)
 	StartSession(context.Context, Session) error
 	SyncCodingSession(context.Context, CodingSyncBatch) error
+	CloseStaleCodingSessions(context.Context, time.Time, int) ([]Session, error)
 	EndSession(context.Context, string, string) error
 	PendingAnalysis(context.Context, int) ([]Session, error)
 	ActiveSessions(context.Context) ([]Session, error)

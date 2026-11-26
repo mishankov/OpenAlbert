@@ -60,6 +60,7 @@ type Session struct {
 	ServerSessionID     string
 	Generation          int
 	Closed              bool
+	RemoteRegistered    bool
 	CWD                 string
 	Title               string
 	Model               string
@@ -89,6 +90,12 @@ func (s *Session) CurrentServerSessionID() string {
 	return s.serverSessionID()
 }
 
+func (s *Session) IsRemoteRegistered() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.RemoteRegistered
+}
+
 func (s *Session) serverSessionID() string {
 	if s.ServerSessionID != "" {
 		return s.ServerSessionID
@@ -100,15 +107,95 @@ func (s *Session) conversationID() string {
 	return "coding:" + s.ID
 }
 
+func (s *Session) rolloverGenerationLocked() {
+	if s.Generation <= 0 {
+		s.Generation = 1
+	}
+	s.Generation++
+	s.ServerSessionID = fmt.Sprintf("%s-g%d", s.ID, s.Generation)
+	s.Closed = false
+	s.RemoteRegistered = false
+	for i := range s.PendingSyncTraces {
+		s.PendingSyncTraces[i].SessionID = s.ServerSessionID
+	}
+	_ = s.saveLocked()
+}
+
+// EnsureRemoteSession lazily registers the active coding session generation in
+// OpenAlbert Inspector on the first real prompt, rolling over to a fresh
+// generation if the server already closed the previous one.
+func (s *Session) EnsureRemoteSession(ctx context.Context) error {
+	if !s.SyncInspector || s.Client == nil {
+		return nil
+	}
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	s.mu.Lock()
+	if s.RemoteRegistered {
+		s.mu.Unlock()
+		return nil
+	}
+	serverSessID := s.serverSessionID()
+	convID := s.conversationID()
+	title := s.Title
+	cwd := s.CWD
+	s.mu.Unlock()
+	if serverSessID == "" {
+		return nil
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		err := s.Client.CreateCodingSession(ctx, serverSessID, convID, title, cwd)
+		if err == nil {
+			s.mu.Lock()
+			s.RemoteRegistered = true
+			s.Closed = false
+			_ = s.saveLocked()
+			s.mu.Unlock()
+			return nil
+		}
+		var apiErr *serverclient.APIError
+		if errors.As(err, &apiErr) && apiErr.Status == 409 && apiErr.Code == "session_closed" {
+			s.mu.Lock()
+			s.rolloverGenerationLocked()
+			serverSessID = s.serverSessionID()
+			s.mu.Unlock()
+			lastErr = err
+			continue
+		}
+		return err
+	}
+	return lastErr
+}
+
+// RecoverClosedSession rolls over to a fresh coding session generation and
+// lazily registers it on the server after a 409 session_closed response.
+func (s *Session) RecoverClosedSession(ctx context.Context) error {
+	s.syncMu.Lock()
+	s.mu.Lock()
+	s.rolloverGenerationLocked()
+	s.mu.Unlock()
+	s.syncMu.Unlock()
+	return s.EnsureRemoteSession(ctx)
+}
+
 // Close releases MCP child processes, drains any pending Inspector sync records,
-// and closes the remote server session ONLY after all pending batches are
+// and closes the remote server session ONLY when the session was actually
+// registered (or has pending records to flush) and all pending batches are
 // acknowledged so OpenAlbert's post-session analysis never runs on an incomplete
-// generation.
+// or empty generation.
 func (s *Session) Close(ctx context.Context) {
 	if s.MCP != nil {
 		s.MCP.Close()
 	}
-	if s.SyncInspector && s.Client != nil && s.serverSessionID() != "" {
+	if s.SyncInspector && s.Client != nil && s.CurrentServerSessionID() != "" {
+		s.mu.Lock()
+		shouldSync := s.RemoteRegistered || len(s.PendingSyncMessages) > 0 || len(s.PendingSyncTraces) > 0
+		s.mu.Unlock()
+		if !shouldSync {
+			return
+		}
 		closeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		if err := s.FlushSync(closeCtx); err != nil {
@@ -116,13 +203,16 @@ func (s *Session) Close(ctx context.Context) {
 		}
 		s.mu.Lock()
 		remaining := len(s.PendingSyncMessages) + len(s.PendingSyncTraces)
+		registered := s.RemoteRegistered
+		serverSessID := s.serverSessionID()
 		s.mu.Unlock()
-		if remaining > 0 {
+		if remaining > 0 || !registered {
 			return
 		}
-		if err := s.Client.CloseCodingSession(closeCtx, s.serverSessionID()); err == nil {
+		if err := s.Client.CloseCodingSession(closeCtx, serverSessID); err == nil {
 			s.mu.Lock()
 			s.Closed = true
+			s.RemoteRegistered = false
 			s.saveLocked()
 			s.mu.Unlock()
 		}
@@ -235,6 +325,7 @@ func (s *Session) saveLocked() error {
 		ServerSessionID:     s.serverSessionID(),
 		Generation:          s.Generation,
 		Closed:              s.Closed,
+		RemoteRegistered:    s.RemoteRegistered,
 		CWD:                 s.CWD,
 		Title:               s.Title,
 		Model:               s.Model,
@@ -582,22 +673,15 @@ func (s *Session) FlushSync(ctx context.Context) error {
 			var apiErr *serverclient.APIError
 			if errors.As(err, &apiErr) && apiErr.Status == 409 && apiErr.Code == "session_closed" {
 				s.mu.Lock()
-				if s.Generation <= 0 {
-					s.Generation = 1
-				}
-				s.Generation++
-				s.ServerSessionID = fmt.Sprintf("%s-g%d", s.ID, s.Generation)
-				s.Closed = false
-				for i := range s.PendingSyncTraces {
-					s.PendingSyncTraces[i].SessionID = s.ServerSessionID
-				}
-				s.saveLocked()
+				s.rolloverGenerationLocked()
 				s.mu.Unlock()
 				continue
 			}
 			return err
 		}
 		s.mu.Lock()
+		s.RemoteRegistered = true
+		s.Closed = false
 		if len(msgs) <= len(s.PendingSyncMessages) {
 			s.PendingSyncMessages = append([]serverclient.SyncMessage(nil), s.PendingSyncMessages[len(msgs):]...)
 		}
@@ -927,6 +1011,12 @@ func (s *Session) RunTurn(ctx context.Context, userText string, images []string,
 		cb.UserAccepted()
 	}
 
+	// Lazily register the remote Inspector coding session on the first real turn.
+	// Best-effort: if the server is temporarily unreachable, FlushSync will retry.
+	if s.SyncInspector && s.Client != nil {
+		_ = s.EnsureRemoteSession(ctx)
+	}
+
 	defer func() {
 		if !s.SyncInspector || s.Client == nil {
 			return
@@ -943,51 +1033,67 @@ func (s *Session) RunTurn(ctx context.Context, userText string, images []string,
 		if ctx.Err() != nil {
 			return "cancelled", nil
 		}
-		s.mu.Lock()
-		reqMessages, boundErr := BoundHistoryForGateway(s.buildSystemPrompt(), s.Messages, maxGatewayBytes)
-		curModel := s.Model
-		if curModel == "" {
-			curModel = modelID
-		}
-		curEffort := s.ReasoningEffort
-		serverSessID := ""
-		convID := ""
-		correlationID := "ephemeral-" + s.ID
-		if s.SyncInspector {
-			serverSessID = s.serverSessionID()
-			convID = s.conversationID()
-			correlationID = ""
-		}
-		s.mu.Unlock()
-		if boundErr != nil {
-			return "", boundErr
-		}
+		var (
+			emittedThought, emittedText strings.Builder
+			comp                        serverclient.Completion
+			callErr                     error
+		)
+		for completeAttempt := 0; completeAttempt < 2; completeAttempt++ {
+			s.mu.Lock()
+			reqMessages, boundErr := BoundHistoryForGateway(s.buildSystemPrompt(), s.Messages, maxGatewayBytes)
+			curModel := s.Model
+			if curModel == "" {
+				curModel = modelID
+			}
+			curEffort := s.ReasoningEffort
+			serverSessID := ""
+			convID := ""
+			correlationID := "ephemeral-" + s.ID
+			if s.SyncInspector {
+				serverSessID = s.serverSessionID()
+				convID = s.conversationID()
+				correlationID = ""
+			}
+			s.mu.Unlock()
+			if boundErr != nil {
+				return "", boundErr
+			}
 
-		var emittedThought, emittedText strings.Builder
-		comp, callErr := s.Client.CompleteStream(ctx, serverclient.CompleteRequest{
-			Model:          curModel,
-			Options:        serverclient.ModelOptions{ReasoningEffort: curEffort},
-			SessionID:      serverSessID,
-			CorrelationID:  correlationID,
-			ConversationID: convID,
-			TurnID:         turnID,
-			Step:           step,
-			Messages:       reqMessages,
-			Tools:          modelTools,
-		}, func(ev serverclient.StreamEvent) error {
-			if cb == nil {
+			emittedThought.Reset()
+			emittedText.Reset()
+			comp, callErr = s.Client.CompleteStream(ctx, serverclient.CompleteRequest{
+				Model:          curModel,
+				Options:        serverclient.ModelOptions{ReasoningEffort: curEffort},
+				SessionID:      serverSessID,
+				CorrelationID:  correlationID,
+				ConversationID: convID,
+				TurnID:         turnID,
+				Step:           step,
+				Messages:       reqMessages,
+				Tools:          modelTools,
+			}, func(ev serverclient.StreamEvent) error {
+				if cb == nil {
+					return nil
+				}
+				switch ev.Type {
+				case "reasoning_delta":
+					emittedThought.WriteString(ev.Delta)
+					cb.SendThought(ev.Delta)
+				case "text_delta":
+					emittedText.WriteString(ev.Delta)
+					cb.SendMessage(ev.Delta)
+				}
 				return nil
+			})
+			if callErr != nil && completeAttempt == 0 && s.SyncInspector && emittedThought.Len() == 0 && emittedText.Len() == 0 {
+				var apiErr *serverclient.APIError
+				if errors.As(callErr, &apiErr) && apiErr.Status == 409 && apiErr.Code == "session_closed" {
+					_ = s.RecoverClosedSession(ctx)
+					continue
+				}
 			}
-			switch ev.Type {
-			case "reasoning_delta":
-				emittedThought.WriteString(ev.Delta)
-				cb.SendThought(ev.Delta)
-			case "text_delta":
-				emittedText.WriteString(ev.Delta)
-				cb.SendMessage(ev.Delta)
-			}
-			return nil
-		})
+			break
+		}
 		if callErr != nil {
 			if ctx.Err() != nil || errors.Is(callErr, context.Canceled) {
 				return "cancelled", nil

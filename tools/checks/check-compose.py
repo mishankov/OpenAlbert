@@ -192,6 +192,8 @@ def main():
     assert plan["services"]["openalbert"]["environment"]["LLM_API_KEY"] == ""
     disabled_consolidation = check_pair({"MEMORY_CONSOLIDATION_INTERVAL": "0"})
     assert disabled_consolidation["services"]["openalbert"]["environment"]["MEMORY_CONSOLIDATION_INTERVAL"] == "0"
+    disabled_coding_reap = check_pair({"CODING_SESSION_STALE_TIMEOUT": "0"})
+    assert disabled_coding_reap["services"]["openalbert"]["environment"]["CODING_SESSION_STALE_TIMEOUT"] == "0"
     exa_env = {
         "WEB_SEARCH_PROVIDER": "exa",
         "EXA_API_KEY": "exa-test-only",
