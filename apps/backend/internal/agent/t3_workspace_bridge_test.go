@@ -411,7 +411,7 @@ func TestT3WorkspaceBridgeWaitingInputCallbackAndPRSyncCallback(t *testing.T) {
 					if btn.URL != "" {
 						prButtonURL = btn.URL
 					}
-					if strings.Contains(btn.Text, "Sync") {
+					if strings.Contains(btn.Text, "Обновить") {
 						if len(btn.CallbackData) == 0 || len(btn.CallbackData) > 64 {
 							t.Fatalf("sync callback_data violates 64-byte limit: %q", btn.CallbackData)
 						}

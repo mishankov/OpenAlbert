@@ -1600,22 +1600,24 @@ func normalizePendingRequest(pendingID string, raw json.RawMessage) json.RawMess
 }
 
 type threadReadSnapshot struct {
-	ThreadID            string
-	ProjectID           string
-	Title               string
-	Link                string
-	Status              string
-	LatestRunID         string
-	LatestRunStatus     string
-	ProviderInstanceID  string
-	Model               string
-	Branch              string
-	PRURL               string
-	Summary             string
-	Error               string
-	Output              json.RawMessage
-	ItemCount           int
-	PendingRequestCount int
+	ThreadID                    string
+	ProjectID                   string
+	Title                       string
+	Link                        string
+	Status                      string
+	LatestRunID                 string
+	LatestRunStatus             string
+	ProviderInstanceID          string
+	Model                       string
+	Branch                      string
+	PRURL                       string
+	Summary                     string
+	Error                       string
+	Output                      json.RawMessage
+	ItemCount                   int
+	PendingRequestCount         int
+	PendingBackgroundTasksCount int
+	BlockedOnThreadWait         bool
 }
 
 func parseThreadReadSnapshot(raw json.RawMessage, fallbackThreadID string) threadReadSnapshot {
@@ -1637,9 +1639,11 @@ func parseThreadReadSnapshot(raw json.RawMessage, fallbackThreadID string) threa
 			PullRequests []struct {
 				URL string `json:"url"`
 			} `json:"pullRequests"`
-			ItemCount           int    `json:"itemCount"`
-			PendingRequestCount int    `json:"pendingRequestCount"`
-			Error               string `json:"error"`
+			ItemCount              int               `json:"itemCount"`
+			PendingRequestCount    int               `json:"pendingRequestCount"`
+			PendingBackgroundTasks []json.RawMessage `json:"pendingBackgroundTasks"`
+			BlockedOnThreadWait    bool              `json:"blockedOnThreadWait"`
+			Error                  string            `json:"error"`
 		} `json:"thread"`
 		RecentRuns []struct {
 			RunID  string          `json:"runId"`
@@ -1685,6 +1689,8 @@ func parseThreadReadSnapshot(raw json.RawMessage, fallbackThreadID string) threa
 		snap.Branch = resp.Thread.Branch
 		snap.ItemCount = resp.Thread.ItemCount
 		snap.PendingRequestCount = resp.Thread.PendingRequestCount
+		snap.PendingBackgroundTasksCount = len(resp.Thread.PendingBackgroundTasks)
+		snap.BlockedOnThreadWait = resp.Thread.BlockedOnThreadWait
 		snap.Error = firstNonEmpty(resp.Thread.Error, snap.Error)
 		if resp.Thread.LinkedPullRequest != nil && resp.Thread.LinkedPullRequest.URL != "" {
 			snap.PRURL = resp.Thread.LinkedPullRequest.URL
