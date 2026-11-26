@@ -1339,6 +1339,12 @@ func formatWakeMessage(event domain.T3Event) string {
 	if hasJSONValue(event.Output) {
 		fmt.Fprintf(&b, "output: %s\n", clipText(strings.TrimSpace(string(event.Output)), 4000))
 	}
+	switch event.Kind {
+	case domain.T3EventThreadCompleted, domain.T3EventThreadFailed:
+		b.WriteString("action: Always send a concise status update to the owner in this topic (do not stay silent). If this completes a step in a requested multi-step chain, also proceed to the next step.\n")
+	case domain.T3EventThreadWaitingInput:
+		b.WriteString("action: Forward the worker's pending question clearly to the owner in this topic so they can answer.\n")
+	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
 

@@ -28,7 +28,9 @@ const (
 	defaultReconnectMaxDelay  = 30 * time.Second
 	commandDedupTTL           = 5 * time.Minute
 	commandTimeout            = 60 * time.Second
-	maxSummaryRunes           = 2000
+	maxSummaryRunes           = 4000
+	defaultReadMaxChars       = 20000
+	defaultPollMaxChars       = 4000
 )
 
 type trackedThread struct {
@@ -1272,9 +1274,10 @@ func (b *Bridge) handleThreadSend(ctx context.Context, mgr *mcpclient.Manager, c
 
 func (b *Bridge) handleThreadRead(ctx context.Context, mgr *mcpclient.Manager, payload json.RawMessage) (json.RawMessage, error) {
 	var req struct {
-		ThreadID string `json:"thread_id"`
-		View     string `json:"view"`
-		Limit    int    `json:"limit"`
+		ThreadID        string `json:"thread_id"`
+		View            string `json:"view"`
+		Limit           int    `json:"limit"`
+		MaxCharsPerItem int    `json:"max_chars_per_item"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, fmt.Errorf("invalid thread_read payload: %w", err)
@@ -1283,8 +1286,16 @@ func (b *Bridge) handleThreadRead(ctx context.Context, mgr *mcpclient.Manager, p
 	if req.ThreadID == "" {
 		return nil, errors.New("thread_read requires thread_id")
 	}
+	maxChars := req.MaxCharsPerItem
+	if maxChars <= 0 {
+		maxChars = defaultReadMaxChars
+	}
+	if maxChars > defaultReadMaxChars {
+		maxChars = defaultReadMaxChars
+	}
 	args := map[string]any{
-		"threadId": req.ThreadID,
+		"threadId":        req.ThreadID,
+		"maxCharsPerItem": maxChars,
 	}
 	if req.View != "" {
 		args["view"] = req.View
@@ -1515,9 +1526,10 @@ func (b *Bridge) pollSingleThread(ctx context.Context, mgr *mcpclient.Manager, t
 	defer unlockPoll()
 
 	readRaw, err := mgr.CallRemote(ctx, "t3_thread_read", map[string]any{
-		"threadId": threadID,
-		"view":     "messages",
-		"limit":    10,
+		"threadId":        threadID,
+		"view":            "messages",
+		"limit":           10,
+		"maxCharsPerItem": defaultPollMaxChars,
 	})
 	if err != nil {
 		return serverclient.T3ThreadEvent{}, err

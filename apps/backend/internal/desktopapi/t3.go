@@ -75,7 +75,7 @@ func (a *API) activeT3ThreadIDsForHost(ctx context.Context, envID string) []stri
 	}
 	for _, th := range threads {
 		switch strings.ToLower(strings.TrimSpace(th.Status)) {
-		case "", "running", "starting", "queued", "waiting_input":
+		case "", "running", "starting", "preparing", "queued", "waiting", "waiting_input":
 			if tid := strings.TrimSpace(th.ThreadID); tid != "" {
 				ids = append(ids, tid)
 			}
