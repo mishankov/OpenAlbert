@@ -371,6 +371,15 @@ func TestT3ThreadLaunchAutoCreatesTopicFromWorkspaceControlAndPreservesCatalog(t
 		t.Fatalf("expected existing projects/providers catalog to be preserved, got projects=%d providers=%d", len(updated.Projects), len(updated.Providers))
 	}
 
+	wsBridge := NewT3WorkspaceBridge(T3WorkspaceBridgeConfig{
+		ControlPlane:     cp,
+		Repo:             repo,
+		Transport:        transport,
+		OwnerUserID:      7,
+		WorkspaceGroupID: -100555,
+	})
+	cp.AddObserver(wsBridge)
+
 	act := &Activities{
 		Repo:             repo,
 		Workspace:        transport,
@@ -385,7 +394,44 @@ func TestT3ThreadLaunchAutoCreatesTopicFromWorkspaceControlAndPreservesCatalog(t
 		OwnerID:  7,
 	}
 
-	// Simulate fast bridge completing the command in background.
+	// 1. Failed launch from #Control must NOT create an orphaned Telegram forum topic.
+	go func() {
+		for range 50 {
+			cmds, _ := cp.ClaimPendingCommands(ctx, "env-mac", 10)
+			if len(cmds) > 0 {
+				_ = cp.RecordCommandResult(ctx, cmds[0].ID, t3.CommandResultRequest{
+					EnvironmentID: "env-mac",
+					OK:            false,
+					Error:         `Base ref "origin/main" does not resolve`,
+				})
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	if _, err := act.executeT3(ctx, ToolInput{
+		Conversation: controlConv,
+		RunKey:       "run-auto-topic",
+		Step:         1,
+		Call: domain.ToolCall{
+			ID:   "c-auto-fail",
+			Name: "t3_thread_launch",
+			Arguments: json.RawMessage(`{
+				"host_id": "env-mac",
+				"project_id": "p1",
+				"title": "Polka #64",
+				"message": "Fix bug",
+				"model_selection": {"provider_instance_id": "antigravity", "model_id": "gemini-4-neon"}
+			}`),
+		},
+	}); err == nil {
+		t.Fatalf("expected failed t3_thread_launch to return error")
+	}
+	if len(transport.createdTopics) != 0 {
+		t.Fatalf("failed t3_thread_launch must not create a forum topic, got %+v", transport.createdTopics)
+	}
+
+	// 2. Succeeded retry creates strictly one forum topic, rebinds the thread, and posts the launch card.
 	go func() {
 		for range 50 {
 			cmds, _ := cp.ClaimPendingCommands(ctx, "env-mac", 10)
@@ -401,12 +447,12 @@ func TestT3ThreadLaunchAutoCreatesTopicFromWorkspaceControlAndPreservesCatalog(t
 		}
 	}()
 
-	_, err = act.executeT3(ctx, ToolInput{
+	resAny, err := act.executeT3(ctx, ToolInput{
 		Conversation: controlConv,
 		RunKey:       "run-auto-topic",
-		Step:         1,
+		Step:         2,
 		Call: domain.ToolCall{
-			ID:   "c-auto",
+			ID:   "c-auto-ok",
 			Name: "t3_thread_launch",
 			Arguments: json.RawMessage(`{
 				"host_id": "env-mac",
@@ -421,7 +467,10 @@ func TestT3ThreadLaunchAutoCreatesTopicFromWorkspaceControlAndPreservesCatalog(t
 		t.Fatalf("executeT3 t3_thread_launch: %v", err)
 	}
 	if len(transport.createdTopics) != 1 || transport.createdTopics[0].ThreadID != 51 {
-		t.Fatalf("expected auto-created forum topic 51, got %+v", transport.createdTopics)
+		t.Fatalf("expected strictly one auto-created forum topic 51, got %+v", transport.createdTopics)
+	}
+	if res, ok := resAny.(t3.DispatchResult); !ok || res.Thread == nil || res.Thread.ConversationID != "telegram:group:-100555:topic:51" {
+		t.Fatalf("expected dispatch result thread bound to topic 51, got %+v", resAny)
 	}
 	th, err := cp.Thread(ctx, "th-auto-1")
 	if err != nil {

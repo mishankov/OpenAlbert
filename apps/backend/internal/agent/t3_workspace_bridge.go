@@ -210,7 +210,21 @@ func (b *T3WorkspaceBridge) OnThreadEventHandled(ctx context.Context, event doma
 	}
 
 	if current {
-		if threadID, ok := b.workspaceTopicThreadID(event.ConversationID); ok {
+		threadID, ok := b.workspaceTopicThreadID(event.ConversationID)
+		createdNow := false
+		if !ok && b.isWorkspaceControlConversation(event.ConversationID) && strings.TrimSpace(event.ThreadID) != "" {
+			prefix := statusPrefixForEvent(event)
+			newConvID, newTopicID, newlyCreated, createErr := b.ensureWorkspaceTopicForControlThread(ctx, event, prefix)
+			if createErr != nil {
+				errs = append(errs, createErr)
+			} else if newTopicID > 0 {
+				event.ConversationID = newConvID
+				threadID = newTopicID
+				ok = true
+				createdNow = newlyCreated
+			}
+		}
+		if ok {
 			prefix := statusPrefixForEvent(event)
 			recreated := false
 			recreateOnce := func() bool {
@@ -228,7 +242,7 @@ func (b *T3WorkspaceBridge) OnThreadEventHandled(ctx context.Context, event doma
 				return true
 			}
 
-			if prefix != "" {
+			if prefix != "" && !createdNow {
 				stillCurrent, err := b.syncTopicTitleForEvent(ctx, event, threadID, prefix)
 				if err != nil && isThreadMissingError(err) && recreateOnce() {
 					err = nil
@@ -338,6 +352,74 @@ func (b *T3WorkspaceBridge) workspaceTopicThreadID(conversationID string) (int, 
 		return 0, false
 	}
 	return id, true
+}
+
+func (b *T3WorkspaceBridge) isWorkspaceControlConversation(conversationID string) bool {
+	if b.workspaceGroupID >= 0 {
+		return false
+	}
+	return conversationID == fmt.Sprintf("telegram:group:%d:topic:0", b.workspaceGroupID)
+}
+
+// ensureWorkspaceTopicForControlThread creates a dedicated Telegram forum topic
+// for a thread that was launched from the workspace #Control (topic:0) topic,
+// only after the launch actually succeeded. Guarded by b.topicMu so concurrent
+// events for the same thread never create duplicate topics.
+func (b *T3WorkspaceBridge) ensureWorkspaceTopicForControlThread(ctx context.Context, event domain.T3Event, prefix string) (string, int, bool, error) {
+	b.topicMu.Lock()
+	defer b.topicMu.Unlock()
+
+	baseTitle := stripT3StatusPrefix(event.Title)
+	if b.cp != nil && event.ThreadID != "" {
+		if th, err := b.cp.Thread(ctx, event.ThreadID); err == nil {
+			if existingTopicID, ok := b.workspaceTopicThreadID(th.ConversationID); ok {
+				return th.ConversationID, existingTopicID, false, nil
+			}
+			if baseTitle == "" {
+				baseTitle = stripT3StatusPrefix(th.Title)
+			}
+		}
+	}
+	if baseTitle == "" {
+		baseTitle = "Задача"
+	}
+	if prefix == "" {
+		prefix = "🔄"
+	}
+	desiredTitle, err := formatTopicTitle(prefix, baseTitle)
+	if err != nil {
+		desiredTitle = "🔄 Задача"
+	}
+
+	topic, err := b.transport.CreateForumTopic(ctx, b.workspaceGroupID, desiredTitle, 0)
+	if err != nil {
+		return "", 0, false, err
+	}
+	name := strings.TrimSpace(topic.Name)
+	if name == "" {
+		name = desiredTitle
+	}
+	newConvID := fmt.Sprintf("telegram:group:%d:topic:%d", b.workspaceGroupID, topic.ThreadID)
+	if b.repo != nil {
+		conv := domain.Conversation{
+			ID:       newConvID,
+			Title:    name,
+			ChatID:   b.workspaceGroupID,
+			ThreadID: topic.ThreadID,
+			OwnerID:  b.ownerUserID,
+			Private:  false,
+		}
+		if err := b.repo.SaveConversation(ctx, conv); err != nil {
+			return "", 0, false, err
+		}
+	}
+	if b.cp != nil && event.ThreadID != "" {
+		if _, err := b.cp.RebindThreadConversation(ctx, event.ThreadID, newConvID); err != nil {
+			return "", 0, false, err
+		}
+	}
+	b.lastTopicTitle[topic.ThreadID] = name
+	return newConvID, topic.ThreadID, true, nil
 }
 
 func statusPrefixForEvent(event domain.T3Event) string {
