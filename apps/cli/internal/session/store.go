@@ -18,6 +18,7 @@ type Record struct {
 	ServerSessionID     string                     `json:"server_session_id,omitempty"`
 	Generation          int                        `json:"generation,omitempty"`
 	Closed              bool                       `json:"closed,omitempty"`
+	RemoteRegistered    bool                       `json:"remote_registered,omitempty"`
 	CWD                 string                     `json:"cwd"`
 	Title               string                     `json:"title"`
 	Model               string                     `json:"model"`

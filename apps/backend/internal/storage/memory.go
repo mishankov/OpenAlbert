@@ -26,6 +26,7 @@ type Memory struct {
 	sessionOrder       []string
 	analyzed           map[string]bool
 	messages           map[string][]domain.Message
+	messageRecordedAt  map[string]time.Time
 	messageKeys        map[string]bool
 	history            []domain.HistoryMessage
 	tasks              map[string]domain.Task
@@ -46,7 +47,7 @@ var _ domain.Repository = (*Memory)(nil)
 func NewMemory() *Memory {
 	return &Memory{
 		transcriptions: map[string]transcriptionLease{},
-		conversations:  map[string]domain.Conversation{}, incoming: map[string]domain.Incoming{}, handled: map[string]bool{}, sessions: map[string]domain.Session{}, analyzed: map[string]bool{}, messages: map[string][]domain.Message{}, messageKeys: map[string]bool{}, tasks: map[string]domain.Task{}, outgoing: map[string]domain.Outgoing{}, artifacts: map[string]domain.Artifact{}, checkpoints: map[string]json.RawMessage{}, traces: map[string]domain.Trace{}, progress: map[string]domain.Progress{}, consolidations: map[string]domain.MemoryConsolidationReport{},
+		conversations:  map[string]domain.Conversation{}, incoming: map[string]domain.Incoming{}, handled: map[string]bool{}, sessions: map[string]domain.Session{}, analyzed: map[string]bool{}, messages: map[string][]domain.Message{}, messageRecordedAt: map[string]time.Time{}, messageKeys: map[string]bool{}, tasks: map[string]domain.Task{}, outgoing: map[string]domain.Outgoing{}, artifacts: map[string]domain.Artifact{}, checkpoints: map[string]json.RawMessage{}, traces: map[string]domain.Trace{}, progress: map[string]domain.Progress{}, consolidations: map[string]domain.MemoryConsolidationReport{},
 	}
 }
 func (m *Memory) Close()                         {}
@@ -276,11 +277,15 @@ func (m *Memory) SyncCodingSession(ctx context.Context, batch domain.CodingSyncB
 		m.conversations[batch.ConversationID] = conv
 	}
 	se := m.sessions[batch.SessionID]
+	now := time.Now().UTC()
 	for _, item := range batch.Messages {
 		k := taskKey(batch.SessionID, item.Key)
 		if !m.messageKeys[k] {
 			m.messageKeys[k] = true
 			m.messages[batch.SessionID] = append(m.messages[batch.SessionID], clone(item.Message))
+			if now.After(m.messageRecordedAt[batch.SessionID]) {
+				m.messageRecordedAt[batch.SessionID] = now
+			}
 			m.history = append(m.history, domain.HistoryMessage{
 				Seq:              int64(len(m.history) + 1),
 				ConversationID:   se.ConversationID,
@@ -300,6 +305,48 @@ func (m *Memory) SyncCodingSession(ctx context.Context, batch domain.CodingSyncB
 		m.checkpoints[batch.CheckpointKey] = append(json.RawMessage(nil), batch.CheckpointPayload...)
 	}
 	return nil
+}
+
+func (m *Memory) CloseStaleCodingSessions(ctx context.Context, cutoff time.Time, limit int) ([]domain.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cutoff = cutoff.UTC()
+	maxClose := limitValue(limit)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	closed := []domain.Session{}
+	for _, id := range m.sessionOrder {
+		if len(closed) >= maxClose {
+			break
+		}
+		s := m.sessions[id]
+		if s.Status != "active" || !strings.HasPrefix(s.ConversationID, "coding:") {
+			continue
+		}
+		lastActivity := s.CreatedAt.UTC()
+		if recordedAt := m.messageRecordedAt[id]; recordedAt.After(lastActivity) {
+			lastActivity = recordedAt.UTC()
+		}
+		for _, tr := range m.traces {
+			if tr.SessionID != id {
+				continue
+			}
+			if tr.StartedAt.UTC().After(lastActivity) {
+				lastActivity = tr.StartedAt.UTC()
+			}
+			if tr.EndedAt != nil && tr.EndedAt.UTC().After(lastActivity) {
+				lastActivity = tr.EndedAt.UTC()
+			}
+		}
+		if lastActivity.IsZero() || !lastActivity.Before(cutoff) {
+			continue
+		}
+		s.Status = "closed"
+		m.sessions[id] = s
+		closed = append(closed, s)
+	}
+	return closed, nil
 }
 func (m *Memory) EndSession(ctx context.Context, id, summary string) error {
 	if err := ctx.Err(); err != nil {
@@ -372,6 +419,10 @@ func (m *Memory) AppendMessage(ctx context.Context, session, key string, msg dom
 	if !m.messageKeys[k] {
 		m.messageKeys[k] = true
 		m.messages[session] = append(m.messages[session], clone(msg))
+		now := time.Now().UTC()
+		if now.After(m.messageRecordedAt[session]) {
+			m.messageRecordedAt[session] = now
+		}
 		se := m.sessions[session]
 		m.history = append(m.history, domain.HistoryMessage{Seq: int64(len(m.history) + 1), ConversationID: se.ConversationID, SessionID: session, SessionStartedAt: se.CreatedAt, Role: msg.Role, Content: historyContent(msg), AuthorID: msg.AuthorID, ToolCalls: historyToolCalls(msg)})
 	}

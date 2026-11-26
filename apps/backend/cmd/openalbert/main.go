@@ -193,7 +193,7 @@ func run() error {
 		t3ControlPlane.AddObserver(t3WorkspaceBridge)
 		callbacks.RegisterPrefix(agent.T3CallbackPrefix, t3WorkspaceBridge)
 	}
-	runtime := &orchestration.Runtime{Repo: artifacts, Activities: activities, Telegram: telegram, Callbacks: callbacks, TTS: voice, Client: temporalClient, TaskQueue: c.TemporalTaskQueue, IdleTimeout: c.SessionIdleTimeout, MaxSteps: c.MaxAgentSteps, InitiativeInterval: c.InitiativeInterval, MemoryConsolidationInterval: c.MemoryConsolidationInterval, Logger: logger}
+	runtime := &orchestration.Runtime{Repo: artifacts, Activities: activities, Telegram: telegram, Callbacks: callbacks, TTS: voice, Client: temporalClient, TaskQueue: c.TemporalTaskQueue, IdleTimeout: c.SessionIdleTimeout, CodingSessionStaleTimeout: c.CodingSessionStaleTimeout, MaxSteps: c.MaxAgentSteps, InitiativeInterval: c.InitiativeInterval, MemoryConsolidationInterval: c.MemoryConsolidationInterval, Logger: logger}
 	worker := runtime.Worker()
 	if err = worker.Start(); err != nil {
 		return errors.New("Temporal worker startup failed")

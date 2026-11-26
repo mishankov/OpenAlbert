@@ -854,3 +854,120 @@ test("история консолидации: отчёт, операции, к�
   await expect(section).toBeHidden();
   expect(errors).toEqual([]);
 });
+
+test("селектор памяти: скрывает coding:*, приоритезирует personal:* и группирует пустые разговоры", async ({ page }) => {
+  const errors = [];
+  const fetchedScopes = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route("**/api/inspect/**", (route) => {
+    const u = new URL(route.request().url());
+    if (u.pathname.endsWith("/soul")) return route.fulfill({ json: { soul: "# OpenAlbert" } });
+    if (u.pathname.endsWith("/group")) return route.fulfill({ json: { group_id: -8, group: "" } });
+    if (u.pathname.endsWith("/consolidations")) return route.fulfill({ json: { consolidations: [] } });
+    const codingSession = {
+      id: "oa-coding-1",
+      seq: 1,
+      conversation_id: "coding:oa-coding-1",
+      conversation: { id: "coding:oa-coding-1", private: true, title: "mishankov" },
+      status: "closed",
+      trigger: "coding",
+      created_at: "2026-11-26T10:00:00Z",
+      message_count: 0,
+      tool_count: 0,
+      trace_count: 0,
+    };
+    if (u.pathname.endsWith("/sessions")) {
+      return route.fulfill({ json: { sessions: [codingSession], next_before: 0 } });
+    }
+    if (u.pathname.includes("/sessions/oa-coding-1")) {
+      return route.fulfill({
+        json: {
+          session: codingSession,
+          messages: [], traces: [], outgoing: [], turns: [], artifacts: [], next_after: 0,
+        },
+      });
+    }
+    if (u.pathname.endsWith("/conversations")) {
+      // Deliberately return coding:* and empty groups ahead of personal:* to test client defense-in-depth + grouping.
+      return route.fulfill({
+        json: {
+          conversations: [
+            { id: "coding:oa-1", title: "mishankov", private: true, memory_count: 0 },
+            { id: "group:empty-a", chat_id: -10, title: "Пустой топик A", memory_count: 0 },
+            { id: "group:8", chat_id: -8, title: "Рабочий топик с очень длинным названием для проверки переполнения на узком экране", memory_count: 2, last_updated_at: "2026-11-26T09:00:00Z" },
+            { id: "personal:7", chat_id: 7, private: true, title: "Личный разговор", memory_count: 146, has_profile: true, last_updated_at: "2026-11-26T10:00:00Z" },
+            { id: "group:empty-b", chat_id: -11, title: "Пустой топик B", memory_count: 0 },
+          ],
+        },
+      });
+    }
+    if (u.pathname.endsWith("/stats")) {
+      const scope = u.searchParams.get("conversation_id");
+      fetchedScopes.push(`stats:${scope}`);
+      return route.fulfill({ json: scope === "personal:7" ? statsPersonal : { ...statsEmpty, scope } });
+    }
+    const scope = u.searchParams.get("conversation_id");
+    fetchedScopes.push(`memory:${scope}`);
+    const found = entries.filter((e) => e.scope === scope);
+    return route.fulfill({ json: { entries: found, total: found.length, next_after: 0, profile: scope === "personal:7" ? "# User" : "" } });
+  });
+
+  // Start from an open coding:* session, then navigate to Memory -> must default to personal:7, NOT coding:oa-coding-1.
+  await page.goto("/inspect/#/session/oa-coding-1");
+  await expect(page.locator(".session-heading")).toContainText("mishankov");
+  await page.locator("#nav-memory").click();
+  await expect(page.locator("#memory-list")).toHaveAttribute("aria-busy", "false");
+
+  const scopeSelect = page.locator("#memory-scope");
+  await expect(scopeSelect).toHaveValue("personal:7");
+
+  const optionValues = await scopeSelect.locator("option").evaluateAll((els) => els.map((el) => el.value));
+  expect(optionValues).toEqual(["personal:7", "group:8", "group:empty-a", "group:empty-b"]);
+
+  const groups = await scopeSelect.locator("optgroup").evaluateAll((els) =>
+    els.map((g) => ({ label: g.label, values: [...g.querySelectorAll("option")].map((o) => o.value) })),
+  );
+  expect(groups).toEqual([
+    { label: "С памятью", values: ["personal:7", "group:8"] },
+    { label: "Без записей памяти (2)", values: ["group:empty-a", "group:empty-b"] },
+  ]);
+
+  // Empty conversations remain selectable (e.g., to inspect GROUP.md or confirm 0 entries).
+  await scopeSelect.selectOption("group:empty-a");
+  await expect(page.locator("#memory-list")).toContainText("В этом разговоре пока нет записей памяти");
+
+  // Existing coding:* bookmarks in Memory and Analytics must be discarded in favor of personal:7 without re-adding coding:*.
+  await page.goto("about:blank");
+  await page.goto("/inspect/#/memory?conversation_id=coding:old");
+  await expect(page.locator("#memory-list")).toHaveAttribute("aria-busy", "false");
+  await expect(scopeSelect).toHaveValue("personal:7");
+  expect(await scopeSelect.locator("option").evaluateAll((els) => els.map((el) => el.value))).not.toContain("coding:old");
+
+  await page.goto("about:blank");
+  await page.goto("/inspect/#/memory?conversation_id=coding:old&tab=analytics");
+  await expect(page.locator("#memory-analytics")).toHaveAttribute("aria-busy", "false");
+  await expect(scopeSelect).toHaveValue("personal:7");
+  expect(await scopeSelect.locator("option").evaluateAll((els) => els.map((el) => el.value))).not.toContain("coding:old");
+  expect(fetchedScopes.filter((s) => s.includes("coding:"))).toEqual([]);
+
+  // Fresh direct Analytics navigation without conversation_id also defaults to personal:7 and hides coding:*.
+  await page.goto("about:blank");
+  await page.goto("/inspect/#/memory?tab=analytics");
+  await expect(page.locator("#memory-analytics")).toHaveAttribute("aria-busy", "false");
+  await expect(scopeSelect).toHaveValue("personal:7");
+
+  // Keyboard flow and narrow mobile viewport (390px) remain accessible without horizontal overflow.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await scopeSelect.selectOption("group:8");
+  await expect(scopeSelect).toHaveValue("group:8");
+  await page.keyboard.press("Alt+Digit1");
+  await expect(page.locator("#memory-tab-entries")).toHaveAttribute("aria-selected", "true");
+  const overflow = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+    selectRight: Math.round(document.querySelector("#memory-scope").getBoundingClientRect().right),
+  }));
+  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
+  expect(overflow.selectRight).toBeLessThanOrEqual(overflow.clientWidth);
+  expect(errors).toEqual([]);
+});

@@ -732,3 +732,135 @@ func TestMemoryConsolidationInspectorEndpointAndStatsIntegration(t *testing.T) {
 		}
 	}
 }
+
+type customMemoryConversations struct {
+	rows []domain.Conversation
+}
+
+func (c customMemoryConversations) ListConversations(context.Context) ([]domain.Conversation, error) {
+	return c.rows, nil
+}
+
+func (c customMemoryConversations) Conversation(_ context.Context, id string) (domain.Conversation, bool, error) {
+	for _, row := range c.rows {
+		if row.ID == id {
+			return row, true, nil
+		}
+	}
+	return domain.Conversation{}, false, nil
+}
+
+func (customMemoryConversations) ListMemoryConsolidations(context.Context, string, int) ([]domain.MemoryConsolidationReport, error) {
+	return nil, nil
+}
+
+func TestMemoryConversationsExcludesCodingAndPrioritizesPersonalAndNonEmpty(t *testing.T) {
+	ctx := context.Background()
+	store, err := knowledge.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tOld := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	tNew := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+
+	if err := store.Update(ctx, domain.MemoryEntry{Scope: "personal:7", ID: "p1", Kind: "profile", Content: "Живёт в Москве", Source: "s1", UpdatedAt: tOld}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(ctx, domain.MemoryEntry{Scope: "telegram:group:-100:topic:2", ID: "g2-1", Kind: "fact", Content: "Факт 1", Source: "s2", UpdatedAt: tNew}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(ctx, domain.MemoryEntry{Scope: "telegram:group:-100:topic:2", ID: "g2-2", Kind: "fact", Content: "Факт 2", Source: "s2", UpdatedAt: tNew}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(ctx, domain.MemoryEntry{Scope: "telegram:group:-100:topic:1", ID: "g1-1", Kind: "fact", Content: "Факт 1", Source: "s3", UpdatedAt: tNew}); err != nil {
+		t.Fatal(err)
+	}
+
+	convs := customMemoryConversations{rows: []domain.Conversation{
+		{ID: "coding:oa-0001", Title: "mishankov", OwnerID: 7, Private: true},
+		{ID: "coding:oa-0002", Title: "project", OwnerID: 7, Private: true},
+		{ID: "telegram:group:-100:topic:empty-a", ChatID: -100, ThreadID: 10, Title: "Пустой A"},
+		{ID: "telegram:group:-100:topic:1", ChatID: -100, ThreadID: 1, Title: "Топик 1"},
+		{ID: "personal:7", ChatID: 7, OwnerID: 7, Private: true, Title: "Личный разговор"},
+		{ID: "telegram:group:-100:topic:2", ChatID: -100, ThreadID: 2, Title: "Топик 2"},
+		{ID: "telegram:group:-100:topic:empty-b", ChatID: -100, ThreadID: 11, Title: "Пустой B"},
+	}}
+	mux := http.NewServeMux()
+	RegisterMemory(mux, convs, store)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/api/inspect/memory/conversations", nil))
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Conversations []memoryConversation `json:"conversations"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	wantOrder := []string{
+		"personal:7",
+		"telegram:group:-100:topic:2",
+		"telegram:group:-100:topic:1",
+		"telegram:group:-100:topic:empty-a",
+		"telegram:group:-100:topic:empty-b",
+	}
+	if len(out.Conversations) != len(wantOrder) {
+		t.Fatalf("got %d conversations (%+v), want %d", len(out.Conversations), out.Conversations, len(wantOrder))
+	}
+	for i, wantID := range wantOrder {
+		got := out.Conversations[i]
+		if got.ID != wantID {
+			t.Fatalf("index %d: got %q, want %q (all=%+v)", i, got.ID, wantID, out.Conversations)
+		}
+	}
+	if out.Conversations[0].MemoryCount != 1 || !out.Conversations[0].HasProfile {
+		t.Fatalf("personal metadata mismatch: %+v", out.Conversations[0])
+	}
+	if out.Conversations[1].MemoryCount != 2 || out.Conversations[1].HasProfile || out.Conversations[1].LastUpdatedAt == nil {
+		t.Fatalf("topic 2 metadata mismatch: %+v", out.Conversations[1])
+	}
+	if out.Conversations[3].MemoryCount != 0 || out.Conversations[3].HasProfile || out.Conversations[3].LastUpdatedAt != nil {
+		t.Fatalf("empty topic metadata mismatch: %+v", out.Conversations[3])
+	}
+}
+
+func TestMemoryConversationsSynthesizesPersonalScopeFromCodingMemory(t *testing.T) {
+	ctx := context.Background()
+	store, err := knowledge.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tNow := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	if err := store.Update(ctx, domain.MemoryEntry{
+		Scope: "personal:7", ID: "c1", Kind: "preference", Content: "Prefers table-driven Go tests", Source: "oa-0001", UpdatedAt: tNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	convs := customMemoryConversations{rows: []domain.Conversation{
+		{ID: "coding:oa-0001", Title: "project", OwnerID: 7, Private: true},
+	}}
+	mux := http.NewServeMux()
+	RegisterMemory(mux, convs, store)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/api/inspect/memory/conversations", nil))
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Conversations []memoryConversation `json:"conversations"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Conversations) != 1 {
+		t.Fatalf("expected synthesized personal:7 scope, got %+v", out.Conversations)
+	}
+	got := out.Conversations[0]
+	if got.ID != "personal:7" || !got.Private || got.OwnerID != 7 || got.MemoryCount != 1 || got.LastUpdatedAt == nil {
+		t.Fatalf("unexpected synthesized personal conversation: %+v", got)
+	}
+}

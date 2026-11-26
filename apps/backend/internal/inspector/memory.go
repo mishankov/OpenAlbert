@@ -3,14 +3,32 @@ package inspector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"openalbert/apps/backend/internal/domain"
 )
+
+type memoryConversation struct {
+	domain.Conversation
+	MemoryCount   int        `json:"memory_count"`
+	HasProfile    bool       `json:"has_profile,omitempty"`
+	LastUpdatedAt *time.Time `json:"last_updated_at,omitempty"`
+}
+
+func isPersonalMemoryConversation(c domain.Conversation) bool {
+	return strings.HasPrefix(c.ID, "personal:") || c.Private
+}
+
+func hasProfileContent(profile string) bool {
+	trimmed := strings.TrimSpace(profile)
+	return trimmed != "" && trimmed != "# User profile"
+}
 
 type ConversationStore interface {
 	ListConversations(context.Context) ([]domain.Conversation, error)
@@ -65,10 +83,93 @@ func RegisterMemory(mux *http.ServeMux, conversations ConversationStore, memory 
 			fail(w, 500)
 			return
 		}
-		if rows == nil {
-			rows = []domain.Conversation{}
+		items := make([]memoryConversation, 0, len(rows))
+		seen := make(map[string]bool, len(rows))
+		codingOwners := make(map[int64]bool)
+		appendScope := func(conv domain.Conversation, requireContent bool) bool {
+			entries, err := memory.ListMemory(r.Context(), conv.ID)
+			if err != nil {
+				fail(w, 500)
+				return false
+			}
+			profile, err := memory.Profile(r.Context(), conv.ID)
+			if err != nil {
+				fail(w, 500)
+				return false
+			}
+			hasProfile := hasProfileContent(profile)
+			if requireContent && len(entries) == 0 && !hasProfile {
+				return true
+			}
+			item := memoryConversation{
+				Conversation: conv,
+				MemoryCount:  len(entries),
+				HasProfile:   hasProfile,
+			}
+			var latest time.Time
+			for _, e := range entries {
+				if e.UpdatedAt.After(latest) {
+					latest = e.UpdatedAt
+				}
+			}
+			if !latest.IsZero() {
+				utc := latest.UTC()
+				item.LastUpdatedAt = &utc
+			}
+			items = append(items, item)
+			seen[conv.ID] = true
+			return true
 		}
-		write(w, map[string]any{"conversations": rows})
+		for _, conv := range rows {
+			if strings.HasPrefix(conv.ID, "coding:") {
+				if conv.OwnerID > 0 {
+					codingOwners[conv.OwnerID] = true
+				}
+				continue
+			}
+			if !appendScope(conv, false) {
+				return
+			}
+		}
+		for ownerID := range codingOwners {
+			personalID := fmt.Sprintf("personal:%d", ownerID)
+			if seen[personalID] {
+				continue
+			}
+			if !appendScope(domain.Conversation{
+				ID:      personalID,
+				ChatID:  ownerID,
+				OwnerID: ownerID,
+				Private: true,
+				Title:   "Личный разговор",
+			}, true) {
+				return
+			}
+		}
+		sort.SliceStable(items, func(i, j int) bool {
+			a, b := items[i], items[j]
+			aPersonal := isPersonalMemoryConversation(a.Conversation)
+			bPersonal := isPersonalMemoryConversation(b.Conversation)
+			if aPersonal != bPersonal {
+				return aPersonal
+			}
+			aHasMem := a.MemoryCount > 0 || a.HasProfile
+			bHasMem := b.MemoryCount > 0 || b.HasProfile
+			if aHasMem != bHasMem {
+				return aHasMem
+			}
+			if a.MemoryCount != b.MemoryCount {
+				return a.MemoryCount > b.MemoryCount
+			}
+			if (a.LastUpdatedAt != nil) != (b.LastUpdatedAt != nil) {
+				return a.LastUpdatedAt != nil
+			}
+			if a.LastUpdatedAt != nil && !a.LastUpdatedAt.Equal(*b.LastUpdatedAt) {
+				return a.LastUpdatedAt.After(*b.LastUpdatedAt)
+			}
+			return a.ID < b.ID
+		})
+		write(w, map[string]any{"conversations": items})
 	})))
 	mux.Handle("GET /api/inspect/memory", inspectorResponse(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scope := r.URL.Query().Get("conversation_id")

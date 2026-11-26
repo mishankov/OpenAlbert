@@ -853,12 +853,18 @@ func (a *Activities) Analyze(ctx context.Context, session domain.Session) (err e
 				transcript = append(transcript, message)
 			}
 		}
-		// Skip memory extraction on purely operational backup events (where memory
-		// edits are already forbidden) and strictly no-op initiative checks.
-		if sessTrigger == "backup" || (sessTrigger == "initiative" && !hasUserMessages && !hasToolCalls) {
-			summary := "Host backup event check."
-			if sessTrigger == "initiative" {
+		// Skip memory extraction on empty transcripts, purely operational backup
+		// events (where memory edits are already forbidden), and strictly no-op
+		// initiative checks.
+		if len(transcript) == 0 || sessTrigger == "backup" || (sessTrigger == "initiative" && !hasUserMessages && !hasToolCalls) {
+			summary := "Empty session."
+			switch {
+			case sessTrigger == "backup":
+				summary = "Host backup event check."
+			case sessTrigger == "initiative" && !hasUserMessages && !hasToolCalls:
 				summary = "No-op initiative check."
+			case coding:
+				summary = "Empty coding session."
 			}
 			result = analysisResult{
 				Summary:              summary,

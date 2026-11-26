@@ -32,6 +32,9 @@ func TestModelAndAnalysisShareOpaqueConversationSession(t *testing.T) {
 	if err := repo.StartSession(ctx, session); err != nil {
 		t.Fatal(err)
 	}
+	if err := repo.AppendMessage(ctx, session.ID, "m1", domain.Message{Role: "user", Content: "Remember I prefer Go"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := repo.EndSession(ctx, session.ID, ""); err != nil {
 		t.Fatal(err)
 	}

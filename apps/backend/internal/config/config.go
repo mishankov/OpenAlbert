@@ -37,6 +37,7 @@ type Config struct {
 	YandexAPIKey, YandexFolderID, YandexEndpoint            string
 	KnowledgeDir, SoulFile, HTTPAddr                        string
 	SessionIdleTimeout, TaskMinInterval, InitiativeInterval time.Duration
+	CodingSessionStaleTimeout                               time.Duration
 	MemoryConsolidationInterval                             time.Duration
 	MaxAgentSteps                                           int
 	S3Endpoint, S3AccessKey, S3SecretKey, S3Bucket          string
@@ -230,6 +231,7 @@ func load(get func(string) string) (Config, error) {
 	}
 	c.OpenAILaneCooldown = duration("OPENAI_LANE_COOLDOWN", "15m", false)
 	c.SessionIdleTimeout = duration("SESSION_IDLE_TIMEOUT", "30m", false)
+	c.CodingSessionStaleTimeout = duration("CODING_SESSION_STALE_TIMEOUT", "24h", true)
 	c.TaskMinInterval = duration("TASK_MIN_INTERVAL", "5m", false)
 	c.InitiativeInterval = duration("INITIATIVE_INTERVAL", "30m", true)
 	c.MemoryConsolidationInterval = duration("MEMORY_CONSOLIDATION_INTERVAL", "24h", true)
