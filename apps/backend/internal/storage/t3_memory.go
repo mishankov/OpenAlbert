@@ -76,6 +76,12 @@ func (m *Memory) UpsertT3Host(ctx context.Context, host domain.T3Host) (domain.T
 	if prev, ok := st.hosts[host.EnvironmentID]; ok {
 		saved.HostID = prev.HostID
 		saved.CreatedAt = prev.CreatedAt
+		if len(saved.Projects) == 0 && len(prev.Projects) > 0 {
+			saved.Projects = clone(prev.Projects)
+		}
+		if len(saved.Providers) == 0 && len(prev.Providers) > 0 {
+			saved.Providers = clone(prev.Providers)
+		}
 	} else {
 		saved.CreatedAt = created
 		st.hostOrder = append(st.hostOrder, host.EnvironmentID)

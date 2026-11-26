@@ -28,6 +28,9 @@ type Config struct {
 	Bridge           bool
 	HostLabel        string
 	BridgeTickPrompt string
+	T3Bin            string
+	T3BaseDir        string
+	EnvironmentID    string
 }
 
 type fileConfig struct {
@@ -43,6 +46,9 @@ type fileConfig struct {
 	Bridge           *bool  `toml:"bridge"`
 	HostLabel        string `toml:"host_label"`
 	BridgeTickPrompt string `toml:"bridge_tick_prompt"`
+	T3Bin            string `toml:"t3_bin"`
+	T3BaseDir        string `toml:"t3_base_dir"`
+	EnvironmentID    string `toml:"environment_id"`
 }
 
 func configDir(getenv func(string) string) string {
@@ -224,6 +230,27 @@ func load(path string, getenv func(string) string) (Config, error) {
 		tickPrompt = DefaultBridgeTickPrompt
 	}
 
+	t3Bin := strings.TrimSpace(raw.T3Bin)
+	if envBin := strings.TrimSpace(getenv("OPENALBERT_T3_BIN")); envBin != "" {
+		t3Bin = envBin
+	}
+	if t3Bin != "" {
+		t3Bin = expandHome(t3Bin)
+	}
+
+	t3BaseDir := strings.TrimSpace(raw.T3BaseDir)
+	if envBase := strings.TrimSpace(getenv("T3CODE_HOME")); envBase != "" {
+		t3BaseDir = envBase
+	}
+	if t3BaseDir != "" {
+		t3BaseDir = expandHome(t3BaseDir)
+	}
+
+	envID := strings.TrimSpace(raw.EnvironmentID)
+	if envEnvID := strings.TrimSpace(getenv("OPENALBERT_ENVIRONMENT_ID")); envEnvID != "" {
+		envID = envEnvID
+	}
+
 	return Config{
 		ServerURL:        serverURL,
 		Token:            token,
@@ -236,6 +263,9 @@ func load(path string, getenv func(string) string) (Config, error) {
 		Bridge:           bridgeEnabled,
 		HostLabel:        hostLabel,
 		BridgeTickPrompt: tickPrompt,
+		T3Bin:            t3Bin,
+		T3BaseDir:        t3BaseDir,
+		EnvironmentID:    envID,
 	}, nil
 }
 

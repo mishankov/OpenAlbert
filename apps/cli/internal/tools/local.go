@@ -18,7 +18,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -885,13 +884,9 @@ func (l *Local) runBash(ctx context.Context, rawArgs json.RawMessage, stream Out
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	shell := "/bin/bash"
-	if _, err := os.Stat(shell); err != nil {
-		shell = "/bin/sh"
-	}
-	cmd := exec.Command(shell, "-c", args.Command)
+	cmd := newShellCommand(args.Command)
 	cmd.Dir = cwd
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	configureProcessGroup(cmd)
 
 	stdout := &boundedBuffer{limit: maxBashOut, stream: stream}
 	stderr := &boundedBuffer{limit: maxBashOut, stream: stream}
@@ -917,11 +912,11 @@ func (l *Local) runBash(ctx context.Context, rawArgs json.RawMessage, stream Out
 			timedOut = true
 		}
 		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			terminateProcessGroup(cmd)
 			select {
 			case waitErr = <-done:
 			case <-time.After(2 * time.Second):
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				killProcessGroup(cmd)
 				waitErr = <-done
 			}
 		}
