@@ -486,3 +486,158 @@ func TestCLIBridgeIgnoresCompletedWhilePendingBackgroundTasks(t *testing.T) {
 	}
 	t.Fatalf("expected thread_completed after pendingBackgroundTasks cleared, got events: %+v", events)
 }
+
+func TestCLIBridgeBidirectionalArtifacts(t *testing.T) {
+	baseDir := t.TempDir()
+	userData := filepath.Join(baseDir, "userdata")
+	if err := os.MkdirAll(userData, 0o700); err != nil {
+		t.Fatalf("mkdir userdata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(userData, "environment-id"), []byte("env-art-1\n"), 0o600); err != nil {
+		t.Fatalf("write environment-id: %v", err)
+	}
+
+	// Prepare a screenshot inside T3BaseDir and a sensitive .env file inside workspace.
+	shotPath := filepath.Join(baseDir, "collage.png")
+	pngData := []byte("\x89PNG\r\n\x1a\nfake-collage-bytes")
+	if err := os.WriteFile(shotPath, pngData, 0o600); err != nil {
+		t.Fatalf("write collage: %v", err)
+	}
+	envSecretPath := filepath.Join(baseDir, ".env")
+	if err := os.WriteFile(envSecretPath, []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	var (
+		mu             sync.Mutex
+		uploadedBytes  []byte
+		uploadedConvID string
+		lastSendStdin  string
+	)
+	incomingBytes := []byte("\x89PNG\r\n\x1a\nfrom-telegram-user")
+
+	piSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/t3/artifacts":
+			mr, err := r.MultipartReader()
+			if err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			part, err := mr.NextPart()
+			if err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			buf := make([]byte, 4096)
+			n, _ := part.Read(buf)
+			mu.Lock()
+			uploadedBytes = append([]byte(nil), buf[:n]...)
+			uploadedConvID = r.URL.Query().Get("conversation_id")
+			mu.Unlock()
+			w.WriteHeader(201)
+			_ = json.NewEncoder(w).Encode(serverclient.T3ArtifactUploadResponse{
+				ArtifactID: "t3art-99",
+				Name:       r.URL.Query().Get("name"),
+				MIME:       "image/png",
+				SizeBytes:  int64(n),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/t3/artifacts/tg-shot-1/content":
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Content-Disposition", `attachment; filename="bug-shot.png"`)
+			_, _ = w.Write(incomingBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer piSrv.Close()
+
+	runner := func(ctx context.Context, bin string, args []string, stdin string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "thread" && args[1] == "send" {
+			mu.Lock()
+			lastSendStdin = stdin
+			mu.Unlock()
+			return json.Marshal(map[string]any{"threadId": "th-art-1", "delivery": "queued"})
+		}
+		return nil, fmt.Errorf("unexpected args: %v", args)
+	}
+
+	cfg := config.Config{
+		ServerURL:      piSrv.URL,
+		Token:          "tok",
+		StateDir:       t.TempDir(),
+		CustomStateDir: true,
+		HostLabel:      "MacBook Air",
+		T3BaseDir:      baseDir,
+	}
+	b, err := newCLIBridgeWithRunner(cfg, serverclient.New(cfg.ServerURL, cfg.Token, 5*time.Second), nil, runner)
+	if err != nil {
+		t.Fatalf("newCLIBridgeWithRunner: %v", err)
+	}
+
+	// 1. Host -> Pi: artifact_fetch accepts file:// URI inside allowed root.
+	fetchPayload, _ := json.Marshal(map[string]any{
+		"thread_id":       "th-art-1",
+		"path":            "file://" + filepath.ToSlash(shotPath),
+		"name":            "polka-collage.png",
+		"conversation_id": "telegram:group:-100555:topic:35",
+	})
+	resRaw, err := b.dispatchCommand(context.Background(), serverclient.T3Command{
+		CommandID: "cmd-fetch-1",
+		Action:    "artifact_fetch",
+		Payload:   fetchPayload,
+	})
+	if err != nil {
+		t.Fatalf("artifact_fetch failed: %v", err)
+	}
+	if !strings.Contains(string(resRaw), `"t3art-99"`) {
+		t.Fatalf("unexpected artifact_fetch result: %s", resRaw)
+	}
+	mu.Lock()
+	if string(uploadedBytes) != string(pngData) || uploadedConvID != "telegram:group:-100555:topic:35" {
+		mu.Unlock()
+		t.Fatalf("upload mismatch: bytes=%q conv=%q", uploadedBytes, uploadedConvID)
+	}
+	mu.Unlock()
+
+	// 2. Host -> Pi: sensitive .env file is refused even inside allowed root.
+	badPayload, _ := json.Marshal(map[string]any{
+		"thread_id":       "th-art-1",
+		"path":            envSecretPath,
+		"conversation_id": "telegram:group:-100555:topic:35",
+	})
+	if _, err := b.dispatchCommand(context.Background(), serverclient.T3Command{
+		CommandID: "cmd-fetch-bad",
+		Action:    "artifact_fetch",
+		Payload:   badPayload,
+	}); err == nil {
+		t.Fatalf("expected sensitive .env fetch to be rejected")
+	}
+
+	// 3. Pi -> Host: thread_send with attachment_ids downloads file to disk and includes path in stdin.
+	sendPayload, _ := json.Marshal(map[string]any{
+		"thread_id":                  "th-art-1",
+		"message":                    "Look at this screenshot",
+		"attachment_ids":             []string{"tg-shot-1"},
+		"attachment_conversation_id": "telegram:group:-100555:topic:35",
+	})
+	if _, err := b.dispatchCommand(context.Background(), serverclient.T3Command{
+		CommandID: "cmd-send-att",
+		Action:    "thread_send",
+		Payload:   sendPayload,
+	}); err != nil {
+		t.Fatalf("thread_send with attachments failed: %v", err)
+	}
+	mu.Lock()
+	gotStdin := lastSendStdin
+	mu.Unlock()
+	if !strings.Contains(gotStdin, "Attached files downloaded from OpenAlbert") || !strings.Contains(gotStdin, "bug-shot.png") {
+		t.Fatalf("expected downloaded attachment path in stdin message, got: %q", gotStdin)
+	}
+	// Verify downloaded file exists on disk with exact bytes.
+	expectedFile := filepath.Join(baseDir, "userdata", "openalbert-attachments", "th-art-1", "tg-shot-1-bug-shot.png")
+	gotDisk, err := os.ReadFile(expectedFile)
+	if err != nil || string(gotDisk) != string(incomingBytes) {
+		t.Fatalf("downloaded file mismatch: err=%v bytes=%q", err, gotDisk)
+	}
+}

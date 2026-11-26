@@ -46,8 +46,8 @@ func TestT3ToolsAuthorizationAndCodingAccess(t *testing.T) {
 			count++
 		}
 	}
-	if count != 7 {
-		t.Fatalf("expected 7 t3 tools advertised in owner private chat, got %d", count)
+	if count != 8 {
+		t.Fatalf("expected 8 t3 tools advertised in owner private chat, got %d", count)
 	}
 
 	// Owner background task (TaskID != "", Initiative=false): allowed & advertised.
@@ -57,8 +57,8 @@ func TestT3ToolsAuthorizationAndCodingAccess(t *testing.T) {
 			taskCount++
 		}
 	}
-	if taskCount != 7 {
-		t.Fatalf("expected 7 t3 tools advertised in owner background task, got %d", taskCount)
+	if taskCount != 8 {
+		t.Fatalf("expected 8 t3 tools advertised in owner background task, got %d", taskCount)
 	}
 	taskIn := in
 	taskIn.RunKey = "t3-task"
@@ -78,8 +78,8 @@ func TestT3ToolsAuthorizationAndCodingAccess(t *testing.T) {
 			codingCount++
 		}
 	}
-	if codingCount != 7 {
-		t.Fatalf("expected 7 t3 tools in CodingContext, got %d", codingCount)
+	if codingCount != 8 {
+		t.Fatalf("expected 8 t3 tools in CodingContext, got %d", codingCount)
 	}
 	codingRes, err := a.ExecuteCodingTool(ctx, CodingToolRequest{
 		SessionID: "coding-1",
@@ -118,8 +118,8 @@ func TestT3ToolsAuthorizationAndCodingAccess(t *testing.T) {
 			wsCount++
 		}
 	}
-	if wsCount != 7 {
-		t.Fatalf("expected 7 t3 tools advertised in owner workspace topic, got %d", wsCount)
+	if wsCount != 8 {
+		t.Fatalf("expected 8 t3 tools advertised in owner workspace topic, got %d", wsCount)
 	}
 	wsIn := in
 	wsIn.RunKey = "t3-workspace-owner"
@@ -319,6 +319,20 @@ func TestT3SevenToolsLifecycle(t *testing.T) {
 	th, _ = cp.Thread(ctx, "th-100")
 	if th.Status != "settled" {
 		t.Fatalf("expected settled status, got %q", th.Status)
+	}
+
+	// 8. t3_artifact_fetch dispatches artifact_fetch with workspace_root and conversation_id.
+	respondNext(func(cmd domain.T3Command) (bool, string, string) {
+		var p map[string]any
+		_ = json.Unmarshal(cmd.Payload, &p)
+		if cmd.Action != domain.T3ActionArtifactFetch || p["thread_id"] != "th-100" || p["path"] != "/code/oa/collage.png" || p["workspace_root"] != "/code/oa" || p["conversation_id"] != owner.ID {
+			t.Errorf("unexpected artifact_fetch command: %+v", cmd)
+		}
+		return true, `{"artifact_id":"t3art-abc","name":"collage.png","mime":"image/png","size_bytes":1234}`, ""
+	})
+	out = tool(t, a, owner, "run-1", "c7b", "t3_artifact_fetch", `{"thread_id":"th-100","path":"/code/oa/collage.png"}`)
+	if strings.Contains(out, `"error"`) || !strings.Contains(out, `"t3art-abc"`) {
+		t.Fatalf("t3_artifact_fetch: %s", out)
 	}
 
 	// Offline fallback: register an offline host (via custom clock) and verify t3_thread_launch returns queued.

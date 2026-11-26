@@ -522,6 +522,8 @@ func (b *CLIBridge) dispatchCommand(ctx context.Context, cmd serverclient.T3Comm
 		return b.handleThreadRead(ctx, cmd.Payload)
 	case "thread_control":
 		return b.handleThreadControl(ctx, cmd.Payload)
+	case "artifact_fetch":
+		return b.handleArtifactFetch(ctx, cmd.Payload)
 	case "thread_respond":
 		return nil, errors.New("t3 CLI bridge does not support thread_respond yet; answer pending questions directly in the T3 Code thread")
 	default:
@@ -568,9 +570,6 @@ func (b *CLIBridge) handleThreadLaunch(ctx context.Context, payload json.RawMess
 			return nil, fmt.Errorf("invalid thread_launch payload: %w", err)
 		}
 	}
-	if len(req.AttachmentIDs) > 0 {
-		return nil, errors.New("thread_launch attachment_ids are not supported by the CLI T3 bridge")
-	}
 	project := strings.TrimSpace(req.ProjectID)
 	if project == "" {
 		return nil, errors.New("thread_launch requires project_id")
@@ -582,6 +581,14 @@ func (b *CLIBridge) handleThreadLaunch(ctx context.Context, payload json.RawMess
 	message := req.Message
 	if strings.TrimSpace(message) == "" {
 		return nil, errors.New("thread_launch requires message")
+	}
+	if len(req.AttachmentIDs) > 0 {
+		attachConvID := firstNonEmpty(req.AttachmentConversationID, req.ConversationID)
+		paths, err := b.materializeAttachments(ctx, "launch-"+uuid.NewString()[:8], attachConvID, req.AttachmentIDs)
+		if err != nil {
+			return nil, err
+		}
+		message = appendAttachmentPathsToMessage(message, paths)
 	}
 
 	args := []string{"thread", "start", "--json"}
@@ -703,21 +710,27 @@ func parseCLILaunchOutput(raw []byte, req threadLaunchPayload) launchResult {
 
 func (b *CLIBridge) handleThreadSend(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
 	var req struct {
-		ThreadID      string         `json:"thread_id"`
-		Message       string         `json:"message"`
-		Mode          string         `json:"mode"`
-		OutputSchema  map[string]any `json:"output_schema"`
-		AttachmentIDs []string       `json:"attachment_ids"`
+		ThreadID                 string         `json:"thread_id"`
+		Message                  string         `json:"message"`
+		Mode                     string         `json:"mode"`
+		OutputSchema             map[string]any `json:"output_schema"`
+		AttachmentIDs            []string       `json:"attachment_ids"`
+		AttachmentConversationID string         `json:"attachment_conversation_id"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, fmt.Errorf("invalid thread_send payload: %w", err)
 	}
-	if len(req.AttachmentIDs) > 0 {
-		return nil, errors.New("thread_send attachment_ids are not supported by the CLI T3 bridge")
-	}
 	threadID := strings.TrimSpace(req.ThreadID)
 	if threadID == "" || strings.TrimSpace(req.Message) == "" {
 		return nil, errors.New("thread_send requires thread_id and message")
+	}
+	message := req.Message
+	if len(req.AttachmentIDs) > 0 {
+		paths, err := b.materializeAttachments(ctx, threadID, req.AttachmentConversationID, req.AttachmentIDs)
+		if err != nil {
+			return nil, err
+		}
+		message = appendAttachmentPathsToMessage(message, paths)
 	}
 
 	args := []string{"thread", "send", "--json"}
@@ -732,7 +745,7 @@ func (b *CLIBridge) handleThreadSend(ctx context.Context, payload json.RawMessag
 	}
 	args = append(args, threadID, "-")
 
-	raw, err := b.runCLI(ctx, b.t3Bin, args, req.Message)
+	raw, err := b.runCLI(ctx, b.t3Bin, args, message)
 	if err != nil {
 		return nil, err
 	}
@@ -793,6 +806,248 @@ func (b *CLIBridge) handleThreadControl(ctx context.Context, payload json.RawMes
 	default:
 		return nil, fmt.Errorf("t3 CLI bridge does not support thread_control action %q", action)
 	}
+}
+
+const maxLocalArtifactBytes = 20 << 20
+
+func (b *CLIBridge) t3BaseDirPath() string {
+	if base := strings.TrimSpace(b.cfg.T3BaseDir); base != "" {
+		return base
+	}
+	if env := strings.TrimSpace(os.Getenv("T3CODE_HOME")); env != "" {
+		return env
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".t3")
+	}
+	return ""
+}
+
+func normalizeLocalArtifactPath(raw string) (string, error) {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return "", errors.New("path is required")
+	}
+	if strings.HasPrefix(strings.ToLower(p), "file://") {
+		u, err := url.Parse(p)
+		if err != nil {
+			return "", fmt.Errorf("invalid file URI: %w", err)
+		}
+		unescaped, err := url.PathUnescape(u.Path)
+		if err != nil {
+			return "", fmt.Errorf("invalid file URI path: %w", err)
+		}
+		// Handle Windows file:///C:/... URIs cleanly.
+		if runtime.GOOS == "windows" && len(unescaped) >= 3 && unescaped[0] == '/' && unescaped[2] == ':' {
+			unescaped = unescaped[1:]
+		}
+		p = filepath.FromSlash(unescaped)
+	}
+	if !filepath.IsAbs(p) {
+		return "", errors.New("artifact path must be an absolute path")
+	}
+	return filepath.Clean(p), nil
+}
+
+func isSensitiveArtifactPath(realPath string) bool {
+	cleaned := filepath.Clean(realPath)
+	base := strings.ToLower(filepath.Base(cleaned))
+	if base == ".env" || strings.HasPrefix(base, ".env.") || base == "config.toml" {
+		return true
+	}
+	for _, ext := range []string{".pem", ".key", ".p12", ".pfx", ".jks"} {
+		if strings.HasSuffix(base, ext) {
+			return true
+		}
+	}
+	for _, prefix := range []string{"id_rsa", "id_ed25519", "id_ecdsa", "credentials", "secrets"} {
+		if strings.HasPrefix(base, prefix) {
+			return true
+		}
+	}
+	slash := strings.ToLower(filepath.ToSlash(cleaned))
+	if strings.Contains(slash, "/.ssh/") || strings.HasSuffix(slash, "/.git/config") {
+		return true
+	}
+	return false
+}
+
+func pathWithinRoot(realPath, root string) bool {
+	if strings.TrimSpace(root) == "" {
+		return false
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		absRoot, absErr := filepath.Abs(root)
+		if absErr != nil {
+			return false
+		}
+		realRoot = filepath.Clean(absRoot)
+	}
+	rel, err := filepath.Rel(realRoot, realPath)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func (b *CLIBridge) threadWorktreePath(ctx context.Context, threadID string) string {
+	if strings.TrimSpace(threadID) == "" {
+		return ""
+	}
+	args := []string{"thread", "show", "--json", "--messages", "0"}
+	args = append(args, b.baseDirFlags()...)
+	args = append(args, threadID)
+	raw, err := b.runCLI(ctx, b.t3Bin, args, "")
+	if err != nil {
+		return ""
+	}
+	var resp struct {
+		Thread struct {
+			WorktreePath string `json:"worktreePath"`
+		} `json:"thread"`
+	}
+	if json.Unmarshal(raw, &resp) != nil {
+		return ""
+	}
+	return strings.TrimSpace(resp.Thread.WorktreePath)
+}
+
+func (b *CLIBridge) handleArtifactFetch(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		ThreadID       string `json:"thread_id"`
+		Path           string `json:"path"`
+		Name           string `json:"name"`
+		ConversationID string `json:"conversation_id"`
+		WorkspaceRoot  string `json:"workspace_root"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil, fmt.Errorf("invalid artifact_fetch payload: %w", err)
+	}
+	targetPath, err := normalizeLocalArtifactPath(req.Path)
+	if err != nil {
+		return nil, err
+	}
+	realPath, err := filepath.EvalSymlinks(targetPath)
+	if err != nil {
+		return nil, fmt.Errorf("artifact file not accessible: %w", err)
+	}
+	realPath = filepath.Clean(realPath)
+	if isSensitiveArtifactPath(realPath) {
+		return nil, errors.New("refusing to fetch sensitive file")
+	}
+
+	allowedRoots := []string{b.t3BaseDirPath(), strings.TrimSpace(req.WorkspaceRoot), os.TempDir()}
+	if runtime.GOOS != "windows" {
+		allowedRoots = append(allowedRoots, "/tmp")
+	}
+	allowed := false
+	for _, root := range allowedRoots {
+		if pathWithinRoot(realPath, root) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		if wt := b.threadWorktreePath(ctx, strings.TrimSpace(req.ThreadID)); wt != "" && pathWithinRoot(realPath, wt) {
+			allowed = true
+		}
+	}
+	if !allowed {
+		return nil, errors.New("artifact path is outside allowed T3 workspace, worktree, ~/.t3, or temp directories")
+	}
+
+	info, err := os.Stat(realPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat artifact: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("artifact path must be a regular file")
+	}
+	if info.Size() > maxLocalArtifactBytes {
+		return nil, fmt.Errorf("artifact exceeds 20 MiB limit (%d bytes)", info.Size())
+	}
+	data, err := os.ReadFile(realPath)
+	if err != nil {
+		return nil, fmt.Errorf("read artifact: %w", err)
+	}
+	if len(data) > maxLocalArtifactBytes {
+		return nil, errors.New("artifact exceeds 20 MiB limit")
+	}
+	displayName := strings.TrimSpace(req.Name)
+	if displayName == "" {
+		displayName = filepath.Base(realPath)
+	}
+	uploaded, err := b.client.UploadT3Artifact(ctx, strings.TrimSpace(req.ConversationID), displayName, data)
+	if err != nil {
+		return nil, fmt.Errorf("upload artifact to OpenAlbert: %w", err)
+	}
+	return json.Marshal(uploaded)
+}
+
+func sanitizePathToken(s string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "._")
+	if out == "" {
+		return "item"
+	}
+	if len(out) > 80 {
+		out = out[:80]
+	}
+	return out
+}
+
+func (b *CLIBridge) materializeAttachments(ctx context.Context, threadKey, conversationID string, attachmentIDs []string) ([]string, error) {
+	base := b.t3BaseDirPath()
+	if base == "" {
+		base = os.TempDir()
+	}
+	dir := filepath.Join(base, "userdata", "openalbert-attachments", sanitizePathToken(threadKey))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create attachments dir: %w", err)
+	}
+	paths := make([]string, 0, len(attachmentIDs))
+	for _, rawID := range attachmentIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		name, data, err := b.client.DownloadT3Artifact(ctx, conversationID, id)
+		if err != nil {
+			return nil, fmt.Errorf("download attachment %s: %w", id, err)
+		}
+		safeName := sanitizePathToken(filepath.Base(strings.ReplaceAll(name, "\\", "/")))
+		dest := filepath.Join(dir, sanitizePathToken(id)+"-"+safeName)
+		if err := os.WriteFile(dest, data, 0o600); err != nil {
+			return nil, fmt.Errorf("write attachment %s: %w", id, err)
+		}
+		paths = append(paths, dest)
+	}
+	return paths, nil
+}
+
+func appendAttachmentPathsToMessage(message string, paths []string) string {
+	if len(paths) == 0 {
+		return message
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimRight(message, "\r\n"))
+	b.WriteString("\n\n[Attached files downloaded from OpenAlbert for this message — read them directly from disk:]")
+	for _, p := range paths {
+		b.WriteString("\n- ")
+		b.WriteString(p)
+	}
+	return b.String()
 }
 
 func (b *CLIBridge) trackThread(t *trackedThread) {

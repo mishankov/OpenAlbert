@@ -2,9 +2,11 @@ package desktopapi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -509,5 +511,59 @@ func t3APIContract(t *testing.T, store domain.T3Store, repo domain.Repository) {
 	}
 	if len(hbResp2.ActiveThreadIDs) != 1 || hbResp2.ActiveThreadIDs[0] != activeThID {
 		t.Fatalf("expected heartbeat active_thread_ids=[%s], got %v", activeThID, hbResp2.ActiveThreadIDs)
+	}
+
+	// 7. POST /api/v1/t3/artifacts + GET /api/v1/t3/artifacts/{id}/content (owner topic scope).
+	var mp bytes.Buffer
+	mw := multipart.NewWriter(&mp)
+	fw, err := mw.CreateFormFile("file", "before-after.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pngBytes := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRfake-png-payload")
+	if _, err := fw.Write(pngBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upReq := httptest.NewRequest("POST", "/api/v1/t3/artifacts?conversation_id="+convID+"&name=collage.png", &mp)
+	upReq.Header.Set("Authorization", "Bearer "+api.Token)
+	upReq.Header.Set("Content-Type", mw.FormDataContentType())
+	wUp := httptest.NewRecorder()
+	h.ServeHTTP(wUp, upReq)
+	if wUp.Code != 201 {
+		t.Fatalf("artifact upload failed: %d %s", wUp.Code, wUp.Body.String())
+	}
+	var upResp struct {
+		ArtifactID string `json:"artifact_id"`
+		Name       string `json:"name"`
+		MIME       string `json:"mime"`
+		SizeBytes  int64  `json:"size_bytes"`
+	}
+	if err := json.Unmarshal(wUp.Body.Bytes(), &upResp); err != nil {
+		t.Fatalf("decode upload resp: %v", err)
+	}
+	if !strings.HasPrefix(upResp.ArtifactID, "t3art-") || upResp.Name != "collage.png" || upResp.MIME != "image/png" || upResp.SizeBytes != int64(len(pngBytes)) {
+		t.Fatalf("unexpected upload response: %+v", upResp)
+	}
+	dlReq := httptest.NewRequest("GET", "/api/v1/t3/artifacts/"+upResp.ArtifactID+"/content?conversation_id="+convID, nil)
+	dlReq.Header.Set("Authorization", "Bearer "+api.Token)
+	wDL := httptest.NewRecorder()
+	h.ServeHTTP(wDL, dlReq)
+	if wDL.Code != 200 || !bytes.Equal(wDL.Body.Bytes(), pngBytes) {
+		t.Fatalf("artifact download failed: %d len=%d", wDL.Code, wDL.Body.Len())
+	}
+	// Reject foreign conversation owned by another user.
+	foreignConv := domain.Conversation{ID: "telegram:group:-100999:topic:9", ChatID: -100999, ThreadID: 9, OwnerID: 999}
+	if err := repo.SaveConversation(ctx, foreignConv); err != nil {
+		t.Fatal(err)
+	}
+	badDL := httptest.NewRequest("GET", "/api/v1/t3/artifacts/"+upResp.ArtifactID+"/content?conversation_id="+foreignConv.ID, nil)
+	badDL.Header.Set("Authorization", "Bearer "+api.Token)
+	wBadDL := httptest.NewRecorder()
+	h.ServeHTTP(wBadDL, badDL)
+	if wBadDL.Code != 403 {
+		t.Fatalf("expected 403 for non-owner conversation artifact download, got %d %s", wBadDL.Code, wBadDL.Body.String())
 	}
 }
