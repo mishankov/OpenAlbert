@@ -255,9 +255,10 @@ func (b *CLIBridge) registerWithRetry(ctx context.Context) error {
 	}
 	for {
 		regCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		_, err := b.registerHost(regCtx)
+		resp, err := b.registerHost(regCtx)
 		cancel()
 		if err == nil {
+			b.seedActiveThreads(resp.ActiveThreadIDs)
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -366,19 +367,39 @@ func (b *CLIBridge) runHeartbeatLoop(ctx context.Context) {
 		case <-ticker.C:
 			hbCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			b.flushPendingResults(hbCtx)
-			_, err := b.client.HeartbeatT3Host(hbCtx, serverclient.T3HeartbeatRequest{
+			resp, err := b.client.HeartbeatT3Host(hbCtx, serverclient.T3HeartbeatRequest{
 				EnvironmentID:   b.envID,
 				ActiveThreadIDs: b.activeThreadIDs(),
 			})
 			cancel()
 			if err != nil {
 				b.logger.Warn("CLI bridge heartbeat failed", "error", err)
+			} else {
+				b.seedActiveThreads(resp.ActiveThreadIDs)
 			}
 		}
 	}
 }
 
+func (b *CLIBridge) pollActiveThreads(ctx context.Context) {
+	ids := b.activeThreadIDs()
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return
+		}
+		pollCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		_, err := b.pollSingleThread(pollCtx, id, false)
+		cancel()
+		if err != nil {
+			b.logger.Warn("CLI bridge poll failed", "thread_id", id, "error", err)
+		}
+	}
+}
+
 func (b *CLIBridge) runWatcherLoop(ctx context.Context) {
+	// Immediately reconcile any active threads recovered from server registration.
+	b.pollActiveThreads(ctx)
+
 	interval := b.WatchInterval
 	if interval <= 0 {
 		interval = defaultCLIWatchInterval
@@ -390,18 +411,7 @@ func (b *CLIBridge) runWatcherLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ids := b.activeThreadIDs()
-			for _, id := range ids {
-				if ctx.Err() != nil {
-					return
-				}
-				pollCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-				_, err := b.pollSingleThread(pollCtx, id, false)
-				cancel()
-				if err != nil {
-					b.logger.Warn("CLI bridge poll failed", "thread_id", id, "error", err)
-				}
-			}
+			b.pollActiveThreads(ctx)
 		}
 	}
 }
@@ -791,6 +801,29 @@ func (b *CLIBridge) trackThread(t *trackedThread) {
 	t.gen = b.nextTrackGen
 	b.activeThreads[t.threadID] = t
 	b.mu.Unlock()
+}
+
+func (b *CLIBridge) seedActiveThreads(threadIDs []string) {
+	if len(threadIDs) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, rawID := range threadIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if _, exists := b.activeThreads[id]; exists {
+			continue
+		}
+		b.nextTrackGen++
+		b.activeThreads[id] = &trackedThread{
+			threadID:  id,
+			gen:       b.nextTrackGen,
+			wasActive: true,
+		}
+	}
 }
 
 func (b *CLIBridge) ensureTrackedActive(threadID string) {

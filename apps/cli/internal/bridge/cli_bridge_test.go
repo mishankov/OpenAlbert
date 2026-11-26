@@ -255,3 +255,100 @@ func TestCLIBridgeLaunchSendWatchAndCrossPlatformArgs(t *testing.T) {
 		return ok && res.OK
 	})
 }
+
+func TestCLIBridgeRecoversActiveThreadsAfterRestart(t *testing.T) {
+	baseDir := t.TempDir()
+	userData := filepath.Join(baseDir, "userdata")
+	if err := os.MkdirAll(userData, 0o700); err != nil {
+		t.Fatalf("mkdir userdata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(userData, "environment-id"), []byte("env-recover-1\n"), 0o600); err != nil {
+		t.Fatalf("write environment-id: %v", err)
+	}
+
+	var (
+		mu     sync.Mutex
+		events []serverclient.T3ThreadEvent
+	)
+	piSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/t3/hosts/register":
+			_ = json.NewEncoder(w).Encode(serverclient.T3HostRegisterResponse{
+				HostID:          "h-rec",
+				EnvironmentID:   "env-recover-1",
+				ActiveThreadIDs: []string{"th-finished-while-down"},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/t3/heartbeat":
+			_ = json.NewEncoder(w).Encode(serverclient.T3HeartbeatResponse{OK: true})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/t3/commands/stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/t3/events":
+			var ev serverclient.T3ThreadEvent
+			_ = json.NewDecoder(r.Body).Decode(&ev)
+			mu.Lock()
+			events = append(events, ev)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer piSrv.Close()
+
+	runner := func(ctx context.Context, bin string, args []string, stdin string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "thread" && args[1] == "show" {
+			return json.Marshal(map[string]any{
+				"thread": map[string]any{
+					"threadId":          "th-finished-while-down",
+					"title":             "Polka #64",
+					"status":            "completed",
+					"linkedPullRequest": map[string]any{"url": "https://github.com/mishankov/polka/pull/134"},
+					"itemCount":         150,
+				},
+				"messages": []map[string]any{
+					{"role": "assistant", "text": "Opened PR #134."},
+				},
+			})
+		}
+		return nil, fmt.Errorf("unexpected args: %v", args)
+	}
+
+	cfg := config.Config{
+		ServerURL:      piSrv.URL,
+		Token:          "tok",
+		StateDir:       t.TempDir(),
+		CustomStateDir: true,
+		HostLabel:      "MacBook Air",
+		T3BaseDir:      baseDir,
+	}
+	b, err := newCLIBridgeWithRunner(cfg, serverclient.New(cfg.ServerURL, cfg.Token, 5*time.Second), nil, runner)
+	if err != nil {
+		t.Fatalf("newCLIBridgeWithRunner: %v", err)
+	}
+	b.WatchInterval = 5 * time.Second // must still recover immediately via startup poll!
+	b.HeartbeatInterval = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- b.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		for _, ev := range events {
+			if ev.Kind == "thread_completed" && ev.ThreadID == "th-finished-while-down" && ev.PRURL == "https://github.com/mishankov/polka/pull/134" {
+				mu.Unlock()
+				return
+			}
+		}
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("expected immediate thread_completed recovery after bridge restart, got events: %+v", events)
+}

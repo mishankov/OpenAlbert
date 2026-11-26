@@ -469,4 +469,45 @@ func t3APIContract(t *testing.T, store domain.T3Store, repo domain.Repository) {
 	if !foundDeferredWake {
 		t.Fatalf("expected deferred wake for empty occurred_at event %s in conversation %s", deferredEvID, convID)
 	}
+
+	// 6. Register and heartbeat return active_thread_ids for non-terminal threads only.
+	activeThID := nonce + "-th-active"
+	activeCmd, err := cp.EnqueueCommand(ctx, "", envID, domain.T3ActionThreadLaunch, map[string]any{
+		"project_id":      "proj-1",
+		"title":           "Still Running",
+		"message":         "run",
+		"conversation_id": convID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := call(t, h, "POST", "/api/v1/t3/commands/"+activeCmd.ID+"/result", fmt.Sprintf(`{"environment_id":%q,"ok":true,"result":{"thread_id":%q,"status":"running"}}`, envID, activeThID)); w.Code != 200 {
+		t.Fatalf("active launch result failed: %d %s", w.Code, w.Body.String())
+	}
+	wReg := call(t, h, "POST", "/api/v1/t3/hosts/register", fmt.Sprintf(`{"environment_id":%q,"label":"Host","projects":[],"providers":[]}`, envID))
+	if wReg.Code != 200 {
+		t.Fatalf("re-register failed: %d %s", wReg.Code, wReg.Body.String())
+	}
+	var regResp2 struct {
+		ActiveThreadIDs []string `json:"active_thread_ids"`
+	}
+	if err := json.Unmarshal(wReg.Body.Bytes(), &regResp2); err != nil {
+		t.Fatalf("decode register resp: %v", err)
+	}
+	if len(regResp2.ActiveThreadIDs) != 1 || regResp2.ActiveThreadIDs[0] != activeThID {
+		t.Fatalf("expected register active_thread_ids=[%s], got %v", activeThID, regResp2.ActiveThreadIDs)
+	}
+	wHB := call(t, h, "POST", "/api/v1/t3/heartbeat", fmt.Sprintf(`{"environment_id":%q,"active_thread_ids":[]}`, envID))
+	if wHB.Code != 200 {
+		t.Fatalf("heartbeat failed: %d %s", wHB.Code, wHB.Body.String())
+	}
+	var hbResp2 struct {
+		ActiveThreadIDs []string `json:"active_thread_ids"`
+	}
+	if err := json.Unmarshal(wHB.Body.Bytes(), &hbResp2); err != nil {
+		t.Fatalf("decode heartbeat resp: %v", err)
+	}
+	if len(hbResp2.ActiveThreadIDs) != 1 || hbResp2.ActiveThreadIDs[0] != activeThID {
+		t.Fatalf("expected heartbeat active_thread_ids=[%s], got %v", activeThID, hbResp2.ActiveThreadIDs)
+	}
 }

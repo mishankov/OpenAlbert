@@ -56,6 +56,29 @@ func (a *API) t3Error(w http.ResponseWriter, err error) {
 	}
 }
 
+func (a *API) activeT3ThreadIDsForHost(ctx context.Context, envID string) []string {
+	ids := []string{}
+	if a.T3 == nil || strings.TrimSpace(envID) == "" {
+		return ids
+	}
+	threads, err := a.T3.ListThreads(ctx, domain.T3ThreadFilter{
+		HostID: strings.TrimSpace(envID),
+		Limit:  100,
+	})
+	if err != nil {
+		return ids
+	}
+	for _, th := range threads {
+		switch strings.ToLower(strings.TrimSpace(th.Status)) {
+		case "", "running", "starting", "queued", "waiting_input":
+			if tid := strings.TrimSpace(th.ThreadID); tid != "" {
+				ids = append(ids, tid)
+			}
+		}
+	}
+	return ids
+}
+
 func (a *API) t3HostRegister(w http.ResponseWriter, r *http.Request) {
 	if !a.requireT3(w) {
 		return
@@ -70,9 +93,10 @@ func (a *API) t3HostRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, 200, map[string]any{
-		"host_id":        host.HostID,
-		"environment_id": host.EnvironmentID,
-		"registered_at":  host.UpdatedAt.UTC().Format(time.RFC3339),
+		"host_id":           host.HostID,
+		"environment_id":    host.EnvironmentID,
+		"registered_at":     host.UpdatedAt.UTC().Format(time.RFC3339),
+		"active_thread_ids": a.activeT3ThreadIDsForHost(r.Context(), host.EnvironmentID),
 	})
 }
 
@@ -93,8 +117,9 @@ func (a *API) t3Heartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, 200, map[string]any{
-		"ok":          true,
-		"server_time": serverTime.UTC().Format(time.RFC3339),
+		"ok":                true,
+		"server_time":       serverTime.UTC().Format(time.RFC3339),
+		"active_thread_ids": a.activeT3ThreadIDsForHost(r.Context(), req.EnvironmentID),
 	})
 }
 

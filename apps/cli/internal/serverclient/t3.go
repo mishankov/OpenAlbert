@@ -38,9 +38,10 @@ type T3HostRegisterRequest struct {
 }
 
 type T3HostRegisterResponse struct {
-	HostID        string `json:"host_id"`
-	EnvironmentID string `json:"environment_id"`
-	RegisteredAt  string `json:"registered_at"`
+	HostID          string   `json:"host_id"`
+	EnvironmentID   string   `json:"environment_id"`
+	RegisteredAt    string   `json:"registered_at"`
+	ActiveThreadIDs []string `json:"active_thread_ids,omitempty"`
 }
 
 type T3HeartbeatRequest struct {
@@ -49,8 +50,9 @@ type T3HeartbeatRequest struct {
 }
 
 type T3HeartbeatResponse struct {
-	OK         bool   `json:"ok"`
-	ServerTime string `json:"server_time"`
+	OK              bool     `json:"ok"`
+	ServerTime      string   `json:"server_time"`
+	ActiveThreadIDs []string `json:"active_thread_ids,omitempty"`
 }
 
 type T3Command struct {
