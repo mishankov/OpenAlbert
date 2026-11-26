@@ -88,6 +88,7 @@ func TestBridgeSteerIdleFallbackArtifactsAttachmentsAndBackgroundGuard(t *testin
 		sendModes      []string
 		sendClientIDs  []string
 		lastLaunchMsg  string
+		lastReadArgs   map[string]any
 		uploadedName   string
 		uploadedData   string
 		rejectIdleOnce = true
@@ -167,6 +168,7 @@ func TestBridgeSteerIdleFallbackArtifactsAttachmentsAndBackgroundGuard(t *testin
 				_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"content": []map[string]string{{"type": "text", "text": `{"runId":"run-9"}`}}}})
 				return
 			case "t3_thread_read":
+				lastReadArgs = p.Arguments
 				tid, _ := p.Arguments["threadId"].(string)
 				mu.Unlock()
 				var payload map[string]any
@@ -314,7 +316,22 @@ func TestBridgeSteerIdleFallbackArtifactsAttachmentsAndBackgroundGuard(t *testin
 		t.Fatalf("unexpected uploaded artifact: name=%q data=%q", gotUpName, gotUpData)
 	}
 
-	// 4. pendingBackgroundTasks prevents premature thread_completed.
+	// 4. thread_read forwards maxCharsPerItem=20000 by default so long worker reports are not truncated at 500 chars.
+	if _, err := b.dispatchCommand(ctx, mgr, serverclient.T3Command{
+		CommandID: "cmd-read-full",
+		Action:    "thread_read",
+		Payload:   json.RawMessage(`{"thread_id":"th-att","view":"messages","limit":5}`),
+	}); err != nil {
+		t.Fatalf("thread_read failed: %v", err)
+	}
+	mu.Lock()
+	gotMaxChars, _ := lastReadArgs["maxCharsPerItem"].(float64)
+	mu.Unlock()
+	if gotMaxChars != 20000 {
+		t.Fatalf("expected thread_read maxCharsPerItem=20000, got %v", gotMaxChars)
+	}
+
+	// 5. pendingBackgroundTasks prevents premature thread_completed.
 	b.trackThread(&trackedThread{threadID: "th-bg", wasActive: true})
 	ev, err := b.pollSingleThread(ctx, mgr, "th-bg", false, false)
 	if err != nil {
@@ -325,6 +342,12 @@ func TestBridgeSteerIdleFallbackArtifactsAttachmentsAndBackgroundGuard(t *testin
 	}
 	if !containsString(b.ActiveThreadIDs(), "th-bg") {
 		t.Fatalf("th-bg must stay tracked while pendingBackgroundTasks non-empty, active=%v", b.ActiveThreadIDs())
+	}
+	mu.Lock()
+	gotPollMaxChars, _ := lastReadArgs["maxCharsPerItem"].(float64)
+	mu.Unlock()
+	if gotPollMaxChars != 4000 {
+		t.Fatalf("expected pollSingleThread maxCharsPerItem=4000, got %v", gotPollMaxChars)
 	}
 }
 

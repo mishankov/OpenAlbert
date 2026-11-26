@@ -104,7 +104,7 @@ func (a *Activities) t3ConversationContext(ctx context.Context, conv domain.Conv
 		}
 		for _, th := range all {
 			switch strings.ToLower(strings.TrimSpace(th.Status)) {
-			case "running", "starting", "queued", "waiting_input":
+			case "running", "starting", "preparing", "queued", "waiting", "waiting_input":
 				threads = append(threads, th)
 			}
 			if len(threads) >= 10 {
