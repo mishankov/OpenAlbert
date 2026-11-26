@@ -638,7 +638,7 @@ func (b *T3WorkspaceBridge) postLaunchedCard(ctx context.Context, event domain.T
 	if branch := strings.TrimSpace(event.Branch); branch != "" {
 		fmt.Fprintf(&msg, "\nВетка: %s", clipRunes(branch, 80))
 	}
-	if link := strings.TrimSpace(event.Link); link != "" {
+	if link := formatT3WebThreadLink(event.Link, event.EnvironmentID, event.ThreadID); link != "" {
 		fmt.Fprintf(&msg, "\n%s", clipRunes(link, 240))
 	}
 	text := clipUTF16(msg.String(), messagefmt.TextLimit)
@@ -659,6 +659,32 @@ func (b *T3WorkspaceBridge) postLaunchedCard(ctx context.Context, event domain.T
 		_ = b.repo.SaveCheckpoint(ctx, cpKey, json.RawMessage(`true`))
 	}
 	return nil
+}
+
+// formatT3WebThreadLink converts internal t3-thread:// or markdown links into a
+// plain clickable https://app.t3.codes/threads/... URL for Telegram messages.
+func formatT3WebThreadLink(rawLink, envID, threadID string) string {
+	s := strings.TrimSpace(rawLink)
+	if strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://") {
+		return s
+	}
+	if idx := strings.Index(s, "t3-thread://v2/"); idx >= 0 {
+		rest := s[idx+len("t3-thread://v2/"):]
+		if end := strings.IndexAny(rest, ")\r\n\t "); end >= 0 {
+			rest = rest[:end]
+		}
+		if slash := strings.IndexByte(rest, '/'); slash > 0 && slash < len(rest)-1 {
+			env := strings.TrimSpace(rest[:slash])
+			tid := strings.TrimSpace(rest[slash+1:])
+			if env != "" && tid != "" {
+				return fmt.Sprintf("https://app.t3.codes/threads/%s/%s", url.PathEscape(env), url.PathEscape(tid))
+			}
+		}
+	}
+	if strings.TrimSpace(envID) != "" && strings.TrimSpace(threadID) != "" {
+		return fmt.Sprintf("https://app.t3.codes/threads/%s/%s", url.PathEscape(strings.TrimSpace(envID)), url.PathEscape(strings.TrimSpace(threadID)))
+	}
+	return s
 }
 
 func (b *T3WorkspaceBridge) isWorkspaceChatTitleFallback(ctx context.Context, candidate string) bool {

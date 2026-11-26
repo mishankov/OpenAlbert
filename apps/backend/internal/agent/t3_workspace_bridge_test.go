@@ -1579,7 +1579,7 @@ func TestT3WorkspaceBridgePostsLaunchCardAndAutoRecreatesDeletedTopic(t *testing
 	}
 	foundLaunchCard := false
 	for _, m := range transport.sentMessages {
-		if m.conv.ThreadID == 201 && strings.Contains(m.text, "Воркер запущен") && strings.Contains(m.text, "t3-thread://v2/env-mac/th-polka-64") {
+		if m.conv.ThreadID == 201 && strings.Contains(m.text, "Воркер запущен") && strings.Contains(m.text, "https://app.t3.codes/threads/env-mac/th-polka-64") && !strings.Contains(m.text, "t3-thread://") {
 			foundLaunchCard = true
 		}
 	}
