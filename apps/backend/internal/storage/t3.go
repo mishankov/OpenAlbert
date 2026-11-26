@@ -97,8 +97,8 @@ func (s *Store) UpsertT3Host(ctx context.Context, host domain.T3Host) (domain.T3
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (environment_id) DO UPDATE SET
 			label = excluded.label,
-			projects_json = excluded.projects_json,
-			providers_json = excluded.providers_json,
+			projects_json = CASE WHEN jsonb_array_length(excluded.projects_json) > 0 THEN excluded.projects_json ELSE openalbert_t3_hosts.projects_json END,
+			providers_json = CASE WHEN jsonb_array_length(excluded.providers_json) > 0 THEN excluded.providers_json ELSE openalbert_t3_hosts.providers_json END,
 			last_seen_at = excluded.last_seen_at,
 			updated_at = excluded.updated_at
 		RETURNING environment_id, host_id, label, projects_json, providers_json, last_seen_at, created_at, updated_at

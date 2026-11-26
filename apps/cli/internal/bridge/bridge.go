@@ -1600,21 +1600,22 @@ func normalizePendingRequest(pendingID string, raw json.RawMessage) json.RawMess
 }
 
 type threadReadSnapshot struct {
-	ThreadID           string
-	ProjectID          string
-	Title              string
-	Link               string
-	Status             string
-	LatestRunID        string
-	LatestRunStatus    string
-	ProviderInstanceID string
-	Model              string
-	Branch             string
-	PRURL              string
-	Summary            string
-	Error              string
-	Output             json.RawMessage
-	ItemCount          int
+	ThreadID            string
+	ProjectID           string
+	Title               string
+	Link                string
+	Status              string
+	LatestRunID         string
+	LatestRunStatus     string
+	ProviderInstanceID  string
+	Model               string
+	Branch              string
+	PRURL               string
+	Summary             string
+	Error               string
+	Output              json.RawMessage
+	ItemCount           int
+	PendingRequestCount int
 }
 
 func parseThreadReadSnapshot(raw json.RawMessage, fallbackThreadID string) threadReadSnapshot {
@@ -1636,8 +1637,9 @@ func parseThreadReadSnapshot(raw json.RawMessage, fallbackThreadID string) threa
 			PullRequests []struct {
 				URL string `json:"url"`
 			} `json:"pullRequests"`
-			ItemCount int    `json:"itemCount"`
-			Error     string `json:"error"`
+			ItemCount           int    `json:"itemCount"`
+			PendingRequestCount int    `json:"pendingRequestCount"`
+			Error               string `json:"error"`
 		} `json:"thread"`
 		RecentRuns []struct {
 			RunID  string          `json:"runId"`
@@ -1650,6 +1652,10 @@ func parseThreadReadSnapshot(raw json.RawMessage, fallbackThreadID string) threa
 			Role string `json:"role"`
 			Text string `json:"text"`
 		} `json:"items"`
+		Messages []struct {
+			Role string `json:"role"`
+			Text string `json:"text"`
+		} `json:"messages"`
 		// Flat fallbacks for simpler responses.
 		Status  string          `json:"status"`
 		Summary string          `json:"summary"`
@@ -1678,6 +1684,7 @@ func parseThreadReadSnapshot(raw json.RawMessage, fallbackThreadID string) threa
 		snap.Model = resp.Thread.Model
 		snap.Branch = resp.Thread.Branch
 		snap.ItemCount = resp.Thread.ItemCount
+		snap.PendingRequestCount = resp.Thread.PendingRequestCount
 		snap.Error = firstNonEmpty(resp.Thread.Error, snap.Error)
 		if resp.Thread.LinkedPullRequest != nil && resp.Thread.LinkedPullRequest.URL != "" {
 			snap.PRURL = resp.Thread.LinkedPullRequest.URL
@@ -1708,6 +1715,16 @@ func parseThreadReadSnapshot(raw json.RawMessage, fallbackThreadID string) threa
 			}
 			if t == "assistant_message" || t == "agent_message" || r == "assistant" {
 				snap.Summary = truncateRunes(strings.TrimSpace(item.Text), maxSummaryRunes)
+				break
+			}
+		}
+	}
+	if snap.Summary == "" && len(resp.Messages) > 0 {
+		// t3 thread show --json returns messages oldest-first; scan from newest to oldest.
+		for i := len(resp.Messages) - 1; i >= 0; i-- {
+			m := resp.Messages[i]
+			if strings.EqualFold(strings.TrimSpace(m.Role), "assistant") && strings.TrimSpace(m.Text) != "" {
+				snap.Summary = truncateRunes(strings.TrimSpace(m.Text), maxSummaryRunes)
 				break
 			}
 		}

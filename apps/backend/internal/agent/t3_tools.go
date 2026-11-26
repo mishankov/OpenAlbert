@@ -185,6 +185,31 @@ func (a *Activities) executeT3(ctx context.Context, in ToolInput) (any, error) {
 		if convID == "" {
 			convID = in.Conversation.ID
 		}
+		// Automatically create a dedicated forum topic when launching from the
+		// workspace #Control (General, topic:0) topic so workers never pile up in General.
+		if a.WorkspaceGroupID < 0 && a.workspaceTransport() != nil && convID == fmt.Sprintf("telegram:group:%d:topic:0", a.WorkspaceGroupID) {
+			topicTitle, titleErr := formatTopicTitle("🔄", strings.TrimSpace(p.Title))
+			if titleErr != nil {
+				topicTitle = "🔄 Задача"
+			}
+			if topic, createErr := a.workspaceTransport().CreateForumTopic(ctx, a.WorkspaceGroupID, topicTitle, 0); createErr == nil && topic.ThreadID > 0 {
+				name := strings.TrimSpace(topic.Name)
+				if name == "" {
+					name = topicTitle
+				}
+				newConv := domain.Conversation{
+					ID:       fmt.Sprintf("telegram:group:%d:topic:%d", a.WorkspaceGroupID, topic.ThreadID),
+					Title:    name,
+					ChatID:   a.WorkspaceGroupID,
+					ThreadID: topic.ThreadID,
+					OwnerID:  a.OwnerUserID,
+					Private:  false,
+				}
+				if a.Repo == nil || a.Repo.SaveConversation(ctx, newConv) == nil {
+					convID = newConv.ID
+				}
+			}
+		}
 		taskID := strings.TrimSpace(p.TaskID)
 		if taskID == "" {
 			taskID = in.TaskID

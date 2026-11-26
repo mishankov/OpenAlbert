@@ -339,3 +339,95 @@ func TestT3SevenToolsLifecycle(t *testing.T) {
 		t.Fatalf("expected clean queued response for offline host, got: %s", out)
 	}
 }
+
+func TestT3ThreadLaunchAutoCreatesTopicFromWorkspaceControlAndPreservesCatalog(t *testing.T) {
+	ctx := context.Background()
+	repo := storage.NewMemory()
+	transport := &fakeWorkspaceTransport{nextThreadID: 50}
+	cp := t3.New(repo, repo, t3.Config{
+		OwnerUserID:     7,
+		OnlineThreshold: 3 * time.Minute,
+		DispatchTimeout: 2 * time.Second,
+	})
+	if _, err := cp.RegisterHost(ctx, t3.RegisterHostRequest{
+		EnvironmentID: "env-mac",
+		Label:         "MacBook Air",
+		Projects:      []domain.T3Project{{ID: "p1", Title: "Polka", WorkspaceRoot: "/polka"}},
+		Providers:     []domain.T3Provider{{ProviderInstanceID: "antigravity", Models: []domain.T3Model{{ID: "gemini-4-neon"}}}},
+	}); err != nil {
+		t.Fatalf("RegisterHost initial: %v", err)
+	}
+	// Re-register with empty slices (as standalone CLI bridge does) -> catalog must be preserved!
+	updated, err := cp.RegisterHost(ctx, t3.RegisterHostRequest{
+		EnvironmentID: "env-mac",
+		Label:         "MacBook Air",
+		Projects:      []domain.T3Project{},
+		Providers:     []domain.T3Provider{},
+	})
+	if err != nil {
+		t.Fatalf("RegisterHost empty refresh: %v", err)
+	}
+	if len(updated.Projects) != 1 || len(updated.Providers) != 1 {
+		t.Fatalf("expected existing projects/providers catalog to be preserved, got projects=%d providers=%d", len(updated.Projects), len(updated.Providers))
+	}
+
+	act := &Activities{
+		Repo:             repo,
+		Workspace:        transport,
+		T3:               cp,
+		OwnerUserID:      7,
+		WorkspaceGroupID: -100555,
+	}
+	controlConv := domain.Conversation{
+		ID:       "telegram:group:-100555:topic:0",
+		ChatID:   -100555,
+		ThreadID: 0,
+		OwnerID:  7,
+	}
+
+	// Simulate fast bridge completing the command in background.
+	go func() {
+		for range 50 {
+			cmds, _ := cp.ClaimPendingCommands(ctx, "env-mac", 10)
+			if len(cmds) > 0 {
+				_ = cp.RecordCommandResult(ctx, cmds[0].ID, t3.CommandResultRequest{
+					EnvironmentID: "env-mac",
+					OK:            true,
+					Result:        json.RawMessage(`{"thread_id":"th-auto-1","status":"running"}`),
+				})
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	_, err = act.executeT3(ctx, ToolInput{
+		Conversation: controlConv,
+		RunKey:       "run-auto-topic",
+		Step:         1,
+		Call: domain.ToolCall{
+			ID:   "c-auto",
+			Name: "t3_thread_launch",
+			Arguments: json.RawMessage(`{
+				"host_id": "env-mac",
+				"project_id": "p1",
+				"title": "Polka #64",
+				"message": "Fix bug",
+				"model_selection": {"provider_instance_id": "antigravity", "model_id": "gemini-4-neon"}
+			}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("executeT3 t3_thread_launch: %v", err)
+	}
+	if len(transport.createdTopics) != 1 || transport.createdTopics[0].ThreadID != 51 {
+		t.Fatalf("expected auto-created forum topic 51, got %+v", transport.createdTopics)
+	}
+	th, err := cp.Thread(ctx, "th-auto-1")
+	if err != nil {
+		t.Fatalf("Thread: %v", err)
+	}
+	if th.ConversationID != "telegram:group:-100555:topic:51" {
+		t.Fatalf("expected launched thread bound to auto-created topic 51, got %q", th.ConversationID)
+	}
+}
