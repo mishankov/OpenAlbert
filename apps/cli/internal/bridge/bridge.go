@@ -885,17 +885,18 @@ func providerDisabled(constraints []string) bool {
 }
 
 type threadLaunchPayload struct {
-	ProjectID         string         `json:"project_id"`
-	Title             string         `json:"title"`
-	Message           string         `json:"message"`
-	ModelSelection    map[string]any `json:"model_selection"`
-	WorkspaceStrategy map[string]any `json:"workspace_strategy"`
-	OutputSchema      map[string]any `json:"output_schema"`
-	RuntimeMode       string         `json:"runtime_mode"`
-	InteractionMode   string         `json:"interaction_mode"`
-	ConversationID    string         `json:"conversation_id"`
-	TaskID            string         `json:"task_id"`
-	AttachmentIDs     []string       `json:"attachment_ids"`
+	ProjectID                string         `json:"project_id"`
+	Title                    string         `json:"title"`
+	Message                  string         `json:"message"`
+	ModelSelection           map[string]any `json:"model_selection"`
+	WorkspaceStrategy        map[string]any `json:"workspace_strategy"`
+	OutputSchema             map[string]any `json:"output_schema"`
+	RuntimeMode              string         `json:"runtime_mode"`
+	InteractionMode          string         `json:"interaction_mode"`
+	ConversationID           string         `json:"conversation_id"`
+	TaskID                   string         `json:"task_id"`
+	AttachmentIDs            []string       `json:"attachment_ids"`
+	AttachmentConversationID string         `json:"attachment_conversation_id"`
 }
 
 func normalizeModelSelection(in map[string]any) map[string]any {

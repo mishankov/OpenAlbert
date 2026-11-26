@@ -103,6 +103,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/t3/commands/stream", a.t3CommandStream)
 	mux.HandleFunc("POST /api/v1/t3/commands/{command_id}/result", a.t3CommandResult)
 	mux.HandleFunc("POST /api/v1/t3/events", a.t3Event)
+	mux.HandleFunc("POST /api/v1/t3/artifacts", a.t3ArtifactUpload)
+	mux.HandleFunc("GET /api/v1/t3/artifacts/{id}/content", a.t3ArtifactDownload)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")

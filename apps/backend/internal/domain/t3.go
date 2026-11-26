@@ -23,6 +23,7 @@ const (
 	T3ActionThreadRead       = "thread_read"
 	T3ActionThreadRespond    = "thread_respond"
 	T3ActionThreadControl    = "thread_control"
+	T3ActionArtifactFetch    = "artifact_fetch"
 
 	T3EventThreadLaunched     = "thread_launched"
 	T3EventThreadProgress     = "thread_progress"
@@ -42,7 +43,7 @@ func ValidT3EventKind(kind string) bool {
 
 func ValidT3CommandAction(action string) bool {
 	switch action {
-	case T3ActionSyncCapabilities, T3ActionThreadLaunch, T3ActionThreadSend, T3ActionThreadRead, T3ActionThreadRespond, T3ActionThreadControl:
+	case T3ActionSyncCapabilities, T3ActionThreadLaunch, T3ActionThreadSend, T3ActionThreadRead, T3ActionThreadRespond, T3ActionThreadControl, T3ActionArtifactFetch:
 		return true
 	default:
 		return false

@@ -2,11 +2,16 @@ package desktopapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -345,4 +350,152 @@ func (a *API) t3Event(w http.ResponseWriter, r *http.Request) {
 		"ok":           true,
 		"deduplicated": deduplicated,
 	})
+}
+
+func (a *API) resolveT3ArtifactScope(ctx context.Context, requested string) (string, int, string) {
+	convID := strings.TrimSpace(requested)
+	if convID == "" || convID == a.scope() {
+		return a.scope(), 0, ""
+	}
+	if a.Repo == nil {
+		return "", 503, "Storage unavailable"
+	}
+	conv, found, err := a.Repo.Conversation(ctx, convID)
+	if err != nil {
+		return "", 500, ""
+	}
+	if !found {
+		return "", 404, "Conversation not found"
+	}
+	if a.OwnerID > 0 && conv.OwnerID != a.OwnerID {
+		return "", 403, "Conversation does not belong to owner"
+	}
+	return conv.ID, 0, ""
+}
+
+func (a *API) t3ArtifactUpload(w http.ResponseWriter, r *http.Request) {
+	if !a.requireT3(w) {
+		return
+	}
+	convID, errCode, errMsg := a.resolveT3ArtifactScope(r.Context(), r.URL.Query().Get("conversation_id"))
+	if errCode != 0 {
+		if errCode == 500 {
+			internal(w)
+		} else {
+			fail(w, errCode, "invalid_request", errMsg)
+		}
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, MaxAttachmentBytes+(1<<20))
+	reader, err := r.MultipartReader()
+	if err != nil {
+		fail(w, 400, "invalid_request", "Expected multipart file")
+		return
+	}
+	var art domain.Artifact
+	found := false
+	for {
+		part, e := reader.NextPart()
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			fail(w, 413, "too_large", "Invalid or oversized upload")
+			return
+		}
+		if part.FormName() != "file" || part.FileName() == "" || found {
+			fail(w, 400, "invalid_request", "Expected exactly one file part")
+			return
+		}
+		found = true
+		data, e := io.ReadAll(io.LimitReader(part, MaxAttachmentBytes+1))
+		if e != nil {
+			fail(w, 400, "invalid_request", "Cannot read upload")
+			return
+		}
+		if len(data) > MaxAttachmentBytes {
+			fail(w, 413, "too_large", "Artifact exceeds 20 MiB")
+			return
+		}
+		name := strings.TrimSpace(r.URL.Query().Get("name"))
+		if name == "" {
+			name = part.FileName()
+		}
+		name = filepath.Base(strings.ReplaceAll(name, "\\", "/"))
+		if name == "" || name == "." || name == ".." || len(name) > 255 || strings.ContainsAny(name, "\r\n\x00") {
+			fail(w, 400, "invalid_request", "Invalid filename")
+			return
+		}
+		kind, mimeErr := attachmentMIME(data, part.Header.Get("Content-Type"))
+		if mimeErr != nil {
+			fail(w, 400, "invalid_request", mimeErr.Error())
+			return
+		}
+		random := make([]byte, 16)
+		if _, e = rand.Read(random); e != nil {
+			internal(w)
+			return
+		}
+		art = domain.Artifact{
+			ID:             "t3art-" + hex.EncodeToString(random),
+			ConversationID: convID,
+			Name:           name,
+			MIME:           kind,
+			Data:           data,
+			SizeBytes:      int64(len(data)),
+			CreatedAt:      time.Now().UTC(),
+		}
+	}
+	if !found {
+		fail(w, 400, "invalid_request", "Expected one file")
+		return
+	}
+	if err = a.Repo.SaveArtifact(r.Context(), art); err != nil {
+		internal(w)
+		return
+	}
+	respond(w, 201, map[string]any{
+		"artifact_id": art.ID,
+		"name":        art.Name,
+		"mime":        art.MIME,
+		"size_bytes":  art.SizeBytes,
+	})
+}
+
+func (a *API) t3ArtifactDownload(w http.ResponseWriter, r *http.Request) {
+	if !a.requireT3(w) {
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		fail(w, 400, "invalid_request", "Artifact id is required")
+		return
+	}
+	convID, errCode, errMsg := a.resolveT3ArtifactScope(r.Context(), r.URL.Query().Get("conversation_id"))
+	if errCode != 0 {
+		if errCode == 500 {
+			internal(w)
+		} else {
+			fail(w, errCode, "invalid_request", errMsg)
+		}
+		return
+	}
+	art, ok, err := a.Repo.Artifact(r.Context(), convID, id)
+	if err != nil {
+		internal(w)
+		return
+	}
+	if !ok {
+		fail(w, 404, "not_found", "Artifact not found")
+		return
+	}
+	kind, _, e := mime.ParseMediaType(art.MIME)
+	if e != nil {
+		kind = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", kind)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": art.Name}))
+	w.Header().Set("Content-Length", strconv.Itoa(len(art.Data)))
+	w.WriteHeader(200)
+	_, _ = w.Write(art.Data)
 }

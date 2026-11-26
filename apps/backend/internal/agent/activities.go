@@ -525,7 +525,7 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 		accessErr = a.backupAccess(in.Conversation)
 	case "logs_search":
 		accessErr = a.logSearchAccess(in)
-	case "t3_hosts", "t3_threads_list", "t3_thread_launch", "t3_thread_send", "t3_thread_read", "t3_thread_respond", "t3_thread_control":
+	case "t3_hosts", "t3_threads_list", "t3_thread_launch", "t3_thread_send", "t3_thread_read", "t3_thread_respond", "t3_thread_control", "t3_artifact_fetch":
 		accessErr = a.t3Access(in)
 	case "task_update":
 		accessErr = taskUpdateAccess(in)

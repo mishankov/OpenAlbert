@@ -2,12 +2,16 @@ package serverclient
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 )
 
@@ -227,4 +231,131 @@ func (c *Client) PostT3CommandResult(ctx context.Context, commandID string, req 
 
 func (c *Client) PostT3Event(ctx context.Context, ev T3ThreadEvent) error {
 	return c.doJSON(ctx, http.MethodPost, "/api/v1/t3/events", ev, nil)
+}
+
+type T3ArtifactUploadResponse struct {
+	ArtifactID string `json:"artifact_id"`
+	Name       string `json:"name"`
+	MIME       string `json:"mime"`
+	SizeBytes  int64  `json:"size_bytes"`
+}
+
+const maxT3ArtifactBytes = 20 << 20
+
+func (c *Client) UploadT3Artifact(ctx context.Context, conversationID, filename string, data []byte) (T3ArtifactUploadResponse, error) {
+	if len(data) > maxT3ArtifactBytes {
+		return T3ArtifactUploadResponse{}, fmt.Errorf("artifact exceeds 20 MiB limit")
+	}
+	baseName := filepath.Base(strings.ReplaceAll(strings.TrimSpace(filename), "\\", "/"))
+	if baseName == "" || baseName == "." || baseName == ".." {
+		baseName = "artifact.bin"
+	}
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", baseName)
+	if err != nil {
+		return T3ArtifactUploadResponse{}, err
+	}
+	if _, err := part.Write(data); err != nil {
+		return T3ArtifactUploadResponse{}, err
+	}
+	if err := mw.Close(); err != nil {
+		return T3ArtifactUploadResponse{}, err
+	}
+
+	q := url.Values{}
+	if strings.TrimSpace(conversationID) != "" {
+		q.Set("conversation_id", strings.TrimSpace(conversationID))
+	}
+	q.Set("name", baseName)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/t3/artifacts?"+q.Encode(), &body)
+	if err != nil {
+		return T3ArtifactUploadResponse{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("User-Agent", "openalbert/0.1")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return T3ArtifactUploadResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var apiErr struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 16<<10)).Decode(&apiErr)
+		return T3ArtifactUploadResponse{}, &APIError{
+			Status:  resp.StatusCode,
+			Code:    apiErr.Error.Code,
+			Message: apiErr.Error.Message,
+		}
+	}
+	var out T3ArtifactUploadResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out); err != nil {
+		return T3ArtifactUploadResponse{}, fmt.Errorf("decode artifact upload response: %w", err)
+	}
+	return out, nil
+}
+
+func (c *Client) DownloadT3Artifact(ctx context.Context, conversationID, artifactID string) (string, []byte, error) {
+	id := strings.TrimSpace(artifactID)
+	if id == "" {
+		return "", nil, fmt.Errorf("artifact_id is required")
+	}
+	q := url.Values{}
+	if strings.TrimSpace(conversationID) != "" {
+		q.Set("conversation_id", strings.TrimSpace(conversationID))
+	}
+	endpoint := c.baseURL + "/api/v1/t3/artifacts/" + url.PathEscape(id) + "/content"
+	if encoded := q.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("User-Agent", "openalbert/0.1")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var apiErr struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 16<<10)).Decode(&apiErr)
+		return "", nil, &APIError{
+			Status:  resp.StatusCode,
+			Code:    apiErr.Error.Code,
+			Message: apiErr.Error.Message,
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxT3ArtifactBytes+1))
+	if err != nil {
+		return "", nil, err
+	}
+	if len(data) > maxT3ArtifactBytes {
+		return "", nil, fmt.Errorf("artifact %s exceeds 20 MiB limit", id)
+	}
+	name := id
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, parseErr := mime.ParseMediaType(cd); parseErr == nil {
+			if fn := strings.TrimSpace(params["filename"]); fn != "" {
+				name = fn
+			}
+		}
+	}
+	return name, data, nil
 }

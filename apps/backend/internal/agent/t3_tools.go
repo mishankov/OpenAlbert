@@ -49,12 +49,17 @@ func t3Definitions() []domain.Tool {
 			Description: "Control a tracked T3 Code thread: interrupt, settle, archive, or sync.",
 			Parameters:  schema(`"thread_id":{"type":"string"},"action":{"type":"string","enum":["interrupt","settle","archive","sync"]}`, "thread_id", "action"),
 		},
+		{
+			Name:        "t3_artifact_fetch",
+			Description: "Fetch an image or file (up to 20 MiB) created by a T3 Code worker on its LAN host (within project workspace, thread worktree, ~/.t3, or system temp) and save it as an OpenAlbert artifact in the current conversation. Returns artifact_id for send_message({text, artifact_id}).",
+			Parameters:  schema(`"thread_id":{"type":"string"},"path":{"type":"string"},"name":{"type":"string"}`, "thread_id", "path"),
+		},
 	}
 }
 
 func isT3Tool(name string) bool {
 	switch name {
-	case "t3_hosts", "t3_threads_list", "t3_thread_launch", "t3_thread_send", "t3_thread_read", "t3_thread_respond", "t3_thread_control":
+	case "t3_hosts", "t3_threads_list", "t3_thread_launch", "t3_thread_send", "t3_thread_read", "t3_thread_respond", "t3_thread_control", "t3_artifact_fetch":
 		return true
 	default:
 		return false
@@ -137,7 +142,7 @@ func (a *Activities) t3ConversationContext(ctx context.Context, conv domain.Conv
 			fmt.Fprintf(&b, "\n  last_error: %s", clipRunes(strings.ReplaceAll(e, "\n", " "), 200))
 		}
 	}
-	b.WriteString("\nWhen the owner asks for status, progress, or follow-ups in this topic, refer directly to the thread(s) above: call t3_thread_read(thread_id) to inspect live worker progress/messages, or t3_thread_send(thread_id, message) to pass instructions. Never claim there is no context when a T3 thread is listed here.")
+	b.WriteString("\nWhen the owner asks for status, progress, or follow-ups in this topic, refer directly to the thread(s) above: call t3_thread_read(thread_id) to inspect live worker progress/messages, t3_thread_send(thread_id, message) to pass instructions, or t3_artifact_fetch(thread_id, path) to pull a screenshot/file from the host into this conversation and send it with send_message({text, artifact_id}). Never claim there is no context when a T3 thread is listed here.")
 	return b.String()
 }
 
@@ -273,6 +278,7 @@ func (a *Activities) executeT3(ctx context.Context, in ToolInput) (any, error) {
 		}
 		if len(p.AttachmentIDs) > 0 {
 			payload["attachment_ids"] = p.AttachmentIDs
+			payload["attachment_conversation_id"] = in.Conversation.ID
 		}
 		res, err := a.T3.DispatchAndWait(ctx, t3CommandID(in), host.EnvironmentID, domain.T3ActionThreadLaunch, payload, 0)
 		if err != nil {
@@ -328,6 +334,7 @@ func (a *Activities) executeT3(ctx context.Context, in ToolInput) (any, error) {
 		}
 		if len(p.AttachmentIDs) > 0 {
 			payload["attachment_ids"] = p.AttachmentIDs
+			payload["attachment_conversation_id"] = in.Conversation.ID
 		}
 		res, err := a.T3.DispatchAndWait(ctx, t3CommandID(in), thread.EnvironmentID, domain.T3ActionThreadSend, payload, 0)
 		if err != nil {
@@ -462,6 +469,57 @@ func (a *Activities) executeT3(ctx context.Context, in ToolInput) (any, error) {
 			msg := strings.TrimSpace(res.Error)
 			if msg == "" {
 				msg = "T3 host rejected thread_control command"
+			}
+			return nil, errors.New(msg)
+		}
+		return res, nil
+
+	case "t3_artifact_fetch":
+		var p struct {
+			ThreadID string `json:"thread_id"`
+			Path     string `json:"path"`
+			Name     string `json:"name,omitempty"`
+		}
+		if err := decodeStrictToolJSON(in.Call.Arguments, &p); err != nil {
+			return nil, err
+		}
+		threadID := strings.TrimSpace(p.ThreadID)
+		filePath := strings.TrimSpace(p.Path)
+		if threadID == "" || filePath == "" {
+			return nil, errors.New("thread_id and path are required")
+		}
+		thread, err := a.T3.Thread(ctx, threadID)
+		if err != nil {
+			return nil, err
+		}
+		workspaceRoot := ""
+		if host, hostErr := a.T3.ResolveHost(ctx, thread.EnvironmentID); hostErr == nil {
+			for _, proj := range host.Projects {
+				if proj.ID == thread.ProjectID && strings.TrimSpace(proj.WorkspaceRoot) != "" {
+					workspaceRoot = strings.TrimSpace(proj.WorkspaceRoot)
+					break
+				}
+			}
+		}
+		payload := map[string]any{
+			"thread_id":       thread.ThreadID,
+			"path":            filePath,
+			"conversation_id": in.Conversation.ID,
+		}
+		if name := strings.TrimSpace(p.Name); name != "" {
+			payload["name"] = name
+		}
+		if workspaceRoot != "" {
+			payload["workspace_root"] = workspaceRoot
+		}
+		res, err := a.T3.DispatchAndWait(ctx, t3CommandID(in), thread.EnvironmentID, domain.T3ActionArtifactFetch, payload, 0)
+		if err != nil {
+			return nil, err
+		}
+		if res.Status == domain.T3CommandStatusFailed {
+			msg := strings.TrimSpace(res.Error)
+			if msg == "" {
+				msg = "T3 host rejected artifact_fetch command"
 			}
 			return nil, errors.New(msg)
 		}
