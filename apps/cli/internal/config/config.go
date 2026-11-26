@@ -12,43 +12,48 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const DefaultBridgeTickPrompt = "__openalbert_bridge_tick__"
+const (
+	DefaultBridgeTickPrompt = "__openalbert_bridge_tick__"
+	DefaultBridgeLivePrompt = "__openalbert_bridge_live__"
+)
 
 // Config defines launch settings for the openalbert CLI, typically loaded from
 // ~/.config/openalbert/config.toml (with automatic fallback to acp.toml).
 type Config struct {
-	ServerURL        string
-	Token            string
-	DefaultModel     string
-	SyncInspector    bool
-	StateDir         string
-	CustomStateDir   bool
-	MaxSteps         int
-	RequestTimeout   time.Duration
-	Bridge           bool
-	HostLabel        string
-	BridgeTickPrompt string
-	T3Bin            string
-	T3BaseDir        string
-	EnvironmentID    string
+	ServerURL             string
+	Token                 string
+	DefaultModel          string
+	SyncInspector         bool
+	StateDir              string
+	CustomStateDir        bool
+	MaxSteps              int
+	RequestTimeout        time.Duration
+	Bridge                bool
+	HostLabel             string
+	BridgeTickPrompt      string
+	BridgeKeepaliveThread string
+	T3Bin                 string
+	T3BaseDir             string
+	EnvironmentID         string
 }
 
 type fileConfig struct {
-	ServerURL        string `toml:"server_url"`
-	Token            string `toml:"token"`
-	TokenEnv         string `toml:"token_env"`
-	TokenFile        string `toml:"token_file"`
-	DefaultModel     string `toml:"default_model"`
-	SyncInspector    *bool  `toml:"sync_inspector"`
-	StateDir         string `toml:"state_dir"`
-	MaxSteps         int    `toml:"max_steps"`
-	RequestTimeout   string `toml:"request_timeout"`
-	Bridge           *bool  `toml:"bridge"`
-	HostLabel        string `toml:"host_label"`
-	BridgeTickPrompt string `toml:"bridge_tick_prompt"`
-	T3Bin            string `toml:"t3_bin"`
-	T3BaseDir        string `toml:"t3_base_dir"`
-	EnvironmentID    string `toml:"environment_id"`
+	ServerURL             string `toml:"server_url"`
+	Token                 string `toml:"token"`
+	TokenEnv              string `toml:"token_env"`
+	TokenFile             string `toml:"token_file"`
+	DefaultModel          string `toml:"default_model"`
+	SyncInspector         *bool  `toml:"sync_inspector"`
+	StateDir              string `toml:"state_dir"`
+	MaxSteps              int    `toml:"max_steps"`
+	RequestTimeout        string `toml:"request_timeout"`
+	Bridge                *bool  `toml:"bridge"`
+	HostLabel             string `toml:"host_label"`
+	BridgeTickPrompt      string `toml:"bridge_tick_prompt"`
+	BridgeKeepaliveThread string `toml:"bridge_keepalive_thread"`
+	T3Bin                 string `toml:"t3_bin"`
+	T3BaseDir             string `toml:"t3_base_dir"`
+	EnvironmentID         string `toml:"environment_id"`
 }
 
 func configDir(getenv func(string) string) string {
@@ -251,21 +256,27 @@ func load(path string, getenv func(string) string) (Config, error) {
 		envID = envEnvID
 	}
 
+	keepaliveThread := strings.TrimSpace(raw.BridgeKeepaliveThread)
+	if envKeepalive := strings.TrimSpace(getenv("OPENALBERT_BRIDGE_KEEPALIVE_THREAD")); envKeepalive != "" {
+		keepaliveThread = envKeepalive
+	}
+
 	return Config{
-		ServerURL:        serverURL,
-		Token:            token,
-		DefaultModel:     strings.TrimSpace(raw.DefaultModel),
-		SyncInspector:    syncInspector,
-		StateDir:         stateDir,
-		CustomStateDir:   customStateDir,
-		MaxSteps:         maxSteps,
-		RequestTimeout:   reqTimeout,
-		Bridge:           bridgeEnabled,
-		HostLabel:        hostLabel,
-		BridgeTickPrompt: tickPrompt,
-		T3Bin:            t3Bin,
-		T3BaseDir:        t3BaseDir,
-		EnvironmentID:    envID,
+		ServerURL:             serverURL,
+		Token:                 token,
+		DefaultModel:          strings.TrimSpace(raw.DefaultModel),
+		SyncInspector:         syncInspector,
+		StateDir:              stateDir,
+		CustomStateDir:        customStateDir,
+		MaxSteps:              maxSteps,
+		RequestTimeout:        reqTimeout,
+		Bridge:                bridgeEnabled,
+		HostLabel:             hostLabel,
+		BridgeTickPrompt:      tickPrompt,
+		BridgeKeepaliveThread: keepaliveThread,
+		T3Bin:                 t3Bin,
+		T3BaseDir:             t3BaseDir,
+		EnvironmentID:         envID,
 	}, nil
 }
 

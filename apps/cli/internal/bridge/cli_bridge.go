@@ -810,8 +810,8 @@ func (b *CLIBridge) handleThreadControl(ctx context.Context, payload json.RawMes
 
 const maxLocalArtifactBytes = 20 << 20
 
-func (b *CLIBridge) t3BaseDirPath() string {
-	if base := strings.TrimSpace(b.cfg.T3BaseDir); base != "" {
+func t3BaseDirPath(cfg config.Config) string {
+	if base := strings.TrimSpace(cfg.T3BaseDir); base != "" {
 		return base
 	}
 	if env := strings.TrimSpace(os.Getenv("T3CODE_HOME")); env != "" {
@@ -821,6 +821,10 @@ func (b *CLIBridge) t3BaseDirPath() string {
 		return filepath.Join(home, ".t3")
 	}
 	return ""
+}
+
+func (b *CLIBridge) t3BaseDirPath() string {
+	return t3BaseDirPath(b.cfg)
 }
 
 func normalizeLocalArtifactPath(raw string) (string, error) {
@@ -917,6 +921,16 @@ func (b *CLIBridge) threadWorktreePath(ctx context.Context, threadID string) str
 }
 
 func (b *CLIBridge) handleArtifactFetch(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
+	return fetchLocalArtifact(ctx, b.client, b.cfg, payload, b.threadWorktreePath)
+}
+
+func fetchLocalArtifact(
+	ctx context.Context,
+	client *serverclient.Client,
+	cfg config.Config,
+	payload json.RawMessage,
+	worktreeLookup func(context.Context, string) string,
+) (json.RawMessage, error) {
 	var req struct {
 		ThreadID       string `json:"thread_id"`
 		Path           string `json:"path"`
@@ -940,7 +954,7 @@ func (b *CLIBridge) handleArtifactFetch(ctx context.Context, payload json.RawMes
 		return nil, errors.New("refusing to fetch sensitive file")
 	}
 
-	allowedRoots := []string{b.t3BaseDirPath(), strings.TrimSpace(req.WorkspaceRoot), os.TempDir()}
+	allowedRoots := []string{t3BaseDirPath(cfg), strings.TrimSpace(req.WorkspaceRoot), os.TempDir()}
 	if runtime.GOOS != "windows" {
 		allowedRoots = append(allowedRoots, "/tmp")
 	}
@@ -951,8 +965,8 @@ func (b *CLIBridge) handleArtifactFetch(ctx context.Context, payload json.RawMes
 			break
 		}
 	}
-	if !allowed {
-		if wt := b.threadWorktreePath(ctx, strings.TrimSpace(req.ThreadID)); wt != "" && pathWithinRoot(realPath, wt) {
+	if !allowed && worktreeLookup != nil {
+		if wt := strings.TrimSpace(worktreeLookup(ctx, strings.TrimSpace(req.ThreadID))); wt != "" && pathWithinRoot(realPath, wt) {
 			allowed = true
 		}
 	}
@@ -981,7 +995,7 @@ func (b *CLIBridge) handleArtifactFetch(ctx context.Context, payload json.RawMes
 	if displayName == "" {
 		displayName = filepath.Base(realPath)
 	}
-	uploaded, err := b.client.UploadT3Artifact(ctx, strings.TrimSpace(req.ConversationID), displayName, data)
+	uploaded, err := client.UploadT3Artifact(ctx, strings.TrimSpace(req.ConversationID), displayName, data)
 	if err != nil {
 		return nil, fmt.Errorf("upload artifact to OpenAlbert: %w", err)
 	}
@@ -1008,7 +1022,11 @@ func sanitizePathToken(s string) string {
 }
 
 func (b *CLIBridge) materializeAttachments(ctx context.Context, threadKey, conversationID string, attachmentIDs []string) ([]string, error) {
-	base := b.t3BaseDirPath()
+	return materializeAttachments(ctx, b.client, b.cfg, threadKey, conversationID, attachmentIDs)
+}
+
+func materializeAttachments(ctx context.Context, client *serverclient.Client, cfg config.Config, threadKey, conversationID string, attachmentIDs []string) ([]string, error) {
+	base := t3BaseDirPath(cfg)
 	if base == "" {
 		base = os.TempDir()
 	}
@@ -1022,7 +1040,7 @@ func (b *CLIBridge) materializeAttachments(ctx context.Context, threadKey, conve
 		if id == "" {
 			continue
 		}
-		name, data, err := b.client.DownloadT3Artifact(ctx, conversationID, id)
+		name, data, err := client.DownloadT3Artifact(ctx, conversationID, id)
 		if err != nil {
 			return nil, fmt.Errorf("download attachment %s: %w", id, err)
 		}

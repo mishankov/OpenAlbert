@@ -386,3 +386,257 @@ func TestZeroLLMBridgeTickAndSingletonInteractiveCoherence(t *testing.T) {
 		t.Fatalf("expected interactive reply text, got %q", joined)
 	}
 }
+
+func TestPersistentBridgeLiveModeExecutesRealTimeSteerAndCancelsCleanly(t *testing.T) {
+	var (
+		snoozeCalls atomic.Int32
+		llmCalls    atomic.Int32
+		steerMu     sync.Mutex
+		steerArgs   map[string]any
+		steerDone   = make(chan struct{})
+	)
+	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     int64           `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case "initialize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"protocolVersion": "2024-11-05"}})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{
+				"tools": []map[string]any{
+					{"name": "t3_environment_read", "inputSchema": map[string]any{"type": "object"}},
+					{"name": "t3_project_list", "inputSchema": map[string]any{"type": "object"}},
+					{"name": "orchestrator_capabilities", "inputSchema": map[string]any{"type": "object"}},
+					{"name": "t3_thread_launch", "inputSchema": map[string]any{"type": "object"}},
+					{"name": "t3_thread_send", "inputSchema": map[string]any{"type": "object"}},
+					{"name": "t3_thread_organize", "inputSchema": map[string]any{"type": "object"}},
+				},
+			}})
+		case "tools/call":
+			var p struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			}
+			_ = json.Unmarshal(req.Params, &p)
+			var out any = map[string]any{"ok": true}
+			switch p.Name {
+			case "t3_environment_read":
+				out = map[string]any{"environmentId": "env-live-1", "label": "MacBook"}
+			case "t3_project_list":
+				out = map[string]any{"projects": []map[string]any{}}
+			case "orchestrator_capabilities":
+				out = map[string]any{"providers": []map[string]any{}}
+			case "t3_thread_organize":
+				if p.Arguments["action"] == "snooze" {
+					snoozeCalls.Add(1)
+				}
+			case "t3_thread_send":
+				steerMu.Lock()
+				steerArgs = p.Arguments
+				steerMu.Unlock()
+				out = map[string]any{"runId": "run-live-1"}
+			}
+			raw, _ := json.Marshal(out)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  map[string]any{"content": []map[string]string{{"type": "text", "text": string(raw)}}},
+			})
+		}
+	}))
+	defer mcpSrv.Close()
+
+	sseCmdCh := make(chan serverclient.T3Command, 2)
+	sseConnected := make(chan struct{})
+	var sseConnOnce sync.Once
+
+	oaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/llm/models":
+			_ = json.NewEncoder(w).Encode(serverclient.ModelsResponse{
+				DefaultModel: "proxy/gpt-5.4",
+				Models:       []serverclient.CatalogModel{{ID: "proxy/gpt-5.4", Provider: "proxy", Model: "gpt-5.4"}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agent/context":
+			_ = json.NewEncoder(w).Encode(serverclient.AgentContext{OwnerID: 1, Soul: "Helpful"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/llm/complete":
+			llmCalls.Add(1)
+			http.Error(w, "live bridge must not call LLM", 500)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/t3/hosts/register":
+			_ = json.NewEncoder(w).Encode(serverclient.T3HostRegisterResponse{HostID: "h1", EnvironmentID: "env-live-1"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/t3/heartbeat":
+			_ = json.NewEncoder(w).Encode(serverclient.T3HeartbeatResponse{OK: true})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/t3/commands/stream" && r.URL.Query().Get("once") == "true":
+			_ = json.NewEncoder(w).Encode(serverclient.T3CommandsDrainResponse{})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/t3/commands/stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher := w.(http.Flusher)
+			flusher.Flush()
+			sseConnOnce.Do(func() { close(sseConnected) })
+			for {
+				select {
+				case <-r.Context().Done():
+					return
+				case cmd := <-sseCmdCh:
+					b, _ := json.Marshal(cmd)
+					fmt.Fprintf(w, "event: command\ndata: %s\n\n", b)
+					flusher.Flush()
+				}
+			}
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/t3/commands/") && strings.HasSuffix(r.URL.Path, "/result"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			select {
+			case <-steerDone:
+			default:
+				close(steerDone)
+			}
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}
+	}))
+	defer oaSrv.Close()
+
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	cfg := config.Config{
+		ServerURL:      oaSrv.URL,
+		Token:          "tok",
+		StateDir:       t.TempDir(),
+		CustomStateDir: true,
+		RequestTimeout: 5 * time.Second,
+		Bridge:         true,
+		HostLabel:      "MacBook",
+	}
+	srv := NewServer(cfg, c2sR, s2cW, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	defer func() {
+		_ = c2sW.Close()
+		cancel()
+		<-done
+	}()
+
+	var (
+		rMu   sync.Mutex
+		resps = map[string]chan rpcEnvelope{}
+	)
+	liveChunk := make(chan struct{}, 1)
+	go func() {
+		sc := bufio.NewScanner(s2cR)
+		sc.Buffer(make([]byte, 4096), 4<<20)
+		for sc.Scan() {
+			var env rpcEnvelope
+			if json.Unmarshal(sc.Bytes(), &env) != nil {
+				continue
+			}
+			if env.Method == "session/update" && strings.Contains(string(env.Params), "bridge live") {
+				select {
+				case liveChunk <- struct{}{}:
+				default:
+				}
+				continue
+			}
+			if len(env.ID) > 0 {
+				var key string
+				if json.Unmarshal(env.ID, &key) != nil {
+					key = string(env.ID)
+				}
+				rMu.Lock()
+				ch := resps[key]
+				delete(resps, key)
+				rMu.Unlock()
+				if ch != nil {
+					ch <- env
+				}
+			}
+		}
+	}()
+	sendAsync := func(id, method string, params any) chan rpcEnvelope {
+		ch := make(chan rpcEnvelope, 1)
+		if id != "" {
+			rMu.Lock()
+			resps[id] = ch
+			rMu.Unlock()
+		}
+		msg := map[string]any{"jsonrpc": "2.0", "method": method, "params": params}
+		if id != "" {
+			msg["id"] = id
+		}
+		b, _ := json.Marshal(msg)
+		_, _ = c2sW.Write(append(b, '\n'))
+		return ch
+	}
+
+	<-sendAsync("init", "initialize", map[string]any{"protocolVersion": 1})
+	newR := <-sendAsync("new", "session/new", map[string]any{
+		"cwd":        t.TempDir(),
+		"mcpServers": []map[string]any{{"name": "t3-code", "type": "http", "url": mcpSrv.URL}},
+	})
+	var sOut struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(newR.Result, &sOut)
+
+	liveRespCh := sendAsync("live-1", "session/prompt", map[string]any{
+		"sessionId": sOut.SessionID,
+		"prompt":    []map[string]any{{"type": "text", "text": config.DefaultBridgeLivePrompt}},
+	})
+
+	select {
+	case <-liveChunk:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for 'bridge live' chunk")
+	}
+	select {
+	case <-sseConnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for SSE connection")
+	}
+	// Verify prompt stays open (does not immediately return end_turn).
+	select {
+	case r := <-liveRespCh:
+		t.Fatalf("live bridge prompt returned prematurely: %+v", r)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Push real-time steer command over SSE while live turn stays open!
+	sseCmdCh <- serverclient.T3Command{
+		CommandID: "cmd-rt-steer",
+		Action:    "thread_send",
+		Payload:   json.RawMessage(`{"thread_id":"th-worker","message":"Pivot now","mode":"steer"}`),
+	}
+	select {
+	case <-steerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for real-time steer command over live bridge")
+	}
+	steerMu.Lock()
+	gotMode := steerArgs["mode"]
+	gotThread := steerArgs["threadId"]
+	steerMu.Unlock()
+	if gotMode != "steer" || gotThread != "th-worker" {
+		t.Fatalf("unexpected steer args: mode=%v threadId=%v", gotMode, gotThread)
+	}
+	if snoozeCalls.Load() < 1 || llmCalls.Load() != 0 {
+		t.Fatalf("expected auto-snooze >= 1 and 0 LLM calls, got snooze=%d llm=%d", snoozeCalls.Load(), llmCalls.Load())
+	}
+
+	// Cancel cleanly via session/cancel -> returns stopReason="cancelled".
+	sendAsync("", "session/cancel", map[string]any{"sessionId": sOut.SessionID})
+	select {
+	case r := <-liveRespCh:
+		if r.Error != nil || !strings.Contains(string(r.Result), `"cancelled"`) {
+			t.Fatalf("expected cancelled stopReason, got res=%s err=%+v", r.Result, r.Error)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("live bridge prompt did not exit after session/cancel")
+	}
+}

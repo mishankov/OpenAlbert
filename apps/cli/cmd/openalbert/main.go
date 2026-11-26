@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mishankov/OpenAlbert/apps/cli/internal/acp"
 	"github.com/mishankov/OpenAlbert/apps/cli/internal/bridge"
@@ -100,13 +101,17 @@ func runBridge(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	var configPath string
 	var t3Bin string
 	var t3BaseDir string
+	var keepaliveThread string
+	var keepaliveInterval time.Duration
 	fs.StringVar(&configPath, "config", "", "Path to OpenAlbert config (default ~/.config/openalbert/config.toml)")
 	fs.StringVar(&t3Bin, "t3-bin", "", "Path to the official `t3` CLI binary (auto-detected if omitted)")
 	fs.StringVar(&t3BaseDir, "t3-base-dir", "", "Path to T3 Code data directory (default ~/.t3 or $T3CODE_HOME)")
+	fs.StringVar(&keepaliveThread, "keepalive-thread", "", "T3 Code thread ID running persistent `openalbert acp` bridge mode; keeps its live turn awake via `t3` CLI for near-real-time MCP steering")
+	fs.DurationVar(&keepaliveInterval, "keepalive-interval", 5*time.Second, "Check interval for --keepalive-thread mode")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: openalbert bridge [--config PATH] [--t3-bin PATH] [--t3-base-dir PATH]")
+		fmt.Fprintln(stderr, "Usage: openalbert bridge [--config PATH] [--t3-bin PATH] [--t3-base-dir PATH] [--keepalive-thread THREAD_ID]")
 		fmt.Fprintln(stderr, "")
-		fmt.Fprintln(stderr, "Run the standalone 100%-LAN T3 Code bridge daemon backed by the official `t3` CLI.")
+		fmt.Fprintln(stderr, "Run the 100%-LAN T3 Code bridge daemon backed by the official `t3` CLI, or (with --keepalive-thread / bridge_keepalive_thread) keep a persistent `openalbert acp` MCP bridge thread awake for near-real-time steering.")
 		fmt.Fprintln(stderr, "")
 		fmt.Fprintln(stderr, "Flags:")
 		fs.PrintDefaults()
@@ -134,6 +139,22 @@ func runBridge(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 	if strings.TrimSpace(t3BaseDir) != "" {
 		cfg.T3BaseDir = strings.TrimSpace(t3BaseDir)
+	}
+	targetThread := strings.TrimSpace(keepaliveThread)
+	if targetThread == "" {
+		targetThread = strings.TrimSpace(cfg.BridgeKeepaliveThread)
+	}
+	if targetThread != "" {
+		ka, err := bridge.NewKeepalive(cfg, targetThread, keepaliveInterval, logger)
+		if err != nil {
+			logger.Error("failed to initialize OpenAlbert bridge keepalive", "error", err)
+			return 1
+		}
+		if err := ka.Run(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("openalbert bridge keepalive stopped with error", "error", err)
+			return 1
+		}
+		return 0
 	}
 
 	client := serverclient.New(cfg.ServerURL, cfg.Token, cfg.RequestTimeout)
