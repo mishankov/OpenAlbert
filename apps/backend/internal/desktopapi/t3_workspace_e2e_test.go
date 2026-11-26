@@ -732,7 +732,7 @@ request_timeout = "10s"
 								row, _ := rawRow.([]any)
 								for _, rawBtn := range row {
 									btn, _ := rawBtn.(map[string]any)
-									if txt, _ := btn["text"].(string); strings.Contains(txt, "Sync") {
+									if txt, _ := btn["text"].(string); strings.Contains(txt, "Обновить") {
 										syncCBData, _ = btn["callback_data"].(string)
 									}
 								}
