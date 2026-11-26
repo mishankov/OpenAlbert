@@ -1149,12 +1149,12 @@ func (b *T3WorkspaceBridge) postCompletedPRButtons(ctx context.Context, event do
 	row := make([]domain.InlineButton, 0, 2)
 	if isValidHTTPURL(prURL) {
 		row = append(row, domain.InlineButton{
-			Text: "🔗 Open PR",
+			Text: "🔗 Открыть PR",
 			URL:  prURL,
 		})
 	}
 	row = append(row, domain.InlineButton{
-		Text:         "🔄 Sync",
+		Text:         "🔄 Обновить",
 		CallbackData: fmt.Sprintf("t3:c:%s:sync", token),
 	})
 	markup := &domain.InlineKeyboardMarkup{InlineKeyboard: [][]domain.InlineButton{row}}

@@ -886,7 +886,23 @@ func (b *CLIBridge) pollSingleThread(ctx context.Context, threadID string, force
 		pendingPayload = normalizePendingRequest("pending-"+threadID, nil)
 	}
 
-	kind, terminal := classifyThreadEvent(snap.Status, snap.LatestRunStatus, hasPending, wasActive)
+	// Antigravity/subagent runs pause with status="completed" while waiting on
+	// pendingBackgroundTasks or child thread waits; keep them running until those settle.
+	hasBackgroundWork := snap.PendingBackgroundTasksCount > 0 || snap.BlockedOnThreadWait
+	effectiveStatus := snap.Status
+	if hasBackgroundWork && !hasPending {
+		switch strings.ToLower(strings.TrimSpace(effectiveStatus)) {
+		case "", "completed", "idle":
+			effectiveStatus = "running"
+		}
+	}
+
+	kind, terminal := classifyThreadEvent(effectiveStatus, snap.LatestRunStatus, hasPending, wasActive)
+	if hasBackgroundWork && kind == "thread_completed" {
+		kind = "thread_progress"
+		terminal = false
+		effectiveStatus = "running"
+	}
 
 	title := firstNonEmpty(snap.Title, meta.title)
 	link := firstNonEmpty(snap.Link, meta.link)
@@ -895,7 +911,7 @@ func (b *CLIBridge) pollSingleThread(ctx context.Context, threadID string, force
 	model := firstNonEmpty(snap.Model, meta.model)
 	branch := firstNonEmpty(snap.Branch, meta.branch)
 
-	stateHash := hashEventState(b.envID, threadID, kind, snap.Status, pendingPayload, snap.LatestRunID, snap.PRURL, snap.Error, branch, snap.Summary, snap.Output, snap.ItemCount)
+	stateHash := hashEventState(b.envID, threadID, kind, effectiveStatus, pendingPayload, snap.LatestRunID, snap.PRURL, snap.Error, branch, snap.Summary, snap.Output, snap.ItemCount)
 	evID := "evt-" + stateHash
 	if forceEmit {
 		evID = uuid.NewString()
@@ -905,7 +921,7 @@ func (b *CLIBridge) pollSingleThread(ctx context.Context, threadID string, force
 		EnvironmentID:      b.envID,
 		ThreadID:           threadID,
 		Kind:               kind,
-		Status:             snap.Status,
+		Status:             effectiveStatus,
 		Title:              title,
 		Link:               link,
 		ProjectID:          projectID,
@@ -938,7 +954,7 @@ func (b *CLIBridge) pollSingleThread(ctx context.Context, threadID string, force
 			t.model = model
 			t.branch = branch
 			t.lastFingerprint = stateHash
-			if snap.Status == "running" || snap.Status == "starting" || snap.Status == "queued" || snap.Status == "waiting" {
+			if effectiveStatus == "running" || effectiveStatus == "starting" || effectiveStatus == "queued" || effectiveStatus == "waiting" {
 				t.wasActive = true
 			}
 		}
