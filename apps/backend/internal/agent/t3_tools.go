@@ -75,6 +75,72 @@ func (a *Activities) t3Access(in ToolInput) error {
 	return nil
 }
 
+// t3ConversationContext builds a compact live summary of T3 Code threads bound
+// to the current owner-authorized conversation (or active threads when speaking
+// in the workspace #Control topic) so follow-up questions like "Как там дела?"
+// work even when a topic was opened by a zero-LLM launch card with no prior
+// LLM messages in session history.
+func (a *Activities) t3ConversationContext(ctx context.Context, conv domain.Conversation) string {
+	if a.T3 == nil || !a.isT3AuthorizedConversation(conv) || strings.TrimSpace(conv.ID) == "" {
+		return ""
+	}
+	threads, err := a.T3.ListThreads(ctx, domain.T3ThreadFilter{
+		ConversationID: conv.ID,
+		Limit:          10,
+	})
+	if err != nil {
+		return ""
+	}
+	header := "T3 Code threads bound to this topic/conversation (live state from OpenAlbert):"
+	if len(threads) == 0 && a.WorkspaceGroupID < 0 && conv.ID == fmt.Sprintf("telegram:group:%d:topic:0", a.WorkspaceGroupID) {
+		all, listErr := a.T3.ListThreads(ctx, domain.T3ThreadFilter{Limit: 15})
+		if listErr != nil {
+			return ""
+		}
+		for _, th := range all {
+			switch strings.ToLower(strings.TrimSpace(th.Status)) {
+			case "running", "starting", "queued", "waiting_input":
+				threads = append(threads, th)
+			}
+			if len(threads) >= 10 {
+				break
+			}
+		}
+		header = "Active T3 Code threads across workspace (live state from OpenAlbert):"
+	}
+	if len(threads) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(header)
+	for _, th := range threads {
+		fmt.Fprintf(&b, "\n- thread_id=%s | title=%q | status=%s", th.ThreadID, clipRunes(strings.TrimSpace(th.Title), 100), th.Status)
+		if m := strings.TrimSpace(th.Model); m != "" {
+			fmt.Fprintf(&b, " | model=%s", clipRunes(m, 60))
+		}
+		if br := strings.TrimSpace(th.Branch); br != "" {
+			fmt.Fprintf(&b, " | branch=%s", clipRunes(br, 80))
+		}
+		if pr := strings.TrimSpace(th.PRURL); pr != "" {
+			fmt.Fprintf(&b, " | pr=%s", clipRunes(pr, 160))
+		}
+		if th.PendingRequest != nil && strings.TrimSpace(th.PendingRequest.RequestID) != "" {
+			fmt.Fprintf(&b, " | pending_request_id=%s", th.PendingRequest.RequestID)
+		}
+		if !th.UpdatedAt.IsZero() {
+			fmt.Fprintf(&b, " | updated_at=%s", th.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+		}
+		if s := strings.TrimSpace(th.LastSummary); s != "" {
+			fmt.Fprintf(&b, "\n  last_summary: %s", clipRunes(strings.ReplaceAll(s, "\n", " "), 240))
+		}
+		if e := strings.TrimSpace(th.LastError); e != "" {
+			fmt.Fprintf(&b, "\n  last_error: %s", clipRunes(strings.ReplaceAll(e, "\n", " "), 200))
+		}
+	}
+	b.WriteString("\nWhen the owner asks for status, progress, or follow-ups in this topic, refer directly to the thread(s) above: call t3_thread_read(thread_id) to inspect live worker progress/messages, or t3_thread_send(thread_id, message) to pass instructions. Never claim there is no context when a T3 thread is listed here.")
+	return b.String()
+}
+
 func decodeStrictToolJSON(raw json.RawMessage, dst any) error {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {

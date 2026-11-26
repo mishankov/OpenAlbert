@@ -479,4 +479,30 @@ func TestT3ThreadLaunchAutoCreatesTopicFromWorkspaceControlAndPreservesCatalog(t
 	if th.ConversationID != "telegram:group:-100555:topic:51" {
 		t.Fatalf("expected launched thread bound to auto-created topic 51, got %q", th.ConversationID)
 	}
+
+	// 3. t3ConversationContext injects bound thread details into fresh workspace topic turns
+	//    (even when no LLM messages exist yet) and stays empty for unauthorized chats.
+	topicConv := domain.Conversation{
+		ID:       "telegram:group:-100555:topic:51",
+		ChatID:   -100555,
+		ThreadID: 51,
+		OwnerID:  7,
+	}
+	topicCtx := act.t3ConversationContext(ctx, topicConv)
+	if !strings.Contains(topicCtx, "thread_id=th-auto-1") || !strings.Contains(topicCtx, `title="Polka #64"`) || !strings.Contains(topicCtx, "t3_thread_read") {
+		t.Fatalf("expected bound thread context in workspace topic, got: %q", topicCtx)
+	}
+	controlCtx := act.t3ConversationContext(ctx, controlConv)
+	if !strings.Contains(controlCtx, "thread_id=th-auto-1") {
+		t.Fatalf("expected active workspace thread listed in #Control context, got: %q", controlCtx)
+	}
+	unauthCtx := act.t3ConversationContext(ctx, domain.Conversation{
+		ID:       "telegram:group:-100555:topic:51",
+		ChatID:   -100555,
+		ThreadID: 51,
+		OwnerID:  999,
+	})
+	if unauthCtx != "" {
+		t.Fatalf("expected empty T3 context for non-owner speaker, got: %q", unauthCtx)
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -626,7 +627,7 @@ func (b *CLIBridge) handleThreadLaunch(ctx context.Context, payload json.RawMess
 		return nil, errors.New("t3 thread start returned empty threadId")
 	}
 	if parsed.Link == "" && b.envID != "" {
-		parsed.Link = fmt.Sprintf("[%s](t3-thread://v2/%s/%s)", firstNonEmpty(parsed.Title, title), b.envID, parsed.ThreadID)
+		parsed.Link = fmt.Sprintf("https://app.t3.codes/threads/%s/%s", url.PathEscape(b.envID), url.PathEscape(parsed.ThreadID))
 	}
 	status := firstNonEmpty(parsed.Status, "running")
 

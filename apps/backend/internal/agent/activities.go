@@ -318,7 +318,7 @@ func (a *Activities) Prepare(ctx context.Context, in RunInput) (out Turn, err er
 		system += "\nWhen asked to change behavior in a group, select the exact group with conversation_list, read its GROUP.md with group_read and edit it with group_update. Ask if the group is ambiguous. One file applies to the whole Telegram group, including all topics; there are no topic overrides or global group defaults. Saving a private preference does not configure a group. Put only the requested group-facing rules in GROUP.md; do not copy private memories or reasons. Confirm the group and change only after successful persistence. Rules apply to the next prepared turn; do not infer them from old private preferences."
 		system += "\nYou are speaking privately with your owner. You may recall all saved group conversations via conversation_list and conversation_history, including sessions that are still active. memory_search can search your private and group memories. Use these tools when asked about group discussions or when group context would help; cite the originating conversation. Never invent messages or assume Telegram delivered every message. Ordinary replies go to this private chat. When your owner explicitly asks you to post in a group, use conversation_list to select the exact conversation_id and send_group_message to queue only the requested public text. If the group or topic is ambiguous, ask which one. Do not forward private history, memories or the owner's instruction itself. send_group_message does not finish your turn: then acknowledge the queued group message privately with send_message. A queued result is not proof of Telegram delivery; never repost to get a delivery confirmation."
 	} else if a.isOwnerWorkspace(conv, conv.OwnerID) {
-		system += "\nYou are speaking with your owner in their authorized Workspace Supergroup topic. You may use owner tools, read and update the owner's personal memory, manage workspace topics, and recall saved conversations via conversation_list and conversation_history. Conversation history in this workspace is isolated per forum topic. SOUL.md and GROUP.md edits remain restricted to the owner's private chat."
+		system += "\nYou are speaking with your owner in their authorized Workspace Supergroup topic. You may use owner tools, read and update the owner's personal memory, manage workspace topics, and recall saved conversations via conversation_list and conversation_history. Conversation history in this workspace is isolated per forum topic; a worker topic may already have a T3 Code thread bound to it even if there are no earlier assistant messages in the topic transcript — check the bound T3 threads in context (or t3_threads_list + t3_thread_read) before saying there is no context. SOUL.md and GROUP.md edits remain restricted to the owner's private chat."
 	} else {
 		system += "\nThis conversation can read only its own history and memories. Do not reveal or search other conversations."
 	}
@@ -430,13 +430,24 @@ func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOut
 	}
 	// Refresh immediately before every uncached model call, including resumed
 	// Temporal activities whose persisted Turn contains an older system prompt.
+	var liveSystemAdditions []string
 	if a.Backups != nil && a.isOwnerAuthorized(in.Turn.Conversation) {
+		if status := strings.TrimSpace(a.Backups.Context(time.Now())); status != "" {
+			liveSystemAdditions = append(liveSystemAdditions, status)
+		}
+	}
+	if a.T3 != nil && !in.Turn.Input.Initiative && a.isT3AuthorizedConversation(in.Turn.Conversation) {
+		if t3Ctx := strings.TrimSpace(a.t3ConversationContext(ctx, in.Turn.Conversation)); t3Ctx != "" {
+			liveSystemAdditions = append(liveSystemAdditions, t3Ctx)
+		}
+	}
+	if len(liveSystemAdditions) > 0 {
 		in.Turn.Messages = append([]domain.Message(nil), in.Turn.Messages...)
-		status := a.Backups.Context(time.Now())
+		extra := strings.Join(liveSystemAdditions, "\n\n")
 		if len(in.Turn.Messages) > 0 && in.Turn.Messages[0].Role == "system" {
-			in.Turn.Messages[0].Content += "\n\n" + status
+			in.Turn.Messages[0].Content += "\n\n" + extra
 		} else {
-			in.Turn.Messages = append([]domain.Message{{Role: "system", Content: status}}, in.Turn.Messages...)
+			in.Turn.Messages = append([]domain.Message{{Role: "system", Content: extra}}, in.Turn.Messages...)
 		}
 	}
 	finishTrace := a.startTrace(ctx, domain.Trace{SessionID: in.Turn.Input.SessionID, TurnID: in.Turn.Input.Key, Trigger: trigger(in.Turn.Input.TaskID, in.Turn.Input.Initiative), TaskID: in.Turn.Input.TaskID, Kind: "model", Name: string(role), ModelRole: role, Step: in.Step}, map[string]any{"messages": traceMessages(in.Turn.Messages), "tools": tools, "context_stage": "before_profile_fitting"}, ev)
