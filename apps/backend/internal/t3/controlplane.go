@@ -717,6 +717,11 @@ func (cp *ControlPlane) RecordCommandResult(ctx context.Context, commandID strin
 	}
 	if transitioned && updatedThread != nil {
 		cp.notifyCommandThreadUpdate(ctx, cmd, *updatedThread, now)
+		// Observers (such as T3WorkspaceBridge) may create a dedicated workspace
+		// forum topic and rebind thread.ConversationID on launch success.
+		if refreshed, ok, refreshErr := cp.store.T3Thread(ctx, updatedThread.ThreadID); refreshErr == nil && ok {
+			updatedThread = &refreshed
+		}
 	} else if !transitioned && cmd.Action == domain.T3ActionThreadRespond && cmd.Status == domain.T3CommandStatusSucceeded {
 		// Replaying a succeeded thread_respond result (e.g. after a crash between
 		// DB commit and observer delivery) retries idempotent observer finalization.
