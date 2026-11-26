@@ -242,7 +242,7 @@ func TestT3SevenToolsLifecycle(t *testing.T) {
 		t.Fatalf("t3_threads_list: %s", out)
 	}
 
-	// 4. t3_thread_send (default mode=auto and explicit mode=steer)
+	// 4. t3_thread_send defaults mode to "steer" when omitted.
 	respondNext(func(cmd domain.T3Command) (bool, string, string) {
 		var p map[string]any
 		_ = json.Unmarshal(cmd.Payload, &p)
@@ -251,7 +251,7 @@ func TestT3SevenToolsLifecycle(t *testing.T) {
 		}
 		return true, `{"accepted":true}`, ""
 	})
-	out = tool(t, a, owner, "run-1", "c4", "t3_thread_send", `{"thread_id":"th-100","message":"Adjust tests","mode":"steer"}`)
+	out = tool(t, a, owner, "run-1", "c4", "t3_thread_send", `{"thread_id":"th-100","message":"Adjust tests"}`)
 	if strings.Contains(out, `"error"`) || !strings.Contains(out, `"succeeded"`) {
 		t.Fatalf("t3_thread_send: %s", out)
 	}

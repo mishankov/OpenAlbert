@@ -582,20 +582,20 @@ func TestBridgeFullLANRoundtripSSEWatcherAndOnceDrain(t *testing.T) {
 		t.Fatalf("normalized launch args mismatch: clientReqID=%v ms=%+v ws=%+v", clientReqID, ms, ws)
 	}
 
-	// 2. Unsupported attachment_ids fail explicitly before invoking T3 MCP.
+	// 2. Missing attachment fails cleanly before invoking T3 MCP.
 	sseCh <- serverclient.T3Command{
 		CommandID: "cmd-attach-err",
 		Action:    "thread_launch",
 		Payload:   json.RawMessage(`{"title":"With file","attachment_ids":["att-1"]}`),
 	}
 	attRes := waitResult("cmd-attach-err")
-	if attRes.OK || !strings.Contains(attRes.Error, "attachment_ids") {
-		t.Fatalf("expected explicit error for attachment_ids, got %+v", attRes)
+	if attRes.OK || !strings.Contains(attRes.Error, "download attachment") {
+		t.Fatalf("expected download error for missing attachment, got %+v", attRes)
 	}
 	fakeMCP.mu.Lock()
 	if fakeMCP.launchCount != 1 {
 		fakeMCP.mu.Unlock()
-		t.Fatal("attachment_ids error must fail before calling t3_thread_launch")
+		t.Fatal("attachment download error must fail before calling t3_thread_launch")
 	}
 	fakeMCP.mu.Unlock()
 

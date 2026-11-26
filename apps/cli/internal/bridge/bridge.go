@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -21,7 +22,7 @@ import (
 )
 
 const (
-	defaultWatchInterval      = 5 * time.Second
+	defaultWatchInterval      = 2 * time.Second
 	defaultHeartbeatInterval  = 60 * time.Second
 	defaultReconnectBaseDelay = 1 * time.Second
 	defaultReconnectMaxDelay  = 30 * time.Second
@@ -293,11 +294,13 @@ func (b *Bridge) Tick(ctx context.Context, mgr *mcpclient.Manager) error {
 
 	b.flushPendingResults(ctx)
 
-	if _, err := b.client.HeartbeatT3Host(ctx, serverclient.T3HeartbeatRequest{
+	if hbResp, err := b.client.HeartbeatT3Host(ctx, serverclient.T3HeartbeatRequest{
 		EnvironmentID:   envID,
 		ActiveThreadIDs: b.ActiveThreadIDs(),
 	}); err != nil {
 		b.logger.Warn("bridge tick heartbeat failed", "environment_id", envID, "error", err)
+	} else {
+		b.seedActiveThreads(hbResp.ActiveThreadIDs)
 	}
 
 	deferred := b.takeDeferredCommands()
@@ -455,13 +458,15 @@ func (b *Bridge) runHeartbeatLoop(ctx context.Context) {
 			}
 			hbCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			b.flushPendingResults(hbCtx)
-			_, err := b.client.HeartbeatT3Host(hbCtx, serverclient.T3HeartbeatRequest{
+			hbResp, err := b.client.HeartbeatT3Host(hbCtx, serverclient.T3HeartbeatRequest{
 				EnvironmentID:   envID,
 				ActiveThreadIDs: b.ActiveThreadIDs(),
 			})
 			cancel()
 			if err != nil {
 				b.logger.Warn("bridge background heartbeat failed", "environment_id", envID, "error", err)
+			} else {
+				b.seedActiveThreads(hbResp.ActiveThreadIDs)
 			}
 		}
 	}
@@ -686,9 +691,27 @@ func (b *Bridge) dispatchCommand(ctx context.Context, mgr *mcpclient.Manager, cm
 		return b.handleThreadRespond(ctx, mgr, cmd.Payload)
 	case "thread_control":
 		return b.handleThreadControl(ctx, mgr, cmd.CommandID, cmd.Payload)
+	case "artifact_fetch":
+		return b.handleArtifactFetch(ctx, mgr, cmd.Payload)
 	default:
 		return nil, fmt.Errorf("unsupported bridge command action %q", cmd.Action)
 	}
+}
+
+// SyncCapabilities refreshes host capabilities, projects, and providers with OpenAlbert.
+func (b *Bridge) SyncCapabilities(ctx context.Context, mgr *mcpclient.Manager) error {
+	if b == nil {
+		return nil
+	}
+	activeMCP := mgr
+	if !HasT3Tools(activeMCP) {
+		activeMCP = b.currentMCP()
+	}
+	if !HasT3Tools(activeMCP) {
+		return errors.New("t3-code MCP tools not attached")
+	}
+	_, err := b.syncCapabilities(ctx, activeMCP)
+	return err
 }
 
 func (b *Bridge) syncCapabilities(ctx context.Context, mgr *mcpclient.Manager) (serverclient.T3HostRegisterResponse, error) {
@@ -749,6 +772,7 @@ func (b *Bridge) syncCapabilities(ctx context.Context, mgr *mcpclient.Manager) (
 	b.envID = envID
 	b.registered = true
 	b.mu.Unlock()
+	b.seedActiveThreads(regResp.ActiveThreadIDs)
 	b.notifySignal()
 
 	return regResp, nil
@@ -948,8 +972,14 @@ func (b *Bridge) handleThreadLaunch(ctx context.Context, mgr *mcpclient.Manager,
 			return nil, fmt.Errorf("invalid thread_launch payload: %w", err)
 		}
 	}
+	message := req.Message
 	if len(req.AttachmentIDs) > 0 {
-		return nil, errors.New("thread_launch attachment_ids are not supported by the LAN T3 bridge")
+		attachConvID := firstNonEmpty(req.AttachmentConversationID, req.ConversationID)
+		paths, err := materializeAttachments(ctx, b.client, b.cfg, "launch-"+uuid.NewString()[:8], attachConvID, req.AttachmentIDs)
+		if err != nil {
+			return nil, err
+		}
+		message = appendAttachmentPathsToMessage(message, paths)
 	}
 	title := strings.TrimSpace(req.Title)
 	if title == "" {
@@ -964,8 +994,8 @@ func (b *Bridge) handleThreadLaunch(ctx context.Context, mgr *mcpclient.Manager,
 	if req.ProjectID != "" {
 		args["projectId"] = req.ProjectID
 	}
-	if req.Message != "" {
-		args["message"] = req.Message
+	if message != "" {
+		args["message"] = message
 	}
 	if ms := normalizeModelSelection(req.ModelSelection); len(ms) > 0 {
 		args["modelSelection"] = ms
@@ -998,6 +1028,9 @@ func (b *Bridge) handleThreadLaunch(ctx context.Context, mgr *mcpclient.Manager,
 	}
 
 	envID := b.EnvironmentID()
+	if parsed.Link == "" && envID != "" {
+		parsed.Link = fmt.Sprintf("https://app.t3.codes/threads/%s/%s", url.PathEscape(envID), url.PathEscape(parsed.ThreadID))
+	}
 	launchHash := hashEventState(envID, parsed.ThreadID, "thread_launched", status, nil, "", "", "", parsed.Branch, "", nil, 0)
 	tracked := &trackedThread{
 		threadID:          parsed.ThreadID,
@@ -1145,27 +1178,60 @@ func parseLaunchResponse(raw json.RawMessage, req threadLaunchPayload) launchRes
 	return out
 }
 
+func isSteerOnIdleThreadError(err error) bool {
+	if err == nil || isDeferrableOutsideTurnError(err) {
+		return false
+	}
+	var toolErr *mcpclient.ToolError
+	if !errors.As(err, &toolErr) {
+		return false
+	}
+	msg := strings.ToLower(toolErr.Message)
+	for _, needle := range []string{
+		"idle",
+		"not running",
+		"no active",
+		"no running",
+		"not active",
+		"not currently running",
+		"no active turn",
+		"no running turn",
+		"nothing to steer",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *Bridge) handleThreadSend(ctx context.Context, mgr *mcpclient.Manager, commandID string, payload json.RawMessage) (json.RawMessage, error) {
 	var req struct {
-		ThreadID      string         `json:"thread_id"`
-		Message       string         `json:"message"`
-		Mode          string         `json:"mode"`
-		OutputSchema  map[string]any `json:"output_schema"`
-		AttachmentIDs []string       `json:"attachment_ids"`
+		ThreadID                 string         `json:"thread_id"`
+		Message                  string         `json:"message"`
+		Mode                     string         `json:"mode"`
+		OutputSchema             map[string]any `json:"output_schema"`
+		AttachmentIDs            []string       `json:"attachment_ids"`
+		AttachmentConversationID string         `json:"attachment_conversation_id"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, fmt.Errorf("invalid thread_send payload: %w", err)
-	}
-	if len(req.AttachmentIDs) > 0 {
-		return nil, errors.New("thread_send attachment_ids are not supported by the LAN T3 bridge")
 	}
 	req.ThreadID = strings.TrimSpace(req.ThreadID)
 	if req.ThreadID == "" || strings.TrimSpace(req.Message) == "" {
 		return nil, errors.New("thread_send requires thread_id and message")
 	}
+	message := req.Message
+	if len(req.AttachmentIDs) > 0 {
+		paths, err := materializeAttachments(ctx, b.client, b.cfg, req.ThreadID, req.AttachmentConversationID, req.AttachmentIDs)
+		if err != nil {
+			return nil, err
+		}
+		message = appendAttachmentPathsToMessage(message, paths)
+	}
 	args := map[string]any{
 		"threadId": req.ThreadID,
-		"message":  req.Message,
+		"message":  message,
 	}
 	if commandID != "" {
 		args["clientRequestId"] = commandID
@@ -1176,7 +1242,21 @@ func (b *Bridge) handleThreadSend(ctx context.Context, mgr *mcpclient.Manager, c
 	if len(req.OutputSchema) > 0 {
 		args["outputSchema"] = req.OutputSchema
 	}
+	effectiveSteer := req.Mode == "steer"
 	raw, err := mgr.CallRemote(ctx, "t3_thread_send", args)
+	if err != nil && req.Mode == "steer" && isSteerOnIdleThreadError(err) {
+		b.logger.Info("bridge thread_send steer fell back to auto on idle thread", "thread_id", req.ThreadID, "error", err)
+		fallbackArgs := make(map[string]any, len(args))
+		for k, v := range args {
+			fallbackArgs[k] = v
+		}
+		fallbackArgs["mode"] = "auto"
+		if commandID != "" {
+			fallbackArgs["clientRequestId"] = commandID + ":auto"
+		}
+		raw, err = mgr.CallRemote(ctx, "t3_thread_send", fallbackArgs)
+		effectiveSteer = false
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1186,7 +1266,7 @@ func (b *Bridge) handleThreadSend(ctx context.Context, mgr *mcpclient.Manager, c
 	}
 	_ = json.Unmarshal(raw, &sendResp)
 	runID := firstNonEmpty(sendResp.RunID, sendResp.LatestRunID)
-	b.ensureTrackedActive(req.ThreadID, req.Mode == "steer", len(req.OutputSchema) > 0, runID)
+	b.ensureTrackedActive(req.ThreadID, effectiveSteer, len(req.OutputSchema) > 0, runID)
 	return raw, nil
 }
 
@@ -1283,6 +1363,60 @@ func (b *Bridge) handleThreadControl(ctx context.Context, mgr *mcpclient.Manager
 		return json.Marshal(ev)
 	default:
 		return nil, fmt.Errorf("unsupported thread_control action %q", req.Action)
+	}
+}
+
+func (b *Bridge) handleArtifactFetch(ctx context.Context, mgr *mcpclient.Manager, payload json.RawMessage) (json.RawMessage, error) {
+	lookupWorktree := func(ctx context.Context, threadID string) string {
+		if strings.TrimSpace(threadID) == "" || !mgr.HasRemoteTool("t3_thread_read") {
+			return ""
+		}
+		raw, err := mgr.CallRemote(ctx, "t3_thread_read", map[string]any{
+			"threadId": threadID,
+			"view":     "messages",
+			"limit":    1,
+		})
+		if err != nil {
+			return ""
+		}
+		var resp struct {
+			WorktreePath string `json:"worktreePath"`
+			Thread       *struct {
+				WorktreePath string `json:"worktreePath"`
+			} `json:"thread"`
+		}
+		if json.Unmarshal(raw, &resp) != nil {
+			return ""
+		}
+		if resp.Thread != nil && strings.TrimSpace(resp.Thread.WorktreePath) != "" {
+			return strings.TrimSpace(resp.Thread.WorktreePath)
+		}
+		return strings.TrimSpace(resp.WorktreePath)
+	}
+	return fetchLocalArtifact(ctx, b.client, b.cfg, payload, lookupWorktree)
+}
+
+func (b *Bridge) seedActiveThreads(threadIDs []string) {
+	if len(threadIDs) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, rawID := range threadIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if _, exists := b.activeThreads[id]; exists {
+			continue
+		}
+		b.nextTrackGen++
+		b.activeThreads[id] = &trackedThread{
+			threadID:          id,
+			gen:               b.nextTrackGen,
+			wasActive:         true,
+			lastObservedRunID: b.lastKnownRunID[id],
+		}
 	}
 }
 
@@ -1454,7 +1588,23 @@ func (b *Bridge) pollSingleThread(ctx context.Context, mgr *mcpclient.Manager, t
 		}
 	}
 
-	kind, terminal := classifyThreadEvent(snap.Status, snap.LatestRunStatus, pendingID != "", wasActive)
+	// Antigravity/subagent runs pause with status="completed" while waiting on
+	// pendingBackgroundTasks or child thread waits; keep them running until those settle.
+	hasBackgroundWork := snap.PendingBackgroundTasksCount > 0 || snap.BlockedOnThreadWait
+	effectiveStatus := snap.Status
+	if hasBackgroundWork && pendingID == "" {
+		switch strings.ToLower(strings.TrimSpace(effectiveStatus)) {
+		case "", "completed", "idle":
+			effectiveStatus = "running"
+		}
+	}
+
+	kind, terminal := classifyThreadEvent(effectiveStatus, snap.LatestRunStatus, pendingID != "", wasActive)
+	if hasBackgroundWork && kind == "thread_completed" {
+		kind = "thread_progress"
+		terminal = false
+		effectiveStatus = "running"
+	}
 
 	// If a queued schema-bearing run has not started yet (we still observe the preceding run),
 	// keep watching instead of terminating on the preceding run's terminal status (completed or failed).
@@ -1512,7 +1662,7 @@ func (b *Bridge) pollSingleThread(ctx context.Context, mgr *mcpclient.Manager, t
 	model := firstNonEmpty(snap.Model, meta.model)
 	branch := firstNonEmpty(snap.Branch, meta.branch)
 
-	stateHash := hashEventState(envID, threadID, kind, snap.Status, pendingPayload, snap.LatestRunID, snap.PRURL, snap.Error, branch, snap.Summary, snap.Output, snap.ItemCount)
+	stateHash := hashEventState(envID, threadID, kind, effectiveStatus, pendingPayload, snap.LatestRunID, snap.PRURL, snap.Error, branch, snap.Summary, snap.Output, snap.ItemCount)
 
 	evID := "evt-" + stateHash
 	if forceEmit {
@@ -1523,7 +1673,7 @@ func (b *Bridge) pollSingleThread(ctx context.Context, mgr *mcpclient.Manager, t
 		EnvironmentID:      envID,
 		ThreadID:           threadID,
 		Kind:               kind,
-		Status:             snap.Status,
+		Status:             effectiveStatus,
 		Title:              title,
 		Link:               link,
 		ProjectID:          projectID,
@@ -1570,7 +1720,7 @@ func (b *Bridge) pollSingleThread(ctx context.Context, mgr *mcpclient.Manager, t
 				t.deliveredPendingID = ""
 				t.deliveredPendingPayload = nil
 			}
-			if snap.Status == "running" || snap.Status == "starting" || snap.Status == "queued" || snap.Status == "waiting" {
+			if effectiveStatus == "running" || effectiveStatus == "starting" || effectiveStatus == "queued" || effectiveStatus == "waiting" {
 				t.wasActive = true
 			}
 		}

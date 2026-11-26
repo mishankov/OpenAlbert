@@ -1349,8 +1349,11 @@ func (s *Server) handlePrompt(ctx context.Context, params json.RawMessage) (any,
 	if err != nil {
 		return nil, err
 	}
-	if s.isBridgeTickPrompt(req) {
+	switch s.detectBridgePromptMode(req) {
+	case bridgePromptTick:
 		return s.handleBridgeTick(handle.ctx, sess)
+	case bridgePromptLive:
+		return s.handleBridgeLive(handle.ctx, sess)
 	}
 	cb := &acpCallbacks{
 		sessionID:      sess.ID,
@@ -1366,15 +1369,29 @@ func (s *Server) handlePrompt(ctx context.Context, params json.RawMessage) (any,
 	return map[string]any{"stopReason": stopReason}, nil
 }
 
-func (s *Server) isBridgeTickPrompt(req promptParams) bool {
+type bridgePromptMode int
+
+const (
+	bridgePromptNone bridgePromptMode = iota
+	bridgePromptTick
+	bridgePromptLive
+)
+
+func (s *Server) detectBridgePromptMode(req promptParams) bridgePromptMode {
 	if !s.cfg.Bridge || len(req.assembledImages) > 0 {
-		return false
+		return bridgePromptNone
+	}
+	if matchesBridgeTick(req.assembledText, config.DefaultBridgeLivePrompt) {
+		return bridgePromptLive
 	}
 	tick := s.cfg.BridgeTickPrompt
 	if tick == "" {
 		tick = config.DefaultBridgeTickPrompt
 	}
-	return matchesBridgeTick(req.assembledText, tick)
+	if matchesBridgeTick(req.assembledText, tick) {
+		return bridgePromptTick
+	}
+	return bridgePromptNone
 }
 
 // matchesBridgeTick returns true when raw is either the exact tick sentinel or
@@ -1447,6 +1464,17 @@ func stripT3SystemMetadataPrefix(text string) (string, bool) {
 	return text, false
 }
 
+func (s *Server) autoSnoozeBridgeThread(ctx context.Context, sess *agent.Session) {
+	if sess != nil && sess.MCP != nil && sess.MCP.HasRemoteTool("t3_thread_organize") {
+		if _, err := sess.MCP.CallRemote(ctx, "t3_thread_organize", map[string]any{
+			"action":       "snooze",
+			"snoozedUntil": "2099-01-01T00:00:00Z",
+		}); err != nil {
+			s.logger.Debug("bridge tick auto-snooze failed", "session_id", sess.ID, "error", err)
+		}
+	}
+}
+
 func (s *Server) handleBridgeTick(ctx context.Context, sess *agent.Session) (any, error) {
 	s.mu.Lock()
 	b := s.bridge
@@ -1459,14 +1487,7 @@ func (s *Server) handleBridgeTick(ctx context.Context, sess *agent.Session) (any
 	} else {
 		replyText = "bridge ok (standby)"
 	}
-	if sess != nil && sess.MCP != nil && sess.MCP.HasRemoteTool("t3_thread_organize") {
-		if _, err := sess.MCP.CallRemote(ctx, "t3_thread_organize", map[string]any{
-			"action":       "snooze",
-			"snoozedUntil": "2099-01-01T00:00:00Z",
-		}); err != nil {
-			s.logger.Debug("bridge tick auto-snooze failed", "session_id", sess.ID, "error", err)
-		}
-	}
+	s.autoSnoozeBridgeThread(ctx, sess)
 	_ = s.transport.Notify("session/update", map[string]any{
 		"sessionId": sess.ID,
 		"update": map[string]any{
@@ -1475,6 +1496,52 @@ func (s *Server) handleBridgeTick(ctx context.Context, sess *agent.Session) (any
 		},
 	})
 	return map[string]any{"stopReason": "end_turn"}, nil
+}
+
+// handleBridgeLive runs a zero-LLM persistent ACP turn so T3 Code keeps the MCP
+// server active continuously, allowing SSE commands (including real mid-turn
+// t3_thread_send mode="steer") to execute in near real-time without 60s cron ticks.
+func (s *Server) handleBridgeLive(ctx context.Context, sess *agent.Session) (any, error) {
+	s.mu.Lock()
+	b := s.bridge
+	s.mu.Unlock()
+	if b == nil {
+		s.autoSnoozeBridgeThread(ctx, sess)
+		_ = s.transport.Notify("session/update", map[string]any{
+			"sessionId": sess.ID,
+			"update": map[string]any{
+				"sessionUpdate": "agent_message_chunk",
+				"content":       map[string]any{"type": "text", "text": "bridge ok (standby)"},
+			},
+		})
+		return map[string]any{"stopReason": "end_turn"}, nil
+	}
+	if err := b.Tick(ctx, sess.MCP); err != nil {
+		s.logger.Warn("bridge live initial sync encountered error", "session_id", sess.ID, "error", err)
+	}
+	s.autoSnoozeBridgeThread(ctx, sess)
+	_ = s.transport.Notify("session/update", map[string]any{
+		"sessionId": sess.ID,
+		"update": map[string]any{
+			"sessionUpdate": "agent_message_chunk",
+			"content":       map[string]any{"type": "text", "text": "bridge live"},
+		},
+	})
+
+	refreshTicker := time.NewTicker(10 * time.Minute)
+	defer refreshTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return map[string]any{"stopReason": "cancelled"}, nil
+		case <-refreshTicker.C:
+			syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := b.SyncCapabilities(syncCtx, sess.MCP); err != nil && ctx.Err() == nil {
+				s.logger.Warn("bridge live capability refresh failed", "session_id", sess.ID, "error", err)
+			}
+			cancel()
+		}
+	}
 }
 
 type acpCallbacks struct {

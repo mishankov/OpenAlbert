@@ -31,7 +31,7 @@ func t3Definitions() []domain.Tool {
 		},
 		{
 			Name:        "t3_thread_send",
-			Description: "Send a follow-up message to an existing tracked T3 Code thread. Mode defaults to \"auto\" (supports \"auto\", \"steer\", \"queue\", \"restart\").",
+			Description: "Send a follow-up message to an existing tracked T3 Code thread. Mode defaults to \"steer\" (steers a running turn immediately, or starts an idle thread; supports \"steer\", \"auto\", \"queue\", \"restart\"). Use \"queue\" only when explicitly asked to wait for the current turn to finish.",
 			Parameters:  schema(`"thread_id":{"type":"string"},"message":{"type":"string"},"mode":{"type":"string","enum":["auto","steer","queue","restart"]},"output_schema":{"type":"object"},"attachment_ids":{"type":"array","items":{"type":"string"}}`, "thread_id", "message"),
 		},
 		{
@@ -310,7 +310,7 @@ func (a *Activities) executeT3(ctx context.Context, in ToolInput) (any, error) {
 		}
 		mode := strings.TrimSpace(p.Mode)
 		if mode == "" {
-			mode = "auto"
+			mode = "steer"
 		}
 		switch mode {
 		case "auto", "steer", "queue", "restart":
