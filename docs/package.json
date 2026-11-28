@@ -13,6 +13,6 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",
-    "marked": "^18.2.1"
+    "marked": "^18.3.0"
   }
 }
