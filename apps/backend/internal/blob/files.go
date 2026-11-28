@@ -5,35 +5,42 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/minio/minio-go/v7"
 	"openalbert/apps/backend/internal/domain"
 )
 
-func storedFile(info minio.ObjectInfo) domain.StoredFile {
-	out := domain.StoredFile{Key: info.Key, Name: path.Base(info.Key), MIME: info.ContentType, Size: info.Size, ModifiedAt: info.LastModified}
-	if out.MIME == "" {
-		for name, value := range info.UserMetadata {
-			if strings.EqualFold(name, "content-type") {
-				out.MIME = value
-			}
-		}
+func isInternalFile(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, metaSuffix) || strings.HasSuffix(lower, tmpSuffix)
+}
+
+func storedFileFromDisk(objectKey, bodyPath string, info fs.FileInfo) domain.StoredFile {
+	out := domain.StoredFile{
+		Key:        objectKey,
+		Name:       path.Base(objectKey),
+		Size:       info.Size(),
+		ModifiedAt: info.ModTime().UTC(),
 	}
-	// MinIO includes user metadata in listings. Other S3 servers may only return
-	// it on StatObject; the object key remains a usable fallback in that case.
-	raw, err := base64.StdEncoding.DecodeString(metadataValue(info, artifactMetadata))
-	var art domain.Artifact
-	if err == nil && json.Unmarshal(raw, &art) == nil && art.ID != "" && art.ConversationID != "" && key(art.ConversationID, art.ID) == info.Key {
-		if art.Name != "" {
-			out.Name = art.Name
+	if meta, err := readSidecarFile(metaPath(bodyPath)); err == nil {
+		art := meta.Artifact
+		if art.ID != "" && art.ConversationID != "" && key(art.ConversationID, art.ID) == objectKey {
+			if art.Name != "" {
+				out.Name = art.Name
+			}
+			if art.MIME != "" {
+				out.MIME = art.MIME
+			}
+			out.ConversationID, out.ArtifactID = art.ConversationID, art.ID
 		}
-		out.ConversationID, out.ArtifactID = art.ConversationID, art.ID
 	}
 	return out
 }
@@ -51,8 +58,8 @@ func fileBefore(a, b domain.StoredFile) bool {
 	return a.ModifiedAt.After(b.ModifiedAt)
 }
 
-// Keep only the newest page and one lookahead object while scanning S3's
-// lexically ordered listing. The oldest retained object is at the heap root.
+// Keep only the newest page and one lookahead object while scanning the
+// artifacts tree. The oldest retained object is at the heap root.
 type fileHeap []domain.StoredFile
 
 func (h fileHeap) Len() int           { return len(h) }
@@ -65,14 +72,15 @@ func (h *fileHeap) Pop() any {
 	return last
 }
 
-// ListFiles sorts the entire matching bucket listing by modification time,
-// newest first. S3 has no date-order listing, so each page scans metadata only;
-// memory stays bounded to 101 objects. The cursor records time and key rather
-// than relying on the previous page's object still existing.
+// ListFiles walks the local artifacts directory, filters by prefix, and sorts
+// matching files newest first with lexical key tie-breaking. Memory stays
+// bounded to 101 objects; the cursor records time and key so pagination works
+// even if the previous page's last object is later removed.
 func (s *Store) ListFiles(ctx context.Context, prefix, after string) (domain.StoredFiles, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	out := domain.StoredFiles{Bucket: s.bucket, Files: []domain.StoredFile{}}
+	out := domain.StoredFiles{Bucket: localBucket, Files: []domain.StoredFile{}}
+	if err := ctx.Err(); err != nil {
+		return out, err
+	}
 	var position filePosition
 	if after != "" {
 		if len(after) > 4096 {
@@ -83,14 +91,47 @@ func (s *Store) ListFiles(ctx context.Context, prefix, after string) (domain.Sto
 			return out, fs.ErrInvalid
 		}
 	}
-	page := fileHeap{}
-	for info := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true, WithMetadata: true, MaxKeys: 1000}) {
-		if info.Err != nil {
-			return out, info.Err
+	page := make(fileHeap, 0)
+	err := filepath.WalkDir(s.dir, func(p string, d fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		file := storedFile(info)
+		if walkErr != nil {
+			if p != s.dir && errors.Is(walkErr, fs.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if isInternalFile(d.Name()) {
+			return nil
+		}
+		rel, err := filepath.Rel(s.dir, p)
+		if err != nil {
+			return err
+		}
+		objectKey := "artifacts/" + filepath.ToSlash(rel)
+		if prefix != "" && !strings.HasPrefix(objectKey, prefix) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		file := storedFileFromDisk(objectKey, p, info)
 		if after != "" && !fileBefore(domain.StoredFile{Key: position.Key, ModifiedAt: position.ModifiedAt}, file) {
-			continue
+			return nil
 		}
 		if len(page) < 101 {
 			heap.Push(&page, file)
@@ -98,6 +139,10 @@ func (s *Store) ListFiles(ctx context.Context, prefix, after string) (domain.Sto
 			page[0] = file
 			heap.Fix(&page, 0)
 		}
+		return nil
+	})
+	if err != nil {
+		return out, err
 	}
 	if err := ctx.Err(); err != nil {
 		return out, err
@@ -113,18 +158,85 @@ func (s *Store) ListFiles(ctx context.Context, prefix, after string) (domain.Sto
 	return out, nil
 }
 
+func (s *Store) resolveObjectKey(objectKey string) (string, bool) {
+	if objectKey == "" || strings.ContainsRune(objectKey, 0) || strings.Contains(objectKey, "\\") {
+		return "", false
+	}
+	if strings.HasPrefix(objectKey, "/") || strings.HasSuffix(objectKey, "/") {
+		return "", false
+	}
+	if !fs.ValidPath(objectKey) || path.Clean(objectKey) != objectKey {
+		return "", false
+	}
+	if !strings.HasPrefix(objectKey, "artifacts/") {
+		return "", false
+	}
+	if isInternalFile(objectKey) {
+		return "", false
+	}
+	relKey := strings.TrimPrefix(objectKey, "artifacts/")
+	if relKey == "" {
+		return "", false
+	}
+	fullPath := filepath.Clean(filepath.Join(s.dir, filepath.FromSlash(relKey)))
+	rel, err := filepath.Rel(s.dir, fullPath)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return fullPath, true
+}
+
 func (s *Store) OpenFile(ctx context.Context, objectKey string) (domain.StoredFile, io.ReadSeekCloser, error) {
-	object, err := s.client.GetObject(ctx, s.bucket, objectKey, minio.GetObjectOptions{})
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return domain.StoredFile{}, nil, err
 	}
-	info, err := object.Stat()
+	fullPath, ok := s.resolveObjectKey(objectKey)
+	if !ok {
+		return domain.StoredFile{}, nil, fs.ErrNotExist
+	}
+	linfo, err := os.Lstat(fullPath)
 	if err != nil {
-		_ = object.Close()
-		if response := minio.ToErrorResponse(err); response.Code == "NoSuchKey" || response.Code == "NoSuchObject" {
+		if errors.Is(err, fs.ErrNotExist) {
 			return domain.StoredFile{}, nil, fs.ErrNotExist
 		}
 		return domain.StoredFile{}, nil, err
 	}
-	return storedFile(info), object, nil
+	if !linfo.Mode().IsRegular() {
+		return domain.StoredFile{}, nil, fs.ErrNotExist
+	}
+	evalRoot, err := filepath.EvalSymlinks(s.dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return domain.StoredFile{}, nil, fs.ErrNotExist
+		}
+		return domain.StoredFile{}, nil, err
+	}
+	evalPath, err := filepath.EvalSymlinks(fullPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return domain.StoredFile{}, nil, fs.ErrNotExist
+		}
+		return domain.StoredFile{}, nil, err
+	}
+	rel, err := filepath.Rel(evalRoot, evalPath)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return domain.StoredFile{}, nil, fs.ErrNotExist
+	}
+	f, err := os.Open(evalPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return domain.StoredFile{}, nil, fs.ErrNotExist
+		}
+		return domain.StoredFile{}, nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return domain.StoredFile{}, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return domain.StoredFile{}, nil, fs.ErrNotExist
+	}
+	return storedFileFromDisk(objectKey, evalPath, info), f, nil
 }

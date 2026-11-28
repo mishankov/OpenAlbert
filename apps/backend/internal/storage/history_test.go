@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"openalbert/apps/backend/internal/domain"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,18 +14,7 @@ func TestConversationHistoryContract(t *testing.T) {
 	for _, name := range []string{"send_message", "send_rich_message"} {
 		t.Run(name, func(t *testing.T) {
 			t.Run("memory", func(t *testing.T) { historyContract(t, NewMemory(), name) })
-			t.Run("postgres", func(t *testing.T) {
-				url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-				if url == "" {
-					t.Skip("set OPENALBERT_TEST_DATABASE_URL")
-				}
-				repo, err := Open(context.Background(), url)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer repo.Close()
-				historyContract(t, repo, name)
-			})
+			t.Run("sqlite", func(t *testing.T) { historyContract(t, openTestSQLite(t), name) })
 		})
 	}
 }
@@ -156,18 +144,7 @@ func historyCallsContract(t *testing.T, repo domain.Repository, scope, session s
 
 func TestGroupOutgoingHistoryContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { groupOutgoingContract(t, NewMemory()) })
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL")
-		}
-		repo, err := Open(context.Background(), url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer repo.Close()
-		groupOutgoingContract(t, repo)
-	})
+	t.Run("sqlite", func(t *testing.T) { groupOutgoingContract(t, openTestSQLite(t)) })
 }
 func groupOutgoingContract(t *testing.T, repo domain.Repository) {
 	ctx := context.Background()

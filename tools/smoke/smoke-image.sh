@@ -8,7 +8,7 @@ image=${2:?image is required}
 case "$component" in
   backup)
     docker run --rm --entrypoint /bin/sh "$image" -ec \
-      'test -x /usr/local/bin/albert-backup; test "$(id -u)" = 0; docker --version; docker compose version; /usr/local/bin/albert-backup keygen --identity /tmp/backup.agekey'
+      'test -x /usr/local/bin/albert-backup; test "$(id -u)" = 0; /usr/local/bin/albert-backup keygen --identity /tmp/backup.agekey'
     ;;
   openalbert)
     docker run --rm --entrypoint /bin/sh "$image" -ec \
@@ -26,53 +26,6 @@ case "$component" in
       docker logs "$container"
       exit 1
     fi
-    ;;
-  log-gateway)
-    container=$(docker run -d "$image")
-    trap 'docker rm -f "$container" >/dev/null' EXIT
-    for ((attempt=0; attempt<30; attempt++)); do
-      if docker exec "$container" wget -qO- http://127.0.0.1:9429/healthz; then
-        exit 0
-      fi
-      sleep 1
-    done
-    docker logs "$container"
-    exit 1
-    ;;
-  minio)
-    docker run --rm "$image" --version
-    ;;
-  minio-init)
-    docker run --rm --entrypoint mc "$image" --version
-    # Exercise the initializer twice and OpenAlbert's real S3 contract against the
-    # same server source used by the published image, on each architecture.
-    minio_image=${MINIO_SMOKE_IMAGE:-openalbert-local:minio-smoke}
-    if [[ -z ${MINIO_SMOKE_IMAGE:-} ]]; then
-      docker build -f services/minio/Dockerfile --target minio -t "$minio_image" .
-    fi
-    network="openalbert-ci-$(date +%s)-$$"
-    container="${network}-minio"
-    cleanup() {
-      docker rm -f "$container" >/dev/null 2>&1 || true
-      docker network rm "$network" >/dev/null 2>&1 || true
-    }
-    trap cleanup EXIT
-    docker network create "$network" >/dev/null
-    docker run -d --name "$container" --network "$network" --network-alias minio \
-      -p 127.0.0.1::9000 \
-      -e MINIO_ROOT_USER=openalbert-ci -e MINIO_ROOT_PASSWORD=ci-only-password \
-      "$minio_image" >/dev/null
-    for ((run=0; run<2; run++)); do
-      docker run --rm --network "$network" \
-        -e S3_ACCESS_KEY=openalbert-ci -e S3_SECRET_KEY=ci-only-password -e S3_BUCKET=openalbert-ci \
-        "$image"
-    done
-    address=$(docker port "$container" 9000/tcp)
-    OPENALBERT_TEST_S3_ENDPOINT="$address" \
-      OPENALBERT_TEST_S3_ACCESS_KEY=openalbert-ci \
-      OPENALBERT_TEST_S3_SECRET_KEY=ci-only-password \
-      OPENALBERT_TEST_S3_BUCKET=openalbert-ci \
-      GOWORK=off go -C apps/backend test -mod=readonly -race -count=1 ./internal/blob -run '^TestRealMinIO$'
     ;;
   *) echo "Unknown image component: $component" >&2; exit 1 ;;
 esac

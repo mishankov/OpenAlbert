@@ -2,441 +2,271 @@ package backup
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
+	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"filippo.io/age"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// Run through task test:backup. All containers, networks, buckets and files
-// belong to a unique disposable Compose project, never the developer's stack.
-func TestDockerBackupRestore(t *testing.T) {
-	if os.Getenv("OPENALBERT_TEST_BACKUP_DOCKER") != "1" {
-		t.Skip("run task test:backup for isolated Docker restore verification")
-	}
-	for _, exclude := range []bool{false, true} {
-		t.Run(fmt.Sprintf("exclude_computer=%t", exclude), func(t *testing.T) {
-			dockerBackupRestore(t, exclude)
-		})
-	}
-}
-
-func dockerBackupRestore(t *testing.T, excludeComputer bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+func TestEndToEndOnlineBackupRetentionAndRestore(t *testing.T) {
 	key, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join(t.TempDir(), "installation")
-	if err = os.MkdirAll(filepath.Join(root, "container_data/knowledge"), 0755); err != nil {
-		t.Fatal(err)
+	workDir := t.TempDir()
+	createTestSQLiteDB(t, filepath.Join(root, "data", "openalbert.db"))
+	files := map[string]string{
+		".env":                    "BOT_TOKEN=secret-must-not-leak\n",
+		"compose.yaml":            "services: {}\n",
+		"models.toml":             "# model configuration\n",
+		"models.env":              "OPENAI_API_KEY=secret-model-key\n",
+		"data/knowledge/SOUL.md":  "Albert remembers everything\n",
+		"data/artifacts/doc.txt":  "local blob artifact\n",
+		"data/chatgpt/token.json": `{"refresh":"synthetic"}`,
 	}
-	project := "albert-backup-test-" + strings.ToLower(rand.Text()[:10])
-	if configured := os.Getenv("OPENALBERT_TEST_BACKUP_PROJECT"); configured != "" {
-		project = configured
-	}
-	pgImage := "postgres:18.7-alpine"
-	minioImage := os.Getenv("OPENALBERT_TEST_BACKUP_MINIO_IMAGE")
-	if minioImage == "" {
-		t.Fatal("OPENALBERT_TEST_BACKUP_MINIO_IMAGE is required; run task test:backup to build MinIO from pinned source")
-	}
-	sleepImage := "node:24-alpine"
-	modelConfigFile := filepath.Join("config", "provider$BACKUP_MODEL.toml")
-	const modelConfig = "# synthetic config preserved by cold restore\n"
-	volume := func(source, target string) map[string]any {
-		return map[string]any{"type": "bind", "source": filepath.Join(root, "container_data", source), "target": target}
-	}
-	services := map[string]any{
-		"postgres":   map[string]any{"image": pgImage, "environment": map[string]string{"PGDATA": "/var/lib/postgresql/data", "POSTGRES_USER": "openalbert", "POSTGRES_PASSWORD": "test-only-password", "POSTGRES_DB": "openalbert"}, "volumes": []any{volume("postgres", "/var/lib/postgresql/data")}, "healthcheck": map[string]any{"test": []string{"CMD-SHELL", "pg_isready -h 127.0.0.1 -U openalbert"}, "interval": "1s", "timeout": "2s", "retries": 60}},
-		"minio":      map[string]any{"image": minioImage, "command": []string{"server", "/data"}, "environment": map[string]string{"MINIO_ROOT_USER": "test-access", "MINIO_ROOT_PASSWORD": "test-only-secret"}, "volumes": []any{volume("minio", "/data")}},
-		"temporal":   map[string]any{"image": sleepImage, "init": true, "entrypoint": []string{"sleep", "infinity"}},
-		"openalbert": map[string]any{"image": sleepImage, "init": true, "entrypoint": []string{"sleep", "infinity"}, "volumes": []any{volume("knowledge", "/data/knowledge"), volume("computer/client", "/data/computer"), map[string]any{"type": "bind", "source": strings.ReplaceAll(filepath.Join(root, modelConfigFile), "$", "$$"), "target": "/etc/openalbert/models.toml", "read_only": true}}},
-		"computer":   map[string]any{"image": sleepImage, "init": true, "entrypoint": []string{"sleep", "infinity"}, "volumes": []any{volume("computer/server", "/etc/openalbert-ssh"), volume("computer/home", "/home/albert"), volume("computer/workspace", "/workspace")}},
-	}
-	controllerImage := os.Getenv("OPENALBERT_TEST_BACKUP_CONTROLLER_IMAGE")
-	if controllerImage == "" {
-		controllerImage = "openalbert-ci:backup"
-	}
-	bind := func(source, target string, ro bool) map[string]any {
-		return map[string]any{"type": "bind", "source": source, "target": target, "read_only": ro}
-	}
-	services[ControllerService] = map[string]any{"image": controllerImage, "profiles": []string{"backup"}, "init": true, "read_only": true, "tmpfs": []string{"/tmp"}, "environment": map[string]string{"BACKUP_CONTAINER": "true"}, "stop_grace_period": "5m", "volumes": []any{
-		bind(root, "/installation", true), bind(filepath.Join(root, "backup-config"), "/etc/openalbert-backup", true), bind(filepath.Join(root, "container_data/backup-state"), "/installation/container_data/backup-state", false), bind(filepath.Join(root, "container_data/backup-work"), "/var/lib/openalbert-backup", false), bind("/var/run/docker.sock", "/var/run/docker.sock", false),
-	}}
-	if err = os.MkdirAll(filepath.Join(root, "config"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(filepath.Join(root, modelConfigFile), []byte(modelConfig), 0644); err != nil {
-		t.Fatal(err)
-	}
-	const modelCredentials = "ANALYSIS_LLM_API_KEY=synthetic-analysis-key\n"
-	if err = os.WriteFile(filepath.Join(root, "models.env"), []byte(modelCredentials), 0600); err != nil {
-		t.Fatal(err)
-	}
-	services["openalbert"].(map[string]any)["env_file"] = []map[string]any{{"path": "./models.env", "required": false}}
-	model := map[string]any{"name": project, "services": services}
-	if err = AtomicJSON(filepath.Join(root, "compose.yaml"), model); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(filepath.Join(root, ".env"), []byte("# isolated backup smoke\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	c := Config{Root: root, WorkDir: t.TempDir(), ComposeFile: "compose.yaml", Enabled: true, ExcludeComputer: excludeComputer, Time: "03:00", Timezone: "Europe/Moscow", KeepDays: 2, Endpoint: "placeholder:9000", Bucket: "backups", Prefix: "instance/", Recipient: key.Recipient().String()}
-	if err = c.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	// Only synthetic fixtures are used here. Retain Docker stderr for failed
-	// smoke operations without weakening production's credential-safe errors.
-	testCommand := func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		command := exec.CommandContext(ctx, name, args...)
-		var stderr strings.Builder
-		command.Stderr = &stderr
-		out, err := command.Output()
-		if err != nil {
-			t.Logf("isolated Docker operation failed: %s", stderr.String())
+	for rel, content := range files {
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
 		}
-		return out, err
-	}
-	r := &Runner{Config: c, Command: testCommand}
-	if _, err = r.compose(ctx, "up", "-d", "--wait", "--wait-timeout", "90"); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		clean, stop := context.WithTimeout(context.Background(), time.Minute)
-		defer stop()
-		_, _ = r.compose(clean, "--profile", "backup", "down", "--volumes", "--remove-orphans")
-	})
-	sql := func(r *Runner, db, query string) string {
-		t.Helper()
-		b, e := r.compose(ctx, "exec", "-T", "postgres", "psql", "-U", "openalbert", "-d", db, "-Atc", query)
-		if e != nil {
-			t.Fatal(e)
-		}
-		return strings.TrimSpace(string(b))
-	}
-	for _, db := range []string{"temporal", "temporal_visibility"} {
-		sql(r, "openalbert", "CREATE DATABASE "+db)
-	}
-	for _, db := range []string{"openalbert", "temporal", "temporal_visibility"} {
-		sql(r, db, "CREATE TABLE backup_probe(value text); INSERT INTO backup_probe VALUES ('"+db+"-preserved')")
-	}
-	computerFiles := map[string]string{
-		"client/id_ed25519":      "synthetic client key",
-		"server/authorized_keys": "synthetic authorized key",
-		"home/notes.txt":         "home preserved",
-		"workspace/result.txt":   "workspace preserved",
-	}
-	for name, value := range computerFiles {
-		if err = os.WriteFile(filepath.Join(root, "container_data/computer", name), []byte(value), 0600); err != nil {
+		if err := os.WriteFile(full, []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if excludeComputer {
-		if err = os.Symlink("/usr/bin/python3", filepath.Join(root, "container_data/computer/home/python3")); err != nil {
-			t.Fatal(err)
-		}
+
+	configPath := filepath.Join(t.TempDir(), "backup.json")
+	rawConfig := map[string]any{
+		"root":          root,
+		"compose_file":  "compose.yaml",
+		"work_dir":      workDir,
+		"enabled":       true,
+		"time":          "03:00",
+		"timezone":      "Europe/Moscow",
+		"keep_days":     2,
+		"s3_endpoint":   "s3.example.test:9000",
+		"s3_region":     "us-east-1",
+		"s3_secure":     false,
+		"s3_bucket":     "backups",
+		"s3_prefix":     "e2e/",
+		"age_recipient": key.Recipient().String(),
 	}
-	if err = os.WriteFile(filepath.Join(root, "container_data/knowledge/SOUL.md"), []byte("Albert remembers"), 0600); err != nil {
+	if err := AtomicJSON(configPath, rawConfig); err != nil {
 		t.Fatal(err)
 	}
-	// Connect through the disposable network from this test container.
-	containerName, _ := os.Hostname()
-	if _, err = RunCommand(ctx, "docker", "network", "connect", project+"_default", containerName); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = RunCommand(context.Background(), "docker", "network", "disconnect", project+"_default", containerName)
-	})
-	artifactClient, err := minio.New("minio:9000", &minio.Options{Creds: credentials.NewStaticV4("test-access", "test-only-secret", ""), Secure: false})
+
+	c, err := LoadConfig(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitS3 := func(client *minio.Client) {
+	if c.NoticeSeconds != 0 {
+		t.Fatalf("expected default notice_seconds=0, got %d", c.NoticeSeconds)
+	}
+	if c.StateDir != filepath.Join(root, "backup-state") {
+		t.Fatalf("unexpected default state_dir: %s", c.StateDir)
+	}
+
+	r, err := NewRunner(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := &memoryRemote{}
+	r.Remote = remote
+
+	if err := (&Runner{Config: c}).Request(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- r.Serve(ctx, io.Discard) }()
+	joined := false
+	joinServe := func() error {
+		if joined {
+			return nil
+		}
+		joined = true
+		cancel()
+		return <-serveDone
+	}
+	t.Cleanup(func() { _ = joinServe() })
+
+	reader := Reader{Dir: c.StateDir}
+	waitCompleted := func(prevRunID string) State {
 		t.Helper()
-		for n := 0; n < 40; n++ {
-			if _, e := client.ListBuckets(ctx); e == nil {
-				return
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+			if s, e := reader.Read(); e == nil && s.RunID != prevRunID {
+				if s.Phase == "completed" {
+					return s
+				}
+				if s.Phase == "failed" {
+					t.Fatalf("backup failed: %+v", s)
+				}
 			}
-			time.Sleep(250 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 		}
-		t.Fatal("MinIO did not become ready")
+		t.Fatal("timed out waiting for backup completion")
+		return State{}
 	}
-	waitS3(artifactClient)
-	if err = artifactClient.MakeBucket(ctx, "artifacts", minio.MakeBucketOptions{}); err != nil {
-		t.Fatal(err)
+
+	first := waitCompleted("")
+	if first.LastSuccess == nil {
+		t.Fatal("missing first LastSuccess")
 	}
-	body := "artifact preserved across backup and restore"
-	if _, err = artifactClient.PutObject(ctx, "artifacts", "document.txt", strings.NewReader(body), int64(len(body)), minio.PutObjectOptions{}); err != nil {
-		t.Fatal(err)
+
+	// Verify public context never leaks credentials or secrets.
+	ctxText := reader.Context(time.Now().UTC())
+	if strings.Contains(ctxText, "secret-must-not-leak") || strings.Contains(ctxText, "secret-model-key") {
+		t.Fatal("secret leaked into Reader.Context")
 	}
-	// A second MinIO container is the external backup destination; it is never
-	// stopped by the application's Compose commands.
-	remoteName := project + "-remote"
-	if _, err = RunCommand(ctx, "docker", "run", "-d", "--name", remoteName, "--network", project+"_default", "-e", "MINIO_ROOT_USER=test-access", "-e", "MINIO_ROOT_PASSWORD=test-only-secret", minioImage, "server", "/data"); err != nil {
-		t.Fatal(err)
+
+	// Seed two earlier dates, then trigger a second backup today:
+	// keep_days=2 must drop 2020-01-01 while preserving 2020-01-02 and both copies from today.
+	for i, day := range []string{"2020-01-01", "2020-01-02"} {
+		at, _ := time.Parse(time.DateOnly, day)
+		old := *first.LastSuccess
+		old.ID = fmt.Sprintf("2020010%dT000000Z-0000000000000000", i+1)
+		old.Day = day
+		old.CreatedAt = at
+		old.Key = c.Prefix + "copies/" + old.ID + "/archive.tar.gz.age"
+		remote.seed(old)
 	}
-	t.Cleanup(func() { _, _ = RunCommand(context.Background(), "docker", "rm", "-f", remoteName) })
-	remoteClient, err := minio.New(remoteName+":9000", &minio.Options{Creds: credentials.NewStaticV4("test-access", "test-only-secret", ""), Secure: false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitS3(remoteClient)
-	if err = remoteClient.MakeBucket(ctx, c.Bucket, minio.MakeBucketOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BACKUP_S3_ACCESS_KEY", "test-access")
-	t.Setenv("BACKUP_S3_SECRET_KEY", "test-only-secret")
-	c.Endpoint = remoteName + ":9000"
-	r.Config = c
-	// Run the actual controller image with the installation mounted read-only at
-	// a different path. It must keep running while all data services are stopped.
-	controllerConfig := c
-	controllerConfig.Root = "/installation"
-	controllerConfig.StateDir = ""
-	controllerConfig.WorkDir = "/var/lib/openalbert-backup"
-	controllerConfig.CredentialsFile = "/etc/openalbert-backup/s3.json"
-	if err = controllerConfig.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.MkdirAll(filepath.Join(root, "backup-config"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err = AtomicJSON(filepath.Join(root, "backup-config/config.json"), controllerConfig); err != nil {
-		t.Fatal(err)
-	}
-	if err = AtomicJSON(filepath.Join(root, "backup-config/s3.json"), map[string]string{"access_key": "test-access", "secret_key": "test-only-secret"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = r.compose(ctx, "--profile", "backup", "up", "-d", "--no-deps", "backup"); err != nil {
-		t.Fatal(err)
-	}
-	for n := 0; n < 40; n++ {
-		if state, e := (Reader{Dir: c.StateDir}).Read(); e == nil && state.Phase == "idle" {
+	// The first run publishes "completed" just before releasing the flock, so
+	// retry ErrBusy within the test deadline when queueing the second request.
+	var reqErr error
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		reqErr = (&Runner{Config: c}).Request()
+		if reqErr == nil || !errors.Is(reqErr, ErrBusy) {
 			break
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
-	controllerID, err := r.compose(ctx, "ps", "-q", "backup")
+	if reqErr != nil {
+		t.Fatal(reqErr)
+	}
+	second := waitCompleted(first.RunID)
+	if err := joinServe(); err != nil {
+		t.Fatal(err)
+	}
+	assertWorkDirEmpty(t, workDir)
+
+	copies, err := remote.List(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	startedAt, err := RunCommand(ctx, "docker", "inspect", strings.TrimSpace(string(controllerID)), "--format", "{{.State.StartedAt}}")
-	if err != nil {
-		t.Fatal(err)
+	if len(copies) != 3 {
+		t.Fatalf("expected 3 copies (2 today + 2020-01-02), got %+v", copies)
 	}
-	createInContainer := func() {
-		t.Helper()
-		previous, _ := (Reader{Dir: c.StateDir}).Read()
-		if _, e := r.compose(ctx, "exec", "-T", "backup", "/usr/local/bin/albert-backup", "request"); e != nil {
-			logs, _ := r.compose(ctx, "logs", "--tail", "20", "backup")
-			t.Fatalf("container backup request failed: %v; logs: %s", e, logs)
+	for _, cp := range copies {
+		if cp.Day == "2020-01-01" {
+			t.Fatal("expired date 2020-01-01 survived rotation")
 		}
-		completed := false
-		for n := 0; n < 240; n++ {
-			state, e := (Reader{Dir: c.StateDir}).Read()
-			if e == nil && state.RunID != previous.RunID {
-				if state.Phase == "completed" {
-					completed = true
-					break
-				}
-				if state.Phase == "failed" {
-					logs, _ := r.compose(ctx, "logs", "--tail", "20", "backup")
-					t.Fatalf("backup failed: %+v; logs: %s", state, logs)
-				}
+	}
+
+	events, err := reader.Events()
+	if err != nil || len(events) < 4 {
+		t.Fatalf("expected starting/completed events for both runs: %+v %v", events, err)
+	}
+
+	archivePath := filepath.Join(t.TempDir(), "latest.age")
+	if err := os.WriteFile(archivePath, remote.archiveBytes(second.LastSuccess.ID), 0600); err != nil {
+		t.Fatal(err)
+	}
+	identity := filepath.Join(t.TempDir(), "identity")
+	if err := os.WriteFile(identity, []byte(key.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "restored")
+	if err := Restore(context.Background(), archivePath, identity, dest); err != nil {
+		t.Fatal(err)
+	}
+	var m Manifest
+	if err := readJSON(filepath.Join(dest, "backup-manifest.json"), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Version != ManifestVersion || m.ComposeFile != "compose.yaml" || m.ModelConfigFile != "models.toml" || m.ModelCredentialsFile != "models.env" {
+		t.Fatalf("unexpected restored manifest: %+v", m)
+	}
+	for rel, want := range files {
+		if strings.HasPrefix(rel, "data/chatgpt/") {
+			if _, err := os.Lstat(filepath.Join(dest, rel)); !os.IsNotExist(err) {
+				t.Fatalf("excluded %s was restored: %v", rel, err)
 			}
-			time.Sleep(250 * time.Millisecond)
+			continue
 		}
-		if !completed {
-			logs, _ := r.compose(ctx, "logs", "--tail", "20", "backup")
-			t.Fatalf("backup did not complete: %s", logs)
-		}
-		after, e := RunCommand(ctx, "docker", "inspect", strings.TrimSpace(string(controllerID)), "--format", "{{.State.StartedAt}}")
-		if e != nil || string(after) != string(startedAt) {
-			t.Fatalf("backup controller was restarted or stopped: %v", e)
+		got, err := os.ReadFile(filepath.Join(dest, rel))
+		if err != nil || string(got) != want {
+			t.Fatalf("restored %s mismatch: %q %v", rel, got, err)
 		}
 	}
-	createInContainer()
-	if _, err = r.compose(ctx, "exec", "-T", "--user", "10001", "backup", "cat", "/installation/container_data/backup-state/status.json"); err != nil {
-		t.Fatal("application UID cannot read status", err)
+	db, err := sql.Open("sqlite", sqliteDSN(filepath.Join(dest, "data", "openalbert.db"), true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var check string
+	if err := db.QueryRow("PRAGMA integrity_check").Scan(&check); err != nil || check != "ok" {
+		t.Fatalf("restored DB integrity_check=%q err=%v", check, err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM notes").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("restored DB rows: count=%d err=%v", count, err)
+	}
+}
+
+// Optional live S3 verification when OPENALBERT_TEST_BACKUP_S3_ENDPOINT is set
+// (along with BACKUP_S3_ACCESS_KEY, BACKUP_S3_SECRET_KEY, OPENALBERT_TEST_BACKUP_S3_BUCKET).
+func TestS3RemoteBackupRestore(t *testing.T) {
+	endpoint := os.Getenv("OPENALBERT_TEST_BACKUP_S3_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("set OPENALBERT_TEST_BACKUP_S3_ENDPOINT to run live S3 backup integration test")
+	}
+	bucket := os.Getenv("OPENALBERT_TEST_BACKUP_S3_BUCKET")
+	if bucket == "" {
+		bucket = "backups"
+	}
+	c, key := fixture(t)
+	c.Endpoint = endpoint
+	c.Bucket = bucket
+	c.Secure = os.Getenv("OPENALBERT_TEST_BACKUP_S3_SECURE") == "true"
+	c.Prefix = fmt.Sprintf("test-%d/", time.Now().UnixNano())
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	r, err := NewRunner(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Create(ctx); err != nil {
+		t.Fatal(err)
 	}
 	s, err := (Reader{Dir: c.StateDir}).Read()
 	if err != nil || s.Phase != "completed" || s.LastSuccess == nil {
-		t.Fatalf("backup state: %+v %v", s, err)
+		t.Fatalf("live S3 backup failed: %+v %v", s, err)
 	}
 	remote, err := NewS3(ctx, c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	archive := filepath.Join(t.TempDir(), "download.age")
-	if err = remote.Download(ctx, *s.LastSuccess, archive); err != nil {
+	t.Cleanup(func() { _ = remote.Delete(context.Background(), *s.LastSuccess) })
+	downloaded := filepath.Join(t.TempDir(), "download.age")
+	if err := remote.Download(ctx, *s.LastSuccess, downloaded); err != nil {
 		t.Fatal(err)
 	}
-	// Seed two earlier successful dates using real, verified encrypted bytes.
-	for i, day := range []string{"2020-01-01", "2020-01-02"} {
-		old := *s.LastSuccess
-		old.ID = fmt.Sprintf("2020010%dT000000Z-0000000000000000", i+1)
-		old.Day = day
-		old.CreatedAt, _ = time.Parse(time.DateOnly, day)
-		old.Key = c.Prefix + "copies/" + old.ID + "/archive.tar.gz.age"
-		if err = remote.Upload(ctx, old, archive); err != nil {
-			t.Fatal(err)
-		}
-	}
-	createInContainer()
-	copies, err := remote.List(ctx)
-	if err != nil {
+	identity := filepath.Join(t.TempDir(), "identity")
+	if err := os.WriteFile(identity, []byte(key.String()), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, copy := range copies {
-		if copy.Day == "2020-01-01" {
-			t.Fatal("expired successful date survived rotation")
-		}
-	}
-	if len(copies) != 3 {
-		t.Fatalf("same-day copies displaced a previous date: %+v", copies)
-	}
-	if _, err = remoteClient.StatObject(ctx, c.Bucket, c.Prefix+"copies/20200101T000000Z-0000000000000000/archive.tar.gz.age", minio.StatObjectOptions{}); minio.ToErrorResponse(err).Code != "NoSuchKey" {
-		t.Fatalf("expired bytes were not deleted: %v", err)
-	}
-	versioned := c
-	versioned.Bucket = "versioned-backups"
-	if err = remoteClient.MakeBucket(ctx, versioned.Bucket, minio.MakeBucketOptions{}); err != nil {
+	if err := Restore(ctx, downloaded, identity, filepath.Join(t.TempDir(), "restored")); err != nil {
 		t.Fatal(err)
-	}
-	if err = remoteClient.EnableVersioning(ctx, versioned.Bucket); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = NewS3(ctx, versioned); err == nil {
-		t.Fatal("accepted versioned bucket with ineffective physical deletion")
-	}
-	identity := filepath.Join(t.TempDir(), "key")
-	_ = os.WriteFile(identity, []byte(key.String()), 0600)
-	destination := filepath.Join(t.TempDir(), "restored")
-	if err = Restore(ctx, archive, identity, destination); err != nil {
-		t.Fatal(err)
-	}
-	if got, e := os.ReadFile(filepath.Join(destination, "models.env")); e != nil || string(got) != modelCredentials {
-		t.Fatal("model credentials did not survive encrypted restore", e)
-	}
-	if excludeComputer {
-		if _, err = os.Lstat(filepath.Join(destination, "container_data/computer")); !os.IsNotExist(err) {
-			t.Fatalf("computer tree survived exclusion: %v", err)
-		}
-		var overrides struct {
-			Services map[string]any `json:"services"`
-		}
-		if err = readJSON(filepath.Join(destination, "compose.backup-images.json"), &overrides); err != nil {
-			t.Fatal(err)
-		}
-		if _, exists := overrides.Services["computer"]; exists {
-			t.Fatal("excluded computer image present in restore overrides")
-		}
-	}
-	// Rebase the synthetic data binds for the new project, but leave the model
-	// bind at its existing original path. The restore override must replace it.
-	if err = os.WriteFile(filepath.Join(root, modelConfigFile), []byte("# changed after backup\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	restoredModel := map[string]any{}
-	if err = readJSON(filepath.Join(destination, "compose.yaml"), &restoredModel); err != nil {
-		t.Fatal(err)
-	}
-	restoredModel["name"] = project + "-restored"
-	raw, _ := json.Marshal(restoredModel)
-	raw = []byte(strings.ReplaceAll(string(raw), filepath.Join(root, "container_data"), filepath.Join(destination, "container_data")))
-	if err = os.WriteFile(filepath.Join(destination, "compose.yaml"), raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	restoredConfig := c
-	restoredConfig.Root = destination
-	restoredConfig.StateDir = ""
-	restoredConfig.WorkDir = t.TempDir()
-	if err = restoredConfig.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	restored := &Runner{Config: restoredConfig, Command: testCommand}
-	override := filepath.Join(destination, "compose.backup-images.json")
-	if _, err = restored.compose(ctx, "-f", override, "up", "-d", "--wait", "--wait-timeout", "90"); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		clean, stop := context.WithTimeout(context.Background(), time.Minute)
-		defer stop()
-		_, _ = restored.compose(clean, "-f", override, "down", "--volumes", "--remove-orphans")
-	})
-	if got, e := restored.compose(ctx, "-f", override, "exec", "-T", "openalbert", "cat", "/etc/openalbert/models.toml"); e != nil || string(got) != modelConfig {
-		t.Fatalf("restored application did not receive its archived model configuration: %q, %v", got, e)
-	}
-	if got, e := restored.compose(ctx, "exec", "-T", "openalbert", "printenv", "ANALYSIS_LLM_API_KEY"); e != nil || strings.TrimSpace(string(got)) != "synthetic-analysis-key" {
-		t.Fatal("restored application did not receive its model credential", e)
-	}
-	for _, db := range []string{"openalbert", "temporal", "temporal_visibility"} {
-		if got := sql(restored, db, "SELECT value FROM backup_probe"); got != db+"-preserved" {
-			t.Fatalf("lost %s: %s", db, got)
-		}
-	}
-	if got, _ := os.ReadFile(filepath.Join(destination, "container_data/knowledge/SOUL.md")); string(got) != "Albert remembers" {
-		t.Fatal("lost knowledge")
-	}
-	if !excludeComputer {
-		for name, want := range computerFiles {
-			got, err := os.ReadFile(filepath.Join(destination, "container_data/computer", name))
-			if err != nil || string(got) != want {
-				t.Fatalf("lost computer file %s: %q, %v", name, got, err)
-			}
-		}
-	}
-	// Verify artifact bytes on the restored MinIO without changing DNS aliases.
-	ids, err := restored.compose(ctx, "ps", "-q", "minio")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ip, err := RunCommand(ctx, "docker", "inspect", strings.TrimSpace(string(ids)), "--format", `{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = RunCommand(ctx, "docker", "network", "connect", project+"-restored_default", containerName); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = RunCommand(context.Background(), "docker", "network", "disconnect", project+"-restored_default", containerName)
-	})
-	client, err := minio.New(strings.TrimSpace(string(ip))+":9000", &minio.Options{Creds: credentials.NewStaticV4("test-access", "test-only-secret", ""), Secure: false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitS3(client)
-	o, err := client.GetObject(ctx, "artifacts", "document.txt", minio.GetObjectOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := sha256.New()
-	expected := sha256.Sum256([]byte(body))
-	_, err = io.Copy(h, o)
-	o.Close()
-	if err != nil || hex.EncodeToString(h.Sum(nil)) != hex.EncodeToString(expected[:]) {
-		t.Fatal("lost artifact bytes")
-	}
-	// Corrupt remote ciphertext: download must fail before any extraction.
-	bad := "corrupted"
-	_, err = remoteClient.PutObject(ctx, c.Bucket, s.LastSuccess.Key, strings.NewReader(bad), int64(len(bad)), minio.PutObjectOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = remote.Download(ctx, *s.LastSuccess, filepath.Join(t.TempDir(), "bad.age")); err == nil {
-		t.Fatal("accepted corrupt S3 bytes")
 	}
 }

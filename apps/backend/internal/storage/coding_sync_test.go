@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -75,17 +74,9 @@ func TestSanitizeJSONBStripsNULButPreservesEscapedLiteral(t *testing.T) {
 	}
 }
 
-func TestPostgresCodingSyncNULSanitizationAndLegacyCheckpointIsolation(t *testing.T) {
-	dsn := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("OPENALBERT_TEST_DATABASE_URL not set")
-	}
+func TestSQLiteCodingSyncNULSanitizationAndLegacyCheckpointIsolation(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLite(t)
 
 	// Seed a personal session with a legacy model checkpoint under turn key "shared-legacy-key".
 	if err := store.SaveCheckpoint(ctx, "model/shared-legacy-key/0", json.RawMessage(`{"secret":"personal-only"}`)); err != nil {
@@ -94,7 +85,7 @@ func TestPostgresCodingSyncNULSanitizationAndLegacyCheckpointIsolation(t *testin
 
 	// Sync a coding session containing a NUL byte AND a turn-done checkpoint reusing "shared-legacy-key".
 	sessID := "coding-pg-nul-" + time.Now().UTC().Format("20060102150405.000000000")
-	err = store.SyncCodingSession(ctx, domain.CodingSyncBatch{
+	err := store.SyncCodingSession(ctx, domain.CodingSyncBatch{
 		SessionID:      sessID,
 		ConversationID: "coding:" + sessID,
 		Title:          "NUL\x00Test",
@@ -231,31 +222,13 @@ func TestMemoryCloseStaleCodingSessionsContract(t *testing.T) {
 	closeStaleCodingSessionsContract(t, NewMemory())
 }
 
-func TestPostgresCloseStaleCodingSessionsContract(t *testing.T) {
-	dsn := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("OPENALBERT_TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	store, err := Open(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	closeStaleCodingSessionsContract(t, store)
+func TestSQLiteCloseStaleCodingSessionsContract(t *testing.T) {
+	closeStaleCodingSessionsContract(t, openTestSQLite(t))
 }
 
-func TestPostgresCloseStaleCodingSessionsSerializesWithConcurrentTurnStart(t *testing.T) {
-	dsn := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("OPENALBERT_TEST_DATABASE_URL not set")
-	}
+func TestSQLiteCloseStaleCodingSessionsSerializesWithConcurrentTurnStart(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLite(t)
 
 	basePrefix := "stale-race-" + time.Now().UTC().Format("20060102150405.000000000") + "-"
 	for i := 0; i < 12; i++ {

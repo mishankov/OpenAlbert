@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"go.temporal.io/sdk/temporal"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/integrations"
 	"strings"
@@ -127,8 +126,8 @@ func TestAudioErrorClassificationAndCancellation(t *testing.T) {
 		nonretry bool
 	}{{&integrations.HTTPError{Status: 422}, true}, {&integrations.HTTPError{Status: 401}, true}, {&integrations.HTTPError{Status: 503}, false}, {errors.New("PRIVATE_BODY"), false}} {
 		err := speechError(context.Background(), tc.err)
-		var app *temporal.ApplicationError
-		if !errors.As(err, &app) || app.NonRetryable() != tc.nonretry || strings.Contains(err.Error(), "PRIVATE_BODY") {
+		var app *domain.AppError
+		if !errors.As(err, &app) || domain.IsNonRetryable(err) != tc.nonretry || strings.Contains(err.Error(), "PRIVATE_BODY") {
 			t.Fatalf("classification %v", err)
 		}
 	}

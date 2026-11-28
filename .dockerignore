@@ -8,6 +8,11 @@ node_modules
 data
 knowledge
 container_data
+stt-models
+backup-config
+backup-state
+backup-work
+computer
 bin
 reports
 .task

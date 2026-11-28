@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"go.temporal.io/sdk/temporal"
 	"openalbert/apps/backend/internal/domain"
 )
 
@@ -25,8 +24,7 @@ func (m *analysisBudgetModel) FitsContext(_ context.Context, messages []domain.M
 
 func requireAnalysisContextFailure(t *testing.T, err error) {
 	t.Helper()
-	var failure *temporal.ApplicationError
-	if !errors.Is(err, ErrAnalysisContextLimit) || !errors.As(err, &failure) || !failure.NonRetryable() || failure.Type() != AnalysisContextLimitErrorType {
+	if !errors.Is(err, ErrAnalysisContextLimit) || !domain.IsNonRetryable(err) || domain.ErrorCode(err) != AnalysisContextLimitErrorType {
 		t.Fatalf("expected terminal context failure: %v", err)
 	}
 }
@@ -155,8 +153,7 @@ func TestAnalysisTemporaryAndMalformedFailuresRemainPending(t *testing.T) {
 			}
 			a.Model = m
 			err := a.Analyze(ctx, session)
-			var appErr *temporal.ApplicationError
-			if err == nil || errors.Is(err, ErrAnalysisContextLimit) || (errors.As(err, &appErr) && appErr.NonRetryable()) {
+			if err == nil || errors.Is(err, ErrAnalysisContextLimit) || domain.IsNonRetryable(err) {
 				t.Fatalf("temporary failure marked terminal: %v", err)
 			}
 			if pending, _ := repo.PendingAnalysis(ctx, 50); len(pending) != 1 {

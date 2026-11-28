@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/mishankov/OpenAlbert/shared/backup"
-	"go.temporal.io/sdk/temporal"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/scheduling"
 	"openalbert/apps/backend/internal/t3"
@@ -408,7 +407,7 @@ func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOut
 	}
 	for _, message := range in.Turn.Messages {
 		if message.ContextOverflow {
-			return out, temporal.NewNonRetryableApplicationError("required current-turn input exceeds the Temporal payload budget", "model_context_limit", nil)
+			return out, domain.NewNonRetryableError("required current-turn input exceeds the context payload budget", "model_context_limit", nil)
 		}
 	}
 	in.Turn.Conversation, err = a.sanitizeWorkspaceTaskConversation(ctx, in.Turn.Conversation, in.Turn.Input.TaskID)
@@ -429,7 +428,7 @@ func (a *Activities) ModelCall(ctx context.Context, in ModelInput) (out ModelOut
 		tools = []domain.Tool{codemodeDefinition(in.Finalize)}
 	}
 	// Refresh immediately before every uncached model call, including resumed
-	// Temporal activities whose persisted Turn contains an older system prompt.
+	// turns whose persisted Turn contains an older system prompt.
 	var liveSystemAdditions []string
 	if a.Backups != nil && a.isOwnerAuthorized(in.Turn.Conversation) {
 		if status := strings.TrimSpace(a.Backups.Context(time.Now())); status != "" {
@@ -585,10 +584,10 @@ func (a *Activities) ToolCall(ctx context.Context, in ToolInput) (out string, er
 	}
 	var rateLimit *widgets.RateLimitError
 	if errors.Is(e, widgets.ErrDeliveryPending) {
-		return "", temporal.NewApplicationErrorWithOptions(e.Error(), "widget_delivery_pending", temporal.ApplicationErrorOptions{NextRetryDelay: time.Second})
+		return "", domain.NewRetryableError(e.Error(), "widget_delivery_pending", time.Second, nil)
 	}
 	if errors.As(e, &rateLimit) {
-		return "", temporal.NewApplicationErrorWithOptions(rateLimit.Error(), "widget_rate_limit", temporal.ApplicationErrorOptions{NextRetryDelay: rateLimit.RetryAfter})
+		return "", domain.NewRetryableError(rateLimit.Error(), "widget_rate_limit", rateLimit.RetryAfter, nil)
 	}
 	if errors.Is(e, domain.ErrBrowserCapacity) {
 		ev.Fail(diagnosticError("browser_capacity"))

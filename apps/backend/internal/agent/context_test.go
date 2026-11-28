@@ -98,7 +98,7 @@ func TestCompactContextProtectsCurrentRequestAndEvidenceAfterImageView(t *testin
 	}
 }
 
-func TestOversizedMarkedTurnFailsBeforeProviderWithoutExceedingTemporalPayload(t *testing.T) {
+func TestOversizedMarkedTurnFailsBeforeProviderWithoutExceedingContextPayload(t *testing.T) {
 	a, _, _, conv := fixture(t)
 	model := &roleModel{}
 	a.Model = model
@@ -112,7 +112,7 @@ func TestOversizedMarkedTurnFailsBeforeProviderWithoutExceedingTemporalPayload(t
 			t.Fatalf("oversized turn escaped the transport guard: %d bytes, %v", len(raw), err)
 		}
 		_, err = a.ModelCall(context.Background(), ModelInput{Turn: Turn{Input: RunInput{Key: "large", ConversationID: conv.ID}, Conversation: conv, Messages: compact}})
-		if err == nil || !strings.Contains(err.Error(), "Temporal payload budget") {
+		if err == nil || !strings.Contains(err.Error(), "context payload budget") {
 			t.Fatalf("missing explicit context error: %v", err)
 		}
 	}

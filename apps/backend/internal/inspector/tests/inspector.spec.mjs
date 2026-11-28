@@ -355,56 +355,6 @@ test("отсутствующий вызов по ссылке показывае
   await expect(page.locator("#event-1")).toBeVisible();
 });
 
-test("логи: кнопка и Alt L открывают одинаковый фильтр и сохраняют поиск", async ({ page, context }) => {
-  await context.route("http://127.0.0.1:9428/**", route => route.fulfill({ body: "VMUI fixture", contentType: "text/html" }));
-  await fixture(page);
-  await page.locator("#search").fill("Лейкерс");
-  await expect(page.locator("#nav-logs")).toHaveAttribute("aria-keyshortcuts", "Alt+L");
-  const clicked = page.waitForEvent("popup");
-  await page.locator("#nav-logs").click();
-  const buttonPage = await clicked;
-  await buttonPage.waitForLoadState();
-  const target = buttonPage.url();
-  const query = new URLSearchParams(new URL(target).hash.slice(3)).get("query");
-  expect(query).toContain("NOT service:temporal-ui");
-  expect(query).toContain("http_status:>=400");
-  expect(query).toContain("duration_ms:>=1000");
-  await buttonPage.close();
-  for (const extra of [{ repeat: true }, { isComposing: true }]) {
-    await page.locator("body").dispatchEvent("keydown", { code: "KeyL", key: "д", altKey: true, bubbles: true, ...extra });
-  }
-  expect(context.pages()).toHaveLength(1);
-  const keyboard = page.waitForEvent("popup");
-  await page.locator("body").dispatchEvent("keydown", { code: "KeyL", key: "д", altKey: true, bubbles: true });
-  const keyboardPage = await keyboard;
-  await keyboardPage.waitForLoadState();
-  expect(keyboardPage.url()).toBe(target);
-  await keyboardPage.close();
-  await expect(page.locator("#search")).toHaveValue("Лейкерс");
-  await openSession(page);
-  await page.getByRole("button", { name: "Контекст", exact: true }).first().click();
-  await page.keyboard.press("Alt+l");
-  expect(context.pages()).toHaveLength(1);
-  await page.keyboard.press("Escape");
-});
-
-test("логи: загрузка одинаково блокирует кнопку и сочетание", async ({ page, context }) => {
-  await fixture(page);
-  let finish;
-  const pending = new Promise(resolve => { finish = resolve; });
-  await page.route("**/api/inspect/sessions?**", async route => {
-    await pending;
-    await route.fulfill({ json: { sessions: [session], next_before: 0 } });
-  });
-  await page.keyboard.press("Alt+r");
-  await expect(page.locator("#nav-logs")).toHaveAttribute("aria-disabled", "true");
-  await page.locator("#nav-logs").dispatchEvent("click");
-  await page.keyboard.press("Alt+l");
-  expect(context.pages()).toHaveLength(1);
-  finish();
-  await expect(page.locator("#nav-logs")).toHaveAttribute("aria-disabled", "false");
-});
-
 const speechResult = {
   session_id: session.id, conversation_id: conv.id, incoming_id: "voice", artifact_id: "voice-file",
   model: "nemotron-3.5", author_id: 42, author_name: "Анна", status: "completed",

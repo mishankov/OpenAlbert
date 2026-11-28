@@ -2,24 +2,21 @@ package orchestration
 
 import (
 	"context"
-	"github.com/stretchr/testify/mock"
-	"go.temporal.io/sdk/activity"
-	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/temporal"
-	"go.temporal.io/sdk/workflow"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/integrations"
-	"strings"
-	"testing"
-	"time"
 )
 
 type workflowSpeech struct {
-	calls int
+	calls atomic.Int32
 	stop  bool
 }
 
@@ -56,16 +53,15 @@ func TestConfiguredSTTEndpointFeedsAgent(t *testing.T) {
 		}
 		return finish("понял"), nil
 	}}
-	env := newEnv(a)
-	env.ExecuteWorkflow(func(ctx workflow.Context) (agent.Turn, error) {
-		return runTurn(options(ctx), agent.RunInput{Key: "http", SessionID: "s", ConversationID: conv.ID, IncomingIDs: []string{"voice"}}, 2)
-	})
-	requireWorkflowOK(t, env)
+	r := newTestRuntime(a, nil, time.Second, 2)
+	if _, err := r.runTurn(context.Background(), agent.RunInput{Key: "http", SessionID: "s", ConversationID: conv.ID, IncomingIDs: []string{"voice"}}, 2); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (s *workflowSpeech) Profile() string { return "test-v1" }
 func (s *workflowSpeech) Transcribe(ctx context.Context, _ string, _ []byte) (domain.SpeechText, error) {
-	s.calls++
+	s.calls.Add(1)
 	if s.stop {
 		<-ctx.Done()
 		return domain.SpeechText{}, ctx.Err()
@@ -78,8 +74,9 @@ func TestNewTextDuringAudioIsIncludedBeforeModel(t *testing.T) {
 	speech := &workflowSpeech{}
 	a.STT = speech
 	a.STTModel = "test"
-	_, _ = repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "voice", Conversation: conv, Attachments: []domain.Attachment{{Name: "voice.ogg", MIME: "audio/ogg", Data: []byte("audio")}}}, 2)
-	_, _ = repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "clarification", Conversation: conv, Text: "Точнее, три яблока"}, 3)
+	ctx := context.Background()
+	_, _ = repo.AcceptIncoming(ctx, domain.Incoming{ID: "voice", Conversation: conv, Attachments: []domain.Attachment{{Name: "voice.ogg", MIME: "audio/ogg", Data: []byte("audio")}}}, 2)
+	_, _ = repo.AcceptIncoming(ctx, domain.Incoming{ID: "clarification", Conversation: conv, Text: "Точнее, три яблока"}, 3)
 	a.Model = &scriptedModel{run: func(_ int, msg []domain.Message) (domain.Message, error) {
 		all := ""
 		for _, m := range msg {
@@ -90,44 +87,51 @@ func TestNewTextDuringAudioIsIncludedBeforeModel(t *testing.T) {
 		}
 		return finish("готово"), nil
 	}}
-	env := newEnv(a)
-	sent := false
-	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
-		if info.ActivityType.Name == "TranscribeAudio" && !sent {
-			sent = true
-			env.SignalWorkflow(MessageSignal, Event{ID: "clarification"})
-		}
-	})
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "voice"}) }, 0)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 3})
-	requireWorkflowOK(t, env)
-	if speech.calls != 1 || !sent {
-		t.Fatalf("speech calls=%d", speech.calls)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 3)
+	var sent atomic.Bool
+	r.hooks = &activityHooks{
+		onStart: func(name string, _ any) {
+			if name == "TranscribeAudio" && sent.CompareAndSwap(false, true) {
+				_ = r.SignalSession(ctx, conv.ID, Event{ID: "clarification"})
+			}
+		},
+	}
+	if err := r.SignalSession(ctx, conv.ID, Event{ID: "voice"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
+	if speech.calls.Load() != 1 || !sent.Load() {
+		t.Fatalf("speech calls=%d", speech.calls.Load())
 	}
 }
 
 func TestStopDuringAudioCancelsWithoutModelOrResurrection(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
 	a.STT = &workflowSpeech{stop: true}
-	_, _ = repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "voice", Conversation: conv, Attachments: []domain.Attachment{{Name: "v.ogg", MIME: "audio/ogg", Data: []byte("x")}}}, 2)
-	_, _ = repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "stop-audio", Conversation: conv, Text: "/stop"}, 3)
+	ctx := context.Background()
+	_, _ = repo.AcceptIncoming(ctx, domain.Incoming{ID: "voice", Conversation: conv, Attachments: []domain.Attachment{{Name: "v.ogg", MIME: "audio/ogg", Data: []byte("x")}}}, 2)
+	_, _ = repo.AcceptIncoming(ctx, domain.Incoming{ID: "stop-audio", Conversation: conv, Text: "/stop"}, 3)
 	model := &scriptedModel{run: func(_ int, _ []domain.Message) (domain.Message, error) {
 		t.Error("cancelled audio reached LLM")
 		return finish("wrong"), nil
 	}}
 	a.Model = model
-	env := newEnv(a)
-	sent := false
-	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
-		if info.ActivityType.Name == "TranscribeAudio" && !sent {
-			sent = true
-			env.SignalWorkflow(MessageSignal, Event{ID: "stop-audio", Stop: true})
-		}
-	})
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "voice"}) }, 0)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 3})
-	requireWorkflowOK(t, env)
-	pending, _ := repo.PendingIncoming(context.Background(), 100)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 3)
+	var sent atomic.Bool
+	r.hooks = &activityHooks{
+		onStart: func(name string, _ any) {
+			if name == "TranscribeAudio" && sent.CompareAndSwap(false, true) {
+				_ = r.SignalSession(ctx, conv.ID, Event{ID: "stop-audio", Stop: true})
+			}
+		},
+	}
+	if err := r.SignalSession(ctx, conv.ID, Event{ID: "voice"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
+	pending, _ := repo.PendingIncoming(ctx, 100)
 	for _, m := range pending {
 		if m.ID == "voice" || m.ID == "stop-audio" {
 			t.Fatal("cancelled input resurrected")
@@ -138,30 +142,27 @@ func TestStopDuringAudioCancelsWithoutModelOrResurrection(t *testing.T) {
 	}
 }
 
-func TestPermanentSTTFailureFallsBackAndLegacyTurnReplays(t *testing.T) {
-	for _, legacy := range []bool{false, true} {
-		a, repo, _, conv := newFixture(t)
-		_, _ = repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "voice", Conversation: conv, Attachments: []domain.Attachment{{Name: "v.ogg", MIME: "audio/ogg", Data: []byte("x")}}}, 2)
-		a.STT = &workflowSpeech{}
-		a.Model = &scriptedModel{run: func(_ int, msg []domain.Message) (domain.Message, error) {
-			all := ""
-			for _, m := range msg {
-				all += m.Content
-			}
-			if !strings.Contains(all, "Audio transcription unavailable") {
-				t.Error("missing fallback")
-			}
-			return finish("нужен текст"), nil
-		}}
-		env := newEnv(a)
-		if legacy {
-			env.OnGetVersion("audio-preparation/turn", workflow.DefaultVersion, 1).Return(workflow.DefaultVersion).Once()
-		} else {
-			env.OnActivity("TranscribeAudio", mock.Anything, mock.Anything).Return(domain.AudioResult{}, temporal.NewNonRetryableApplicationError("bad audio", "stt_http_422", nil)).Once()
+func TestPermanentSTTFailureFallsBack(t *testing.T) {
+	a, repo, _, conv := newFixture(t)
+	_, _ = repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "voice", Conversation: conv, Attachments: []domain.Attachment{{Name: "v.ogg", MIME: "audio/ogg", Data: []byte("x")}}}, 2)
+	a.STT = &workflowSpeech{}
+	a.Model = &scriptedModel{run: func(_ int, msg []domain.Message) (domain.Message, error) {
+		all := ""
+		for _, m := range msg {
+			all += m.Content
 		}
-		env.ExecuteWorkflow(func(ctx workflow.Context) (agent.Turn, error) {
-			return runTurn(options(ctx), agent.RunInput{Key: "turn", SessionID: "s", ConversationID: conv.ID, IncomingIDs: []string{"voice"}}, 2)
-		})
-		requireWorkflowOK(t, env)
+		if !strings.Contains(all, "Audio transcription unavailable") {
+			t.Error("missing fallback")
+		}
+		return finish("нужен текст"), nil
+	}}
+	r := newTestRuntime(a, nil, time.Second, 2)
+	r.hooks = &activityHooks{
+		transcribe: func(context.Context, agent.AudioInput, func(context.Context, agent.AudioInput) (domain.AudioResult, error)) (domain.AudioResult, error) {
+			return domain.AudioResult{}, domain.NewNonRetryableError("bad audio", "stt_http_422", nil)
+		},
+	}
+	if _, err := r.runTurn(context.Background(), agent.RunInput{Key: "turn", SessionID: "s", ConversationID: conv.ID, IncomingIDs: []string{"voice"}}, 2); err != nil {
+		t.Fatal(err)
 	}
 }

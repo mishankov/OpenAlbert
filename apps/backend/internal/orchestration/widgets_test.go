@@ -253,8 +253,13 @@ func TestWidgetCooldownDoesNotBlockFollowingStopCommand(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			client := &commandClient{}
-			r.Client = client
+			var events []Event
+			r.hooks = &activityHooks{
+				dispatchEv: func(_ string, ev Event) bool {
+					events = append(events, ev)
+					return true
+				},
+			}
 			r.Activities = &agent.Activities{Widgets: &widgets.Controller{Repo: repo, Transport: r.Telegram}}
 			for attempt := range 2 {
 				if err := r.DispatchOnce(ctx); err != nil {
@@ -268,8 +273,8 @@ func TestWidgetCooldownDoesNotBlockFollowingStopCommand(t *testing.T) {
 					}
 				}
 			}
-			if len(client.events) != 2 || !client.events[0].Stop || !client.events[1].Stop {
-				t.Fatalf("cooldown held up stop: %+v", client.events)
+			if len(events) != 2 || !events[0].Stop || !events[1].Stop {
+				t.Fatalf("cooldown held up stop: %+v", events)
 			}
 			if requests != 1 {
 				t.Fatal("cooldown retried HTTP")

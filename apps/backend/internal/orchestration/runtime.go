@@ -14,12 +14,6 @@ import (
 	"openalbert/apps/backend/internal/messagefmt"
 	"openalbert/apps/backend/internal/telemetry"
 	"openalbert/apps/backend/internal/widgets"
-
-	enumspb "go.temporal.io/api/enums/v1"
-	"go.temporal.io/api/serviceerror"
-	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/temporal"
-	"go.temporal.io/sdk/worker"
 )
 
 type Runtime struct {
@@ -28,56 +22,155 @@ type Runtime struct {
 	Telegram                    *integrations.Telegram
 	Callbacks                   *integrations.CallbackRouter
 	TTS                         domain.SpeechSynthesizer
-	Client                      client.Client
-	TaskQueue                   string
 	IdleTimeout                 time.Duration
 	CodingSessionStaleTimeout   time.Duration
 	MaxSteps                    int
 	InitiativeInterval          time.Duration
 	MemoryConsolidationInterval time.Duration
 	Logger                      *slog.Logger
-	wg                          sync.WaitGroup
-	voice                       *voiceSynthesis
-	lastConsolidationCheck      time.Time
-	lastCodingReapCheck         time.Time
+	Clock                       Clock
+	OnPruneLogs                 func(context.Context) error
+
+	initOnce sync.Once
+	mu       sync.Mutex
+	wg       sync.WaitGroup
+	voice    *voiceSynthesis
+
+	generalSem   semaphore
+	sttSem       semaphore
+	browserUISem semaphore
+	browserBGSem semaphore
+	analysisSem  semaphore
+
+	sessions            map[string]*sessionActor
+	taskWake            chan struct{}
+	activeTasks         map[string]bool
+	activeAnalysis      map[string]bool
+	activeInitiative    map[string]bool
+	activeBackups       map[string]bool
+	activeConsolidation map[string]bool
+
+	runCtx                 context.Context
+	lastConsolidationCheck time.Time
+	lastCodingReapCheck    time.Time
+
+	hooks *activityHooks
 }
 
-const codingSessionReapInterval = 5 * time.Minute
+const (
+	codingSessionReapInterval = 5 * time.Minute
+	pruneLogsInterval         = time.Hour
+)
 
-func (r *Runtime) Worker() worker.Worker {
-	w := worker.New(r.Client, r.TaskQueue, worker.Options{MaxConcurrentActivityExecutionSize: 4, MaxConcurrentWorkflowTaskExecutionSize: 4, WorkerStopTimeout: 15 * time.Second})
-	w.RegisterWorkflow(SessionWorkflow)
-	w.RegisterWorkflow(TaskWorkflow)
-	w.RegisterWorkflow(AnalysisWorkflow)
-	w.RegisterWorkflow(InitiativeWorkflow)
-	w.RegisterWorkflow(BackupEventWorkflow)
-	w.RegisterWorkflow(MemoryConsolidationWorkflow)
-	w.RegisterActivity(r.Activities)
-	return w
+func (r *Runtime) ensureInit() {
+	r.initOnce.Do(func() {
+		r.generalSem = newSemaphore(4)
+		r.sttSem = newSemaphore(1)
+		r.browserUISem = newSemaphore(5)
+		r.browserBGSem = newSemaphore(5)
+		r.analysisSem = newSemaphore(2)
+		r.sessions = map[string]*sessionActor{}
+		r.taskWake = make(chan struct{}, 1)
+		r.activeTasks = map[string]bool{}
+		r.activeAnalysis = map[string]bool{}
+		r.activeInitiative = map[string]bool{}
+		r.activeBackups = map[string]bool{}
+		r.activeConsolidation = map[string]bool{}
+	})
 }
 
-// Long audio never occupies chat/tool activity slots. The HTTP adapter also
-// enforces one native call, including across disconnects and worker retries.
-func (r *Runtime) STTWorker() worker.Worker {
-	w := worker.New(r.Client, r.TaskQueue+".stt", worker.Options{MaxConcurrentActivityExecutionSize: 1, WorkerStopTimeout: 15 * time.Second})
-	w.RegisterActivity(r.Activities.TranscribeAudio)
-	return w
+func (r *Runtime) clock() Clock {
+	if r.Clock != nil {
+		return r.Clock
+	}
+	return RealClock{}
 }
+
+func (r *Runtime) now() time.Time { return r.clock().Now() }
+
+func (r *Runtime) maxSteps() int {
+	if r.MaxSteps > 0 {
+		return r.MaxSteps
+	}
+	return 12
+}
+
+func (r *Runtime) bgCtxLocked(fallback context.Context) context.Context {
+	if r.runCtx != nil {
+		return r.runCtx
+	}
+	if fallback != nil {
+		return fallback
+	}
+	return context.Background()
+}
+
+func (r *Runtime) bgCtx(fallback context.Context) context.Context {
+	r.mu.Lock()
+	ctx := r.bgCtxLocked(fallback)
+	r.mu.Unlock()
+	return ctx
+}
+
+func (r *Runtime) pause(ctx context.Context, d time.Duration) bool {
+	return sleepCtx(ctx, r.clock(), d)
+}
+
+func SessionWorkflowID(scope string) string { return "session/" + agent.ID(scope) }
+
 func (r *Runtime) Start(ctx context.Context) {
-	for _, loop := range []func(context.Context){r.poll, r.dispatch, r.deliver, r.typing, r.reapBrowsers} {
+	r.ensureInit()
+	r.mu.Lock()
+	r.runCtx = ctx
+	r.mu.Unlock()
+
+	if r.Repo != nil {
+		if err := r.recoverRunningTasks(ctx); err != nil && ctx.Err() == nil {
+			r.record(ctx, "tasks.recover", err)
+		}
+		if err := r.reapOrphanedSessions(ctx); err != nil && ctx.Err() == nil {
+			r.record(ctx, "sessions.recover", err)
+		}
+	}
+
+	loops := []func(context.Context){
+		r.poll,
+		r.dispatch,
+		r.deliver,
+		r.typing,
+		r.reapBrowsers,
+		r.runTaskScheduler,
+		r.runPruneLogs,
+	}
+	for _, loop := range loops {
 		r.wg.Add(1)
 		go func(fn func(context.Context)) { defer r.wg.Done(); fn(ctx) }(loop)
 	}
 }
+
 func (r *Runtime) Wait() { r.wg.Wait() }
 
+func (r *Runtime) runPruneLogs(ctx context.Context) {
+	if r.OnPruneLogs == nil {
+		return
+	}
+	for r.pause(ctx, pruneLogsInterval) {
+		if err := r.OnPruneLogs(ctx); err != nil && ctx.Err() == nil {
+			r.record(ctx, "logs.prune", err)
+		}
+	}
+}
+
 func (r *Runtime) typing(ctx context.Context) {
+	if r.Telegram == nil {
+		return
+	}
 	next := map[string]time.Time{}
 	for ctx.Err() == nil {
-		if err := r.refreshTyping(ctx, time.Now(), next); err != nil && ctx.Err() == nil {
+		if err := r.refreshTyping(ctx, r.now(), next); err != nil && ctx.Err() == nil {
 			r.record(ctx, "telegram.typing", err)
 		}
-		if !pause(ctx, time.Second) {
+		if !r.pause(ctx, time.Second) {
 			return
 		}
 	}
@@ -124,26 +217,21 @@ func (r *Runtime) refreshTyping(ctx context.Context, now time.Time, next map[str
 	}
 	return nil
 }
-func pause(ctx context.Context, d time.Duration) bool {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
+
 func (r *Runtime) record(ctx context.Context, operation string, err error) {
 	event := telemetry.Start(ctx, r.Logger, operation)
 	event.End(err)
 }
+
 func (r *Runtime) poll(ctx context.Context) {
+	if r.Telegram == nil {
+		return
+	}
 	for ctx.Err() == nil {
 		offset, err := r.Repo.PollOffset(ctx)
 		if err != nil {
 			r.record(ctx, "telegram.offset", err)
-			if !pause(ctx, 3*time.Second) {
+			if !r.pause(ctx, 3*time.Second) {
 				return
 			}
 			continue
@@ -154,7 +242,7 @@ func (r *Runtime) poll(ctx context.Context) {
 				return
 			}
 			r.record(ctx, "telegram.poll", err)
-			if !pause(ctx, 5*time.Second) {
+			if !r.pause(ctx, 5*time.Second) {
 				return
 			}
 			continue
@@ -197,36 +285,30 @@ func (r *Runtime) poll(ctx context.Context) {
 			}
 		}
 		if err != nil {
-			if !pause(ctx, 3*time.Second) {
+			if !r.pause(ctx, 3*time.Second) {
 				return
 			}
 		} else if len(updates) == 0 {
-			if !pause(ctx, 250*time.Millisecond) {
+			if !r.pause(ctx, 250*time.Millisecond) {
 				return
 			}
 		}
 	}
 }
-func workflowOptions(id, queue string) client.StartWorkflowOptions {
-	return client.StartWorkflowOptions{ID: id, TaskQueue: queue, WorkflowIDReusePolicy: enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE, WorkflowExecutionErrorWhenAlreadyStarted: true}
-}
-func already(err error) bool {
-	var target *serviceerror.WorkflowExecutionAlreadyStarted
-	return errors.As(err, &target)
-}
-func SessionWorkflowID(scope string) string { return "session/" + agent.ID(scope) }
-func TaskWorkflowID(id string) string       { return "task/" + id }
+
 func (r *Runtime) dispatch(ctx context.Context) {
 	for ctx.Err() == nil {
 		if err := r.DispatchOnce(ctx); err != nil {
 			r.record(ctx, "dispatch", err)
 		}
-		if !pause(ctx, 2*time.Second) {
+		if !r.pause(ctx, 2*time.Second) {
 			return
 		}
 	}
 }
+
 func (r *Runtime) DispatchOnce(ctx context.Context) error {
+	r.ensureInit()
 	if err := r.DispatchBackupEvents(ctx); err != nil {
 		r.record(ctx, "backup.events", err)
 	}
@@ -236,7 +318,7 @@ func (r *Runtime) DispatchOnce(ctx context.Context) error {
 	}
 	for _, in := range incoming {
 		if in.Command == "schedules" || in.Command == "pause" || in.Command == "resume" {
-			if r.Activities.Widgets == nil {
+			if r.Activities == nil || r.Activities.Widgets == nil {
 				return errors.New("Telegram widgets are unavailable")
 			}
 			commandCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -265,80 +347,43 @@ func (r *Runtime) DispatchOnce(ctx context.Context) error {
 		text := strings.ToLower(strings.TrimSpace(in.Text))
 		stop := text == "/stop" || text == "стоп" || text == "stop"
 		newSession := len(in.Attachments) == 0 && (in.Command == "new" || text == "/new")
-		_, err = r.Client.SignalWithStartWorkflow(ctx, SessionWorkflowID(in.Conversation.ID), MessageSignal, Event{ID: in.ID, Stop: stop || in.Command == "stop", NewSession: newSession}, workflowOptions(SessionWorkflowID(in.Conversation.ID), r.TaskQueue), SessionWorkflow, SessionInput{ConversationID: in.Conversation.ID, IdleTimeout: r.IdleTimeout, MaxSteps: r.MaxSteps})
-		if err != nil {
-			return err
+		ev := Event{ID: in.ID, Stop: stop || in.Command == "stop", NewSession: newSession}
+		if r.hooks != nil && r.hooks.dispatchEv != nil && r.hooks.dispatchEv(in.Conversation.ID, ev) {
+			continue
 		}
-	}
-	tasks, err := r.Repo.RunnableTasks(ctx)
-	if err != nil {
-		return err
-	}
-	for _, t := range tasks {
-		_, err = r.Client.ExecuteWorkflow(ctx, workflowOptions(TaskWorkflowID(t.ID), r.TaskQueue), TaskWorkflow, TaskInput{ConversationID: t.ConversationID, ID: t.ID, MaxSteps: r.MaxSteps})
-		if err != nil && !already(err) {
+		if err := r.SignalSession(ctx, in.Conversation.ID, ev); err != nil {
 			return err
-		}
-		if already(err) { // Changes wake timers; unchanged timestamps do not need signals.
-			checkpoint := "task-dispatch/" + t.ID
-			version := []byte(`"` + t.UpdatedAt.UTC().Format(time.RFC3339Nano) + `"`)
-			old, ok, e := r.Repo.LoadCheckpoint(ctx, checkpoint)
-			if e != nil {
-				return e
-			}
-			if !ok || string(old) != string(version) {
-				if e = r.Client.SignalWorkflow(ctx, TaskWorkflowID(t.ID), "", TaskSignal, "changed"); e != nil {
-					var notFound *serviceerror.NotFound
-					if !errors.As(e, &notFound) {
-						return e
-					}
-				}
-				if e = r.Repo.SaveCheckpoint(ctx, checkpoint, version); e != nil {
-					return e
-				}
-			}
 		}
 	}
 	if r.CodingSessionStaleTimeout > 0 {
-		now := time.Now().UTC()
-		if r.lastCodingReapCheck.IsZero() || now.Sub(r.lastCodingReapCheck) >= codingSessionReapInterval {
+		now := r.now().UTC()
+		r.mu.Lock()
+		due := r.lastCodingReapCheck.IsZero() || now.Sub(r.lastCodingReapCheck) >= codingSessionReapInterval
+		if due {
 			r.lastCodingReapCheck = now
+		}
+		r.mu.Unlock()
+		if due {
 			if err := r.ReapStaleCodingSessions(ctx, now); err != nil {
 				r.record(ctx, "coding.sessions.reap", err)
 			}
 		}
 	}
-	sessions, err := r.Repo.PendingAnalysis(ctx, 50)
-	if err != nil {
+	if err := r.dispatchAnalysis(ctx); err != nil {
 		return err
 	}
-	for _, s := range sessions {
-		id := "analysis/" + s.ID
-		options := workflowOptions(id, r.TaskQueue)
-		options.WorkflowIDReusePolicy = enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY
-		options.RetryPolicy = &temporal.RetryPolicy{InitialInterval: time.Minute, BackoffCoefficient: 2, MaximumInterval: time.Hour}
-		_, err = r.Client.ExecuteWorkflow(ctx, options, AnalysisWorkflow, s)
-		if err != nil && !already(err) {
-			return err
-		}
-	}
-	if r.InitiativeInterval > 0 {
-		conversations, e := r.Repo.ListPrivateConversations(ctx)
-		if e != nil {
-			return e
-		}
-		for _, c := range conversations {
-			id := "initiative/" + agent.ID(c.ID)
-			_, err = r.Client.ExecuteWorkflow(ctx, workflowOptions(id, r.TaskQueue), InitiativeWorkflow, InitiativeInput{ConversationID: c.ID, Interval: r.InitiativeInterval, MaxSteps: r.MaxSteps})
-			if err != nil && !already(err) {
-				return err
-			}
-		}
+	if err := r.dispatchInitiative(ctx); err != nil {
+		return err
 	}
 	if r.MemoryConsolidationInterval > 0 {
-		now := time.Now().UTC()
-		if r.lastConsolidationCheck.IsZero() || now.Sub(r.lastConsolidationCheck) >= memoryConsolidationCheckInterval {
+		now := r.now().UTC()
+		r.mu.Lock()
+		due := r.lastConsolidationCheck.IsZero() || now.Sub(r.lastConsolidationCheck) >= memoryConsolidationCheckInterval
+		if due {
 			r.lastConsolidationCheck = now
+		}
+		r.mu.Unlock()
+		if due {
 			if err := r.DispatchMemoryConsolidation(ctx, now); err != nil {
 				r.record(ctx, "memory.consolidation.dispatch", err)
 			}
@@ -355,7 +400,7 @@ func (r *Runtime) ReapStaleCodingSessions(ctx context.Context, now time.Time) er
 		return nil
 	}
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = r.now().UTC()
 	}
 	cutoff := now.UTC().Add(-r.CodingSessionStaleTimeout)
 	closed, err := r.Repo.CloseStaleCodingSessions(ctx, cutoff, 50)
@@ -373,20 +418,24 @@ func (r *Runtime) ReapStaleCodingSessions(ctx context.Context, now time.Time) er
 }
 
 func (r *Runtime) deliver(ctx context.Context) {
+	if r.Repo == nil {
+		return
+	}
 	for ctx.Err() == nil {
 		if err := r.DeliverOnce(ctx); err != nil {
 			r.record(ctx, "outbox", err)
 		}
-		if ctx.Err() == nil {
-			if err := r.ProgressOnce(ctx, time.Now().UTC()); err != nil {
+		if ctx.Err() == nil && r.Telegram != nil {
+			if err := r.ProgressOnce(ctx, r.now().UTC()); err != nil {
 				r.record(ctx, "progress", err)
 			}
 		}
-		if !pause(ctx, time.Second) {
+		if !r.pause(ctx, time.Second) {
 			return
 		}
 	}
 }
+
 func (r *Runtime) DeliverOnce(ctx context.Context) error {
 	readyVoiceID := ""
 	if r.voice != nil {
@@ -523,7 +572,7 @@ func (r *Runtime) DeliverOnce(ctx context.Context) error {
 				if apiErr.RetryAfter > delay {
 					delay = apiErr.RetryAfter
 				}
-				if !pause(ctx, delay) {
+				if !r.pause(ctx, delay) {
 					return ctx.Err()
 				}
 			}
@@ -533,23 +582,12 @@ func (r *Runtime) DeliverOnce(ctx context.Context) error {
 	return nil
 }
 
-// Browser Activities have separate workers so capacity waits cannot occupy LLM,
-// inbox, delivery, or session-closing Activity execution slots.
-func (r *Runtime) BrowserWorkers() []worker.Worker {
-	var result []worker.Worker
-	for _, lane := range []string{".browser-ui", ".browser-bg"} {
-		w := worker.New(r.Client, r.TaskQueue+lane, worker.Options{MaxConcurrentActivityExecutionSize: 5, WorkerStopTimeout: 10 * time.Second})
-		w.RegisterActivity(r.Activities.BrowserToolCall)
-		result = append(result, w)
-	}
-	return result
-}
 func (r *Runtime) reapBrowsers(ctx context.Context) {
 	if r.Activities == nil || r.Activities.Browser == nil {
 		return
 	}
-	for pause(ctx, 15*time.Second) {
-		observedAt := time.Now()
+	for r.pause(ctx, 15*time.Second) {
+		observedAt := r.now()
 		sessions, err := r.Repo.ActiveSessions(ctx)
 		if err != nil {
 			r.record(ctx, "browser.reconcile", err)

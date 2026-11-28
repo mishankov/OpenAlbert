@@ -4,8 +4,9 @@
 
 - `compose.local.yaml` — сборка и запуск из checkout.
 - `compose.yaml` — запуск готовых образов без исходников.
-- `compose.test.yaml` — одноразовая среда Go integration-тестов.
+- `compose.test.yaml` — одноразовая среда Go-тестов.
 - `models.example.toml` — пример профилей LLM и привязок ролей.
+- `backup.example.json` / `backup-s3.example.json` — примеры конфигурации резервного копирования.
 - `docker-bake.hcl` — общий каталог сборок образов.
 - `networking/` — примеры WireGuard и Caddy для клиентского HTTP API.
 
@@ -18,13 +19,15 @@ docker compose --project-directory . -f deploy/compose.local.yaml up -d --build
 ```
 
 Все пути Compose отсчитываются от корня checkout через `--project-directory .`.
-Это сохраняет `.env` и `container_data/` на прежнем месте. Task задаёт этот
-параметр автоматически для тестового Compose.
+Состояние OpenAlbert (SQLite-база `openalbert.db`, локальные артефакты `artifacts/`,
+знания `knowledge/` и токены `chatgpt/`) хранится в едином каталоге `data/`.
+Task задаёт `--project-directory .` автоматически для тестового Compose.
 
 При установке без исходников скачай `compose.yaml` из этого каталога в каталог
 установки рядом с `.env` и настроенным `models.toml`. Дополнительные ключи
 профилей задаются в необязательном `models.env`, который также резервируется. После этого работают обычные `docker compose up -d`
-и другие команды без дополнительных параметров.
+и другие команды без дополнительных параметров. Для минимальной конфигурации без
+локального STT убери `local-stt` из `COMPOSE_PROFILES` — запустится один контейнер `openalbert`.
 
 Исходники, Dockerfiles и конфигурация отдельных компонентов находятся
 в `apps/` и `services/`; проверки — в `tools/`.

@@ -10,8 +10,6 @@ import (
 
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
-
-	"go.temporal.io/sdk/workflow"
 )
 
 type diagnosticLogs struct{ calls atomic.Int32 }
@@ -46,15 +44,14 @@ func TestScheduledOwnerAuditReadsLogsAndSavesResultSilently(t *testing.T) {
 			return finish("Audit saved quietly."), nil
 		}
 	}}
-	env := newEnv(a)
-	env.ExecuteWorkflow(func(wctx workflow.Context) error {
-		turn, err := runTurn(options(wctx), agent.RunInput{Key: "audit-run", SessionID: "audit-session", ConversationID: conv.ID, TaskID: taskID}, 4)
-		if err != nil {
-			return err
-		}
-		return workflow.ExecuteActivity(options(wctx), "Finish", finishInput(turn, nil)).Get(wctx, nil)
-	})
-	requireWorkflowOK(t, env)
+	r := newTestRuntime(a, nil, time.Second, 4)
+	turn, err := r.runTurn(ctx, agent.RunInput{Key: "audit-run", SessionID: "audit-session", ConversationID: conv.ID, TaskID: taskID}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.actFinish(ctx, finishInput(turn, nil)); err != nil {
+		t.Fatal(err)
+	}
 	rows, err := repo.PendingOutgoing(ctx, 10)
 	task, found, taskErr := repo.Task(ctx, conv.ID, taskID)
 	if err != nil || taskErr != nil || len(rows) != 0 || !found || task.Result != "One turn reached step_limit" || logs.calls.Load() != 1 {
@@ -90,10 +87,12 @@ func TestOwnerCanReadDiagnosticsAndReplyWithoutChangingThePastRun(t *testing.T) 
 		return finish(`{"summary":"Diagnostic reply sent","memories":[]}`), nil
 	}}
 	a.Model = model
-	env := newEnv(a)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 4})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 4)
+	if err := r.SignalSession(context.Background(), conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
 	rows, err := repo.PendingOutgoing(context.Background(), 10)
 	if err != nil || len(rows) != 1 || !strings.Contains(rows[0].Text, "лимита шагов") || logs.calls.Load() != 1 {
 		t.Fatalf("diagnosis was not queued exactly once: %+v %v", rows, err)

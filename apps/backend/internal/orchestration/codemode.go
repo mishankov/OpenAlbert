@@ -1,24 +1,23 @@
 package orchestration
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/mishankov/OpenAlbert/shared/codemode"
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
-
-	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/temporal"
-	"go.temporal.io/sdk/workflow"
 )
 
 const (
 	codemodeCallsPerTurn  = 64
 	codemodeParallelism   = 4
-	codemodeActivityBytes = 1856 << 10 // Leave headroom below Temporal's 2 MiB payload limit.
+	codemodeActivityBytes = 1856 << 10
 )
 
 var (
@@ -40,11 +39,19 @@ type codemodeOutput struct {
 	Actions         []codemodeAction `json:"actions,omitempty"`
 }
 
-func runCodemodeCalls(ctx workflow.Context, turn *agent.Turn, step int, calls []domain.ToolCall, finalize bool, steer ...turnSteerer) error {
+func (r *Runtime) runCodemodeCalls(ctx context.Context, turn *agent.Turn, step, assistantIdx int, calls []domain.ToolCall, finalize bool, steer ...turnSteerer) error {
+	presentInExchange := map[string]bool{}
+	if assistantIdx >= 0 && assistantIdx+1 <= len(turn.Messages) {
+		for _, m := range turn.Messages[assistantIdx+1:] {
+			if m.Role == "tool" && m.ToolCallID != "" {
+				presentInExchange[m.ToolCallID] = true
+			}
+		}
+	}
 	beforeAction := func(saveInterrupted func() error) error {
 		if len(steer) > 0 {
 			before := len(turn.Input.IncomingIDs)
-			if err := steer[0](turn, saveInterrupted); err != nil {
+			if err := steer[0](turn, step+1, saveInterrupted); err != nil {
 				return err
 			}
 			if len(turn.Input.IncomingIDs) > before {
@@ -52,8 +59,8 @@ func runCodemodeCalls(ctx workflow.Context, turn *agent.Turn, step int, calls []
 			}
 		}
 		if turn.Input.TaskID != "" {
-			var task domain.Task
-			if err := workflow.ExecuteActivity(ctx, "GetTask", turn.Input.ConversationID, turn.Input.TaskID).Get(ctx, &task); err != nil {
+			task, err := r.actGetTask(ctx, turn.Input.ConversationID, turn.Input.TaskID)
+			if err != nil {
 				return err
 			}
 			if task.Status == "paused" || task.Status == "cancelled" {
@@ -72,25 +79,25 @@ func runCodemodeCalls(ctx workflow.Context, turn *agent.Turn, step int, calls []
 				out.Error = "Only one Codemode script can run in a model step."
 			} else {
 				ran = true
-				saveInterrupted := func(ctx workflow.Context, partial codemodeOutput) error {
+				saveInterrupted := func(saveCtx context.Context, partial codemodeOutput) error {
 					partial.Error = "Codemode was interrupted. Check the recorded actions before continuing."
-					if err := persistCodemodeOutput(ctx, turn, step, call, partial); err != nil {
+					if err := r.persistCodemodeOutput(saveCtx, turn, step, call, partial, presentInExchange); err != nil {
 						return err
 					}
 					for _, skipped := range calls[i+1:] {
-						if err := persistCodemodeOutput(ctx, turn, step, skipped, codemodeOutput{Error: "Tool call skipped after interruption."}); err != nil {
+						if err := r.persistCodemodeOutput(saveCtx, turn, step, skipped, codemodeOutput{Error: "Tool call skipped after interruption."}, presentInExchange); err != nil {
 							return err
 						}
 					}
 					return nil
 				}
 				var err error
-				out, views, err = runCodemodeScript(ctx, turn, step, call, finalize, func(partial codemodeOutput) error {
+				out, views, err = r.runCodemodeScript(ctx, turn, step, call, finalize, func(partial codemodeOutput) error {
 					return beforeAction(func() error { return saveInterrupted(ctx, partial) })
 				})
 				if err != nil {
-					if len(out.Actions) > 0 && (temporal.IsCanceledError(err) || errors.Is(err, errCodemodeTaskStopped)) {
-						cleanup, cancel := workflow.NewDisconnectedContext(ctx)
+					if len(out.Actions) > 0 && (isCanceled(err) || errors.Is(err, errCodemodeTaskStopped)) {
+						cleanup, cancel := disconnectedCtx(ctx)
 						saveErr := saveInterrupted(cleanup, out)
 						cancel()
 						if saveErr != nil {
@@ -104,31 +111,36 @@ func runCodemodeCalls(ctx workflow.Context, turn *agent.Turn, step int, calls []
 		if out.Error != "" {
 			turn.Stats.ToolErrors++
 		}
-		if err := persistCodemodeOutput(ctx, turn, step, call, out); err != nil {
+		if err := r.persistCodemodeOutput(ctx, turn, step, call, out, presentInExchange); err != nil {
 			return err
 		}
 	}
 	for i, view := range views {
 		key := fmt.Sprintf("%s/image/%d/%d", turn.Input.Key, step, i)
-		if err := workflow.ExecuteActivity(ctx, "PersistMessage", turn.Input.SessionID, key, view).Get(ctx, nil); err != nil {
+		if err := r.actPersistMessage(ctx, turn.Input.SessionID, key, view); err != nil {
 			return err
 		}
-		turn.Messages = append(turn.Messages, view)
+		if assistantIdx < 0 || !hasMessageContent(turn.Messages[assistantIdx+1:], view) {
+			turn.Messages = append(turn.Messages, view)
+		}
 	}
 	return nil
 }
 
-func persistCodemodeOutput(ctx workflow.Context, turn *agent.Turn, step int, call domain.ToolCall, out codemodeOutput) error {
+func (r *Runtime) persistCodemodeOutput(ctx context.Context, turn *agent.Turn, step int, call domain.ToolCall, out codemodeOutput, presentInExchange map[string]bool) error {
 	raw, err := encodeCodemodeOutput(out)
 	if err != nil {
 		return err
 	}
 	message := domain.Message{Role: "tool", Content: string(raw), ToolCallID: call.ID}
 	key := fmt.Sprintf("%s/tool/%d/%s", turn.Input.Key, step, call.ID)
-	if err := workflow.ExecuteActivity(ctx, "PersistMessage", turn.Input.SessionID, key, message).Get(ctx, nil); err != nil {
+	if err := r.actPersistMessage(ctx, turn.Input.SessionID, key, message); err != nil {
 		return err
 	}
-	turn.Messages = append(turn.Messages, message)
+	if !presentInExchange[call.ID] {
+		turn.Messages = append(turn.Messages, message)
+		presentInExchange[call.ID] = true
+	}
 	return nil
 }
 
@@ -143,11 +155,31 @@ func encodeCodemodeOutput(out codemodeOutput) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-func runCodemodeScript(ctx workflow.Context, turn *agent.Turn, step int, call domain.ToolCall, finalize bool, beforeAction func(codemodeOutput) error) (out codemodeOutput, views []domain.Message, err error) {
+func (r *Runtime) runCodemodeScript(ctx context.Context, turn *agent.Turn, step int, call domain.ToolCall, finalize bool, beforeAction func(codemodeOutput) error) (out codemodeOutput, views []domain.Message, err error) {
+	started := r.now().UTC()
+	if r.Repo != nil {
+		startKey := "codemode-started/" + agent.ID(turn.Input.Key, fmt.Sprint(step), call.ID)
+		if raw, ok, loadErr := r.Repo.LoadCheckpoint(ctx, startKey); loadErr != nil {
+			return out, views, loadErr
+		} else if ok {
+			var saved time.Time
+			if json.Unmarshal(raw, &saved) == nil && !saved.IsZero() {
+				started = saved.UTC()
+			}
+		} else {
+			raw, marshalErr := json.Marshal(started)
+			if marshalErr != nil {
+				return out, views, marshalErr
+			}
+			if saveErr := r.Repo.SaveCheckpoint(ctx, startKey, raw); saveErr != nil {
+				return out, views, saveErr
+			}
+		}
+	}
 	in := agent.CodemodeInput{
 		ToolInput: toolInput(*turn, step, call),
 		Finalize:  finalize,
-		Started:   workflow.Now(ctx),
+		Started:   started,
 	}
 	callsLeft := codemodeCallsPerTurn - turn.Stats.ToolCalls
 	if finalize {
@@ -158,23 +190,23 @@ func runCodemodeScript(ctx workflow.Context, turn *agent.Turn, step int, call do
 		if err := beforeAction(out); err != nil {
 			return out, views, err
 		}
-		payload, err := converter.GetDefaultDataConverter().ToPayload(in)
+		payload, err := json.Marshal(in)
 		if err != nil {
 			return out, views, err
 		}
-		if len(payload.Data) > codemodeActivityBytes {
+		if len(payload) > codemodeActivityBytes {
 			out.Error = "Codemode tool receipts exceeded the batch size limit. Use smaller batches."
 			return out, views, nil
 		}
-		var result codemode.Result
-		if err := workflow.ExecuteActivity(ctx, "CodemodeStep", in).Get(ctx, &result); err != nil {
+		result, err := r.actCodemodeStep(ctx, in)
+		if err != nil {
 			return out, views, err
 		}
 		if len(result.Pending) == 0 {
 			out.Output, out.Error = result.Output, result.Error
 			if out.Error == "" && result.State != nil {
 				state := agent.CodemodeState{SessionID: turn.Input.SessionID, Values: result.State}
-				if err := workflow.ExecuteActivity(ctx, "SaveCodemodeState", state).Get(ctx, nil); err != nil {
+				if err := r.actSaveCodemodeState(ctx, state); err != nil {
 					return out, views, err
 				}
 			}
@@ -195,7 +227,7 @@ func runCodemodeScript(ctx workflow.Context, turn *agent.Turn, step int, call do
 					end++
 				}
 			}
-			receipts, actions, images, err := runCodemodeChildren(ctx, turn, in, issued+i, result.Pending[i:end], func() error {
+			receipts, actions, images, err := r.runCodemodeChildren(ctx, turn, in, issued+i, result.Pending[i:end], func() error {
 				return beforeAction(out)
 			})
 			copy(batch[i:end], receipts)
@@ -212,11 +244,13 @@ func runCodemodeScript(ctx workflow.Context, turn *agent.Turn, step int, call do
 	}
 }
 
-func runCodemodeChildren(ctx workflow.Context, turn *agent.Turn, parent agent.CodemodeInput, first int, requests []codemode.Request, beforeDispatch func() error) ([]codemode.Receipt, []codemodeAction, []domain.Message, error) {
+func (r *Runtime) runCodemodeChildren(ctx context.Context, turn *agent.Turn, parent agent.CodemodeInput, first int, requests []codemode.Request, beforeDispatch func() error) ([]codemode.Receipt, []codemodeAction, []domain.Message, error) {
 	type child struct {
 		call   domain.ToolCall
 		prefix string
-		future workflow.Future
+		input  agent.ToolInput
+		output string
+		err    error
 	}
 	children := make([]child, len(requests))
 	for i, request := range requests {
@@ -225,7 +259,7 @@ func runCodemodeChildren(ctx workflow.Context, turn *agent.Turn, parent agent.Co
 		prefix := fmt.Sprintf("%s/codemode/%s/%s", turn.Input.Key, agent.ID(parent.Call.ID), id)
 		message := domain.Message{Role: "assistant", ToolCalls: []domain.ToolCall{call}, ParentToolCallID: parent.Call.ID}
 		key := fmt.Sprintf("%s/assistant/%d", prefix, parent.Step)
-		if err := workflow.ExecuteActivity(ctx, "PersistMessage", turn.Input.SessionID, key, message).Get(ctx, nil); err != nil {
+		if err := r.actPersistMessage(ctx, turn.Input.SessionID, key, message); err != nil {
 			return nil, nil, nil, err
 		}
 		children[i] = child{call: call, prefix: prefix}
@@ -238,18 +272,35 @@ func runCodemodeChildren(ctx workflow.Context, turn *agent.Turn, parent agent.Co
 		recordTool(turn, c.call.Name)
 		in := toolInput(*turn, parent.Step, c.call)
 		in.ParentToolCallID = parent.Call.ID
-		c.future = executeToolActivity(ctx, in)
+		c.input = in
 	}
+	if len(children) == 1 {
+		children[0].output, children[0].err = r.executeTool(ctx, children[0].input)
+	} else {
+		var wg sync.WaitGroup
+		for i := range children {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				children[idx].output, children[idx].err = r.executeTool(ctx, children[idx].input)
+			}(i)
+		}
+		wg.Wait()
+	}
+
 	receipts := make([]codemode.Receipt, 0, len(children))
 	var actions []codemodeAction
 	var views []domain.Message
 	for i, c := range children {
-		var output string
-		if err := c.future.Get(ctx, &output); err != nil {
-			if temporal.IsCanceledError(err) || ctx.Err() != nil {
-				return receipts, actions, views, err
+		output := c.output
+		if c.err != nil {
+			if isCanceled(c.err) || ctx.Err() != nil {
+				if isCanceled(c.err) {
+					return receipts, actions, views, c.err
+				}
+				return receipts, actions, views, ctx.Err()
 			}
-			output = codemodeMissingResult(toolInput(*turn, parent.Step, c.call))
+			output = codemodeMissingResult(c.input)
 		}
 		failed := agent.ToolFailed(output)
 		if failed {
@@ -263,7 +314,7 @@ func runCodemodeChildren(ctx workflow.Context, turn *agent.Turn, parent agent.Co
 		}
 		key := fmt.Sprintf("%s/tool/%d/%s", c.prefix, parent.Step, c.call.ID)
 		message := domain.Message{Role: "tool", Content: output, ToolCallID: c.call.ID, ParentToolCallID: parent.Call.ID}
-		if err := workflow.ExecuteActivity(ctx, "PersistMessage", turn.Input.SessionID, key, message).Get(ctx, nil); err != nil {
+		if err := r.actPersistMessage(ctx, turn.Input.SessionID, key, message); err != nil {
 			return receipts, actions, views, err
 		}
 		if !failed && c.call.Name == "artifact_read" {
@@ -271,8 +322,8 @@ func runCodemodeChildren(ctx workflow.Context, turn *agent.Turn, parent agent.Co
 				ID string `json:"id"`
 			}
 			_ = json.Unmarshal(c.call.Arguments, &args)
-			var view domain.Message
-			if err := workflow.ExecuteActivity(ctx, "ArtifactView", turn.Conversation.ID, args.ID).Get(ctx, &view); err != nil {
+			view, err := r.actArtifactView(ctx, turn.Conversation.ID, args.ID)
+			if err != nil {
 				return receipts, actions, views, err
 			}
 			if len(view.Images) > 0 {

@@ -6,24 +6,16 @@ import (
 	"fmt"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/inspector"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestInspectionLegacyOrderAndArtifactScopePostgres(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
-	}
+func TestInspectionLegacyOrderAndArtifactScopeSQLite(t *testing.T) {
 	ctx := context.Background()
-	repo, err := Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer repo.Close()
+	repo := openTestSQLite(t)
+	var err error
 	id := fmt.Sprintf("inspection-scope-%d", time.Now().UnixNano())
 	for _, session := range []string{id, id + "-other"} {
 		if err = repo.StartSession(ctx, domain.Session{ID: session, ConversationID: id}); err != nil {
@@ -97,17 +89,10 @@ func TestInspectionLegacyOrderAndArtifactScopePostgres(t *testing.T) {
 	}
 }
 
-func TestInspectionPostgres(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
-	}
+func TestInspectionSQLite(t *testing.T) {
 	ctx := context.Background()
-	repo, err := Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer repo.Close()
+	repo := openTestSQLite(t)
+	var err error
 	id := fmt.Sprintf("inspection-%d", time.Now().UnixNano())
 	conv := domain.Conversation{ID: id, Title: "Личный чат", Private: true, ChatID: 7, OwnerID: 7}
 	if _, err = repo.AcceptIncoming(ctx, domain.Incoming{ID: id, Conversation: conv}, 0); err != nil {
@@ -182,16 +167,9 @@ func TestInspectionPostgres(t *testing.T) {
 }
 
 func TestPendingAudioIsVisibleBeforeMessagePreparation(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("disposable PostgreSQL only")
-	}
 	ctx := context.Background()
-	repo, e := Open(ctx, url)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer repo.Close()
+	repo := openTestSQLite(t)
+	var e error
 	id := fmt.Sprintf("pending-audio-%d", time.Now().UnixNano())
 	conv := domain.Conversation{ID: id, OwnerID: 42, Private: true}
 	received := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
@@ -239,17 +217,9 @@ func TestPendingAudioIsVisibleBeforeMessagePreparation(t *testing.T) {
 	}
 }
 
-func TestMemoryAnalyticsMetadataPostgres(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
-	}
+func TestMemoryAnalyticsMetadataSQLite(t *testing.T) {
 	ctx := context.Background()
-	repo, err := Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer repo.Close()
+	repo := openTestSQLite(t)
 
 	prefix := fmt.Sprintf("mem-analytics-%d", time.Now().UnixNano())
 	ownerID := time.Now().UnixNano()
@@ -377,62 +347,59 @@ func TestMemoryAnalyticsMetadataPostgres(t *testing.T) {
 	}
 }
 
-func TestInspectSessionOriginsIndexOnlyPlansPostgres(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
-	}
+func TestInspectSessionOriginsIndexPlansSQLite(t *testing.T) {
 	ctx := context.Background()
-	repo, err := Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer repo.Close()
+	repo := openTestSQLite(t)
 
 	prefix := fmt.Sprintf("idx-plan-%d", time.Now().UnixNano())
 	scope := "personal:" + prefix
 	now := time.Now().UTC()
 
-	// Seed bulk checkpoints and traces with large TOASTable JSONB payloads so PostgreSQL
-	// chooses realistic index-only plans without disabling sequential scans.
-	if _, err := repo.pool.Exec(ctx, `
-INSERT INTO openalbert_checkpoints(id, data)
-SELECT 'turn-done/' || $1::text || '-' || g,
-       jsonb_build_object(
-           'Input', jsonb_build_object(
-               'SessionID', $1::text || '-bg-' || g,
-               'TaskID', CASE WHEN g % 10 = 0 THEN $1::text || '-t-' || g ELSE '' END,
-               'Initiative', CASE WHEN g % 10 = 1 THEN 'true' ELSE 'false' END
-           ),
-           'Messages', jsonb_build_array(jsonb_build_object('role', 'assistant', 'content', repeat('x', 4000)))
-       )
-FROM generate_series(1, 3000) AS g
-UNION ALL
-SELECT 'model/' || $1::text || '-' || g || '/0',
-       jsonb_build_object('Message', jsonb_build_object('role', 'assistant', 'content', repeat('m', 4000)))
-FROM generate_series(1, 3000) AS g
-UNION ALL
-SELECT 'memory-consolidation/' || $1::text || '-' || lpad(g::text, 4, '0'),
-       jsonb_build_object('scope', $2::text, 'completed_at', to_char(timestamp '2026-10-01 00:00:00' + (g || ' seconds')::interval, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
-FROM generate_series(1, 200) AS g`, prefix, scope); err != nil {
+	tx, err := repo.beginImmediate(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.pool.Exec(ctx, `
-INSERT INTO openalbert_traces(id, session_id, turn_id, started_at, data)
-SELECT $1::text || '-tr-' || g,
-       $1::text || '-tr-sess-' || g,
-       'turn-1',
-       $2::timestamptz + (g || ' milliseconds')::interval,
-       jsonb_build_object(
-           'trigger', CASE WHEN g % 5 = 0 THEN 'task' ELSE 'message' END,
-           'task_id', CASE WHEN g % 5 = 0 THEN $1::text || '-task-' || g ELSE '' END,
-           'input', repeat('p', 4000)
-       )
-FROM generate_series(1, 1500) AS g`, prefix, now); err != nil {
+	for g := 1; g <= 200; g++ {
+		taskID := ""
+		if g%10 == 0 {
+			taskID = fmt.Sprintf("%s-t-%d", prefix, g)
+		}
+		initVal := "false"
+		if g%10 == 1 {
+			initVal = "true"
+		}
+		cp := fmt.Sprintf(`{"Input":{"SessionID":"%s-bg-%d","TaskID":%q,"Initiative":%s}}`, prefix, g, taskID, initVal)
+		if _, err := upsertCheckpointSQL(tx.exec, ctx, fmt.Sprintf("turn-done/%s-%d", prefix, g), []byte(cp), true); err != nil {
+			t.Fatal(err)
+		}
+		consAt := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(g) * time.Second)
+		consCP := fmt.Sprintf(`{"scope":%q,"completed_at":%q}`, scope, consAt.Format(time.RFC3339Nano))
+		if _, err := upsertCheckpointSQL(tx.exec, ctx, fmt.Sprintf("memory-consolidation/%s-%04d", prefix, g), []byte(consCP), true); err != nil {
+			t.Fatal(err)
+		}
+		trigger := "message"
+		trTask := ""
+		if g%5 == 0 {
+			trigger = "task"
+			trTask = fmt.Sprintf("%s-task-%d", prefix, g)
+		}
+		if err := upsertTraceSQL(tx.exec, ctx, domain.Trace{
+			ID:        fmt.Sprintf("%s-tr-%d", prefix, g),
+			SessionID: fmt.Sprintf("%s-tr-sess-%d", prefix, g),
+			TurnID:    "turn-1",
+			Trigger:   trigger,
+			TaskID:    trTask,
+			Kind:      "model",
+			Status:    "completed",
+			StartedAt: now.Add(time.Duration(g) * time.Millisecond),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create target sessions: trace-hit task, trace-hit message, checkpoint-fallback task, checkpoint-fallback initiative.
 	traceTaskSess := prefix + "-tr-sess-5"
 	traceMsgSess := prefix + "-tr-sess-1"
 	cpTaskSess := prefix + "-bg-10"
@@ -442,173 +409,109 @@ FROM generate_series(1, 1500) AS g`, prefix, now); err != nil {
 			t.Fatal(err)
 		}
 	}
-
-	if _, err := repo.pool.Exec(ctx, `VACUUM ANALYZE openalbert_sessions, openalbert_traces, openalbert_checkpoints`); err != nil {
+	if _, err := repo.exec(ctx, `ANALYZE`); err != nil {
 		t.Fatal(err)
 	}
 
-	var originPlanJSON string
-	if err := repo.pool.QueryRow(ctx, `EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) `+inspectSessionOriginsSQL, scope, []string{traceTaskSess, traceMsgSess, cpTaskSess, cpInitSess}).Scan(&originPlanJSON); err != nil {
-		t.Fatal(err)
-	}
-	type planNode struct {
-		NodeType    string     `json:"Node Type"`
-		Relation    string     `json:"Relation Name"`
-		IndexName   string     `json:"Index Name"`
-		HeapFetches int64      `json:"Heap Fetches"`
-		ActualLoops int64      `json:"Actual Loops"`
-		Plans       []planNode `json:"Plans"`
-	}
-	var root []struct {
-		Plan planNode `json:"Plan"`
-	}
-	if err := json.Unmarshal([]byte(originPlanJSON), &root); err != nil || len(root) == 0 {
-		t.Fatalf("parse EXPLAIN JSON: %v\n%s", err, originPlanJSON)
-	}
-	type indexOnlyStats struct {
-		loops       int64
-		heapFetches int64
-	}
-	indexOnlySeen := map[string]indexOnlyStats{}
-	var walk func(n planNode)
-	walk = func(n planNode) {
-		if n.NodeType == "Seq Scan" && (n.Relation == "openalbert_checkpoints" || n.Relation == "openalbert_traces") {
-			t.Fatalf("unexpected Seq Scan on %s:\n%s", n.Relation, originPlanJSON)
+	idsJSON, _ := json.Marshal([]string{traceTaskSess, traceMsgSess, cpTaskSess, cpInitSess})
+	explain := func(query string, args ...any) string {
+		t.Helper()
+		rows, err := repo.query(ctx, `EXPLAIN QUERY PLAN `+query, args...)
+		if err != nil {
+			t.Fatalf("EXPLAIN QUERY PLAN failed: %v", err)
 		}
-		if n.IndexName == "openalbert_turns_session" {
-			t.Fatalf("expected covering origin index instead of openalbert_turns_session:\n%s", originPlanJSON)
+		defer rows.Close()
+		var lines []string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			lines = append(lines, detail)
 		}
-		if n.NodeType == "Index Only Scan" && n.IndexName != "" {
-			st := indexOnlySeen[n.IndexName]
-			st.loops += n.ActualLoops
-			st.heapFetches += n.HeapFetches
-			indexOnlySeen[n.IndexName] = st
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
 		}
-		for _, child := range n.Plans {
-			walk(child)
-		}
+		return strings.Join(lines, "\n")
 	}
-	walk(root[0].Plan)
+
+	originPlan := explain(inspectSessionOriginsSQL, scope, string(idsJSON))
 	for _, wantIdx := range []string{
 		"openalbert_traces_session_trigger",
 		"openalbert_traces_session_task",
 		"openalbert_checkpoints_turn_done_origin",
 		"openalbert_checkpoints_turn_done_task",
 	} {
-		st, ok := indexOnlySeen[wantIdx]
-		if !ok || st.loops <= 0 {
-			t.Fatalf("expected executed Index Only Scan (Actual Loops > 0) on %s, got map=%+v\n%s", wantIdx, indexOnlySeen, originPlanJSON)
-		}
-		if st.heapFetches != 0 {
-			t.Fatalf("expected 0 heap fetches for Index Only Scan on %s after VACUUM, got %d\n%s", wantIdx, st.heapFetches, originPlanJSON)
+		if !strings.Contains(originPlan, wantIdx) {
+			t.Fatalf("InspectSessionOrigins plan missing index %s:\n%s", wantIdx, originPlan)
 		}
 	}
 
-	// Verify InspectLatestConsolidation uses openalbert_checkpoints_consolidation_latest without sorting.
-	var latestPlanJSON string
-	if err := repo.pool.QueryRow(ctx, `EXPLAIN (ANALYZE, FORMAT JSON) `+inspectLatestConsolidationSQL, scope).Scan(&latestPlanJSON); err != nil {
-		t.Fatal(err)
+	latestPlan := explain(inspectLatestConsolidationSQL, scope)
+	if !strings.Contains(latestPlan, "openalbert_checkpoints_consolidation_latest") {
+		t.Fatalf("InspectLatestConsolidation did not use openalbert_checkpoints_consolidation_latest:\n%s", latestPlan)
 	}
-	var latestRoot []struct {
-		Plan planNode `json:"Plan"`
-	}
-	if err := json.Unmarshal([]byte(latestPlanJSON), &latestRoot); err != nil || len(latestRoot) == 0 {
-		t.Fatalf("parse latest consolidation EXPLAIN JSON: %v\n%s", err, latestPlanJSON)
-	}
-	sawLatestIdx := false
-	var walkLatest func(n planNode)
-	walkLatest = func(n planNode) {
-		if n.NodeType == "Sort" {
-			t.Fatalf("InspectLatestConsolidation unexpectedly sorted rows:\n%s", latestPlanJSON)
-		}
-		if n.IndexName == "openalbert_checkpoints_consolidation_latest" {
-			sawLatestIdx = true
-		}
-		for _, child := range n.Plans {
-			walkLatest(child)
-		}
-	}
-	walkLatest(latestRoot[0].Plan)
-	if !sawLatestIdx {
-		t.Fatalf("InspectLatestConsolidation did not use openalbert_checkpoints_consolidation_latest:\n%s", latestPlanJSON)
+	if strings.Contains(latestPlan, "USE TEMP B-TREE FOR ORDER BY") {
+		t.Fatalf("InspectLatestConsolidation unexpectedly sorted rows:\n%s", latestPlan)
 	}
 }
 
 func TestInspectSessionOriginsSchemaIndexesAndQueryContract(t *testing.T) {
 	for _, want := range []string{
-		"CREATE OR REPLACE FUNCTION openalbert_rfc3339_timestamptz",
-		"ADD COLUMN IF NOT EXISTS trigger_kind text GENERATED ALWAYS AS",
-		"ADD COLUMN IF NOT EXISTS task_id text GENERATED ALWAYS AS",
+		"trigger_kind TEXT",
+		"task_id TEXT",
 		"CREATE INDEX IF NOT EXISTS openalbert_traces_session_trigger",
-		"INCLUDE (trigger_kind)",
 		"CREATE INDEX IF NOT EXISTS openalbert_traces_session_task",
-		"INCLUDE (task_id)",
-		"ADD COLUMN IF NOT EXISTS turn_session_id text GENERATED ALWAYS AS",
-		"ADD COLUMN IF NOT EXISTS turn_task_id text GENERATED ALWAYS AS",
-		"ADD COLUMN IF NOT EXISTS turn_initiative boolean GENERATED ALWAYS AS",
-		"ADD COLUMN IF NOT EXISTS consolidation_scope text GENERATED ALWAYS AS",
-		"ADD COLUMN IF NOT EXISTS consolidation_completed_at timestamptz GENERATED ALWAYS AS",
+		"turn_session_id TEXT",
+		"turn_task_id TEXT",
+		"turn_initiative INTEGER",
+		"consolidation_scope TEXT",
+		"consolidation_completed_at TEXT",
 		"CREATE INDEX IF NOT EXISTS openalbert_checkpoints_turn_done_origin",
-		"INCLUDE (turn_task_id, turn_initiative)",
 		"CREATE INDEX IF NOT EXISTS openalbert_checkpoints_turn_done_task",
-		"INCLUDE (turn_task_id)",
 		"CREATE INDEX IF NOT EXISTS openalbert_checkpoints_consolidation_latest",
-		"ON openalbert_checkpoints(consolidation_scope, consolidation_completed_at DESC NULLS LAST, id DESC)",
+		"ON openalbert_checkpoints(consolidation_scope, consolidation_completed_at DESC, id DESC)",
+		"search_provider TEXT",
+		"search_cost_usd REAL",
+		"search_rate_limited INTEGER",
+		"search_completed_at TEXT",
+		"search_outcome_at TEXT",
+		"CREATE INDEX IF NOT EXISTS openalbert_traces_search_usage",
 	} {
 		if !strings.Contains(schema, want) {
 			t.Fatalf("schema.sql missing expected column/index clause %q", want)
 		}
 	}
 	for _, want := range []string{
-		"LEFT JOIN LATERAL",
 		"tr.trigger_kind",
 		"tr.task_id",
 		"cp.turn_session_id IS NOT NULL",
-		"cp.turn_session_id=sc.session_id",
+		"cp.turn_session_id = sc.session_id",
 		"cp.turn_task_id",
 		"cp.turn_initiative",
 	} {
 		if !strings.Contains(inspectSessionOriginsSQL, want) {
-			t.Fatalf("inspectSessionOriginsSQL missing expected scalar/indexed join %q", want)
+			t.Fatalf("inspectSessionOriginsSQL missing expected scalar/indexed lookup %q", want)
 		}
 	}
 	if strings.Contains(inspectSessionOriginsSQL, "tr.data") || strings.Contains(inspectSessionOriginsSQL, "cp.data") {
-		t.Fatalf("inspectSessionOriginsSQL must not read tr.data or cp.data JSONB directly:\n%s", inspectSessionOriginsSQL)
+		t.Fatalf("inspectSessionOriginsSQL must not read tr.data or cp.data JSON directly:\n%s", inspectSessionOriginsSQL)
 	}
 	if strings.Contains(sessionTriggerSQL, "tr.data") || strings.Contains(sessionTriggerSQL, "cp.data") {
-		t.Fatalf("sessionTriggerSQL must not read tr.data or cp.data JSONB directly:\n%s", sessionTriggerSQL)
+		t.Fatalf("sessionTriggerSQL must not read tr.data or cp.data JSON directly:\n%s", sessionTriggerSQL)
 	}
-	if !strings.Contains(inspectLatestConsolidationSQL, "consolidation_scope=$1") || !strings.Contains(inspectLatestConsolidationSQL, "ORDER BY consolidation_completed_at DESC NULLS LAST, id DESC") {
+	if !strings.Contains(inspectLatestConsolidationSQL, "consolidation_scope = ?1") || !strings.Contains(inspectLatestConsolidationSQL, "ORDER BY consolidation_completed_at DESC, id DESC") {
 		t.Fatalf("inspectLatestConsolidationSQL does not use indexed consolidation ordering:\n%s", inspectLatestConsolidationSQL)
 	}
-	for _, want := range []string{
-		"ADD COLUMN IF NOT EXISTS search_provider text GENERATED ALWAYS AS",
-		"ADD COLUMN IF NOT EXISTS search_cost_usd double precision GENERATED ALWAYS AS",
-		"ADD COLUMN IF NOT EXISTS search_rate_limited boolean GENERATED ALWAYS AS",
-		"ADD COLUMN IF NOT EXISTS search_completed_at timestamptz GENERATED ALWAYS AS",
-		"ADD COLUMN IF NOT EXISTS search_outcome_at timestamptz GENERATED ALWAYS AS",
-		"CREATE INDEX IF NOT EXISTS openalbert_traces_search_usage",
-	} {
-		if !strings.Contains(schema, want) {
-			t.Fatalf("schema.sql missing search usage index clause %q", want)
-		}
-	}
 	if strings.Contains(inspectSearchUsageSQL, "data") {
-		t.Fatalf("inspectSearchUsageSQL must read generated scalar columns, not JSONB data:\n%s", inspectSearchUsageSQL)
+		t.Fatalf("inspectSearchUsageSQL must read scalar columns, not JSON data:\n%s", inspectSearchUsageSQL)
 	}
 }
 
-func TestInspectSearchUsagePostgres(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
-	}
+func TestInspectSearchUsageSQLite(t *testing.T) {
 	ctx := context.Background()
-	repo, err := Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer repo.Close()
+	repo := openTestSQLite(t)
 
 	base := time.Date(2031, 4, 1, 0, 0, 0, 0, time.UTC)
 	cost := 0.007

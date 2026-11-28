@@ -108,10 +108,12 @@ func TestRichReplyFinishesNaturallyOrAtBudget(t *testing.T) {
 				return calls(call("rich", "send_rich_message", map[string]string{"text": "| A | B |\n|---|---|\n| 1 | 2 |"})), nil
 			}}
 			a.Model = model
-			env := newEnv(a)
-			env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
-			env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: maxSteps})
-			requireWorkflowOK(t, env)
+			clk := NewFakeClock(time.Now().UTC())
+			r := newTestRuntime(a, clk, time.Second, maxSteps)
+			if err := r.SignalSession(context.Background(), conv.ID, Event{ID: "first"}); err != nil {
+				t.Fatal(err)
+			}
+			waitWithFakeClock(t, r, clk)
 			rows, err := repo.PendingOutgoing(context.Background(), 10)
 			wantCalls := 3 // The model finishes after observing the queued reply.
 			if maxSteps == 1 {
@@ -205,11 +207,9 @@ func TestWidgetFallbackDiagnosticDoesNotMarkDeliveredReplyFailed(t *testing.T) {
 		}
 		return finish(""), nil
 	}}
-	env := newEnv(a)
-	env.ExecuteWorkflow(finishOnlyTurn, agent.RunInput{Key: "fallback-diagnostic", SessionID: "widget-session", ConversationID: conv.ID, IncomingIDs: []string{"first"}})
-	requireWorkflowOK(t, env)
-	var turn agent.Turn
-	if err := env.GetWorkflowResult(&turn); err != nil || !turn.Sent {
+	r := newTestRuntime(a, nil, time.Second, 2)
+	turn, err := finishOnlyTurn(context.Background(), r, agent.RunInput{Key: "fallback-diagnostic", SessionID: "widget-session", ConversationID: conv.ID, IncomingIDs: []string{"first"}})
+	if err != nil || !turn.Sent {
 		t.Fatalf("delivered fallback not recognized: %+v %v", turn, err)
 	}
 }

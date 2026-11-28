@@ -17,14 +17,6 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: gomod
-    directory: /services/log-gateway
-    schedule:
-      interval: monthly
-    groups:
-      log-gateway-go:
-        patterns: ["*"]
-
-  - package-ecosystem: gomod
     directory: /services/stt
     schedule:
       interval: monthly
@@ -65,22 +57,6 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: docker
-    directory: /services/log-gateway
-    schedule:
-      interval: monthly
-    groups:
-      log-gateway-docker:
-        patterns: ["*"]
-
-  - package-ecosystem: docker
-    directory: /services/minio
-    schedule:
-      interval: monthly
-    groups:
-      minio-docker:
-        patterns: ["*"]
-
-  - package-ecosystem: docker
     directory: /services/stt
     schedule:
       interval: monthly
@@ -95,19 +71,6 @@ updates:
     groups:
       testing-docker:
         patterns: ["*"]
-
-  # Keep repeated image pins in the release, local and test manifests together.
-  - package-ecosystem: docker-compose
-    directory: /deploy
-    schedule:
-      interval: monthly
-    groups:
-      postgres-compose:
-        patterns: [postgres]
-      temporal-compose:
-        patterns: [temporalio/*]
-      victorialogs-compose:
-        patterns: [victoriametrics/victoria-logs]
 
   - package-ecosystem: npm
     directory: /docs

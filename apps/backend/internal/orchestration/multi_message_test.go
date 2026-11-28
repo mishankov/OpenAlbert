@@ -6,15 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
-
-	"go.temporal.io/sdk/activity"
-	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/workflow"
 )
 
 func TestOneRequestSendsEveryPhotoAcrossModelSteps(t *testing.T) {
@@ -49,10 +46,12 @@ func TestOneRequestSendsEveryPhotoAcrossModelSteps(t *testing.T) {
 				return calls(call(fmt.Sprintf("part-%d", i), name, map[string]string{"text": fmt.Sprintf("%d/8 — console", i+1), "artifact_id": fmt.Sprint(i)})), nil
 			}}
 			a.Model = model
-			env := newEnv(a)
-			env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
-			env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 12})
-			requireWorkflowOK(t, env)
+			clk := NewFakeClock(time.Now().UTC())
+			r := newTestRuntime(a, clk, time.Second, 12)
+			if err := r.SignalSession(ctx, conv.ID, Event{ID: "first"}); err != nil {
+				t.Fatal(err)
+			}
+			waitWithFakeClock(t, r, clk)
 			rows, err := repo.PendingOutgoing(ctx, 20)
 			if err != nil || len(rows) != 8 || model.count() != 10 {
 				t.Fatalf("series stopped, repeated, or required another request: %d replies, %d model calls, %v", len(rows), model.count(), err)
@@ -101,16 +100,24 @@ func TestMessageSeriesResumesToolRetryWithoutRepeatingQueuedParts(t *testing.T) 
 		return calls(call(fmt.Sprintf("part-%d", n), []string{"send_message", "send_rich_message"}[n], map[string]string{"text": fmt.Sprintf("Part %d", n)})), nil
 	}}
 	a.Model = model
-	env := newEnv(a)
-	env.ExecuteWorkflow(func(ctx workflow.Context) error {
-		ctx = options(ctx)
-		turn, err := runTurn(ctx, agent.RunInput{Key: "series-retry", SessionID: "series-session", ConversationID: conv.ID, IncomingIDs: []string{"first"}}, 5)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 5)
+	var runErr error
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		ctx := context.Background()
+		turn, err := r.runTurn(ctx, agent.RunInput{Key: "series-retry", SessionID: "series-session", ConversationID: conv.ID, IncomingIDs: []string{"first"}}, 5)
 		if err != nil {
-			return err
+			runErr = err
+			return
 		}
-		return workflow.ExecuteActivity(ctx, "Finish", finishInput(turn, nil)).Get(ctx, nil)
-	})
-	requireWorkflowOK(t, env)
+		runErr = r.actFinish(ctx, finishInput(turn, nil))
+	}()
+	waitWithFakeClock(t, r, clk)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
 	if !retrying.failed {
 		t.Fatal("checkpoint interruption was not exercised")
 	}
@@ -122,41 +129,45 @@ func TestMessageSeriesResumesToolRetryWithoutRepeatingQueuedParts(t *testing.T) 
 
 func TestNewTurnInExistingSessionCanContinueAfterReply(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
-	_, err := repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "second", Conversation: conv, Text: "Send both parts"}, 2)
+	ctx := context.Background()
+	_, err := repo.AcceptIncoming(ctx, domain.Incoming{ID: "second", Conversation: conv, Text: "Send both parts"}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.Model = &scriptedModel{continueAfterReply: true, run: func(n int, _ []domain.Message) (domain.Message, error) {
-		if n == 3 {
+		switch n {
+		case 0:
+			return reply("Part 0"), nil
+		case 1:
+			return finish("First done"), nil
+		case 2:
+			return reply("Part 1"), nil
+		case 3:
+			return reply("Part 2"), nil
+		default:
 			return finish("Done"), nil
 		}
-		return reply(fmt.Sprintf("Part %d", n)), nil
 	}}
-	env := newEnv(a)
-	env.OnGetVersion("multi-message-turn/old", workflow.DefaultVersion, 1).Return(workflow.DefaultVersion).Once()
-	env.ExecuteWorkflow(func(ctx workflow.Context) error {
-		ctx = options(ctx)
-		for i, key := range []string{"old", "new"} {
-			turn, err := runTurn(ctx, agent.RunInput{Key: key, SessionID: "same-session", ConversationID: conv.ID, IncomingIDs: []string{[]string{"first", "second"}[i]}}, 5)
-			if err != nil {
-				return err
-			}
-			if err := workflow.ExecuteActivity(ctx, "Finish", finishInput(turn, nil)).Get(ctx, nil); err != nil {
-				return err
-			}
+	r := newTestRuntime(a, nil, time.Second, 5)
+	for i, key := range []string{"first-turn", "second-turn"} {
+		turn, err := r.runTurn(ctx, agent.RunInput{Key: key, SessionID: "same-session", ConversationID: conv.ID, IncomingIDs: []string{[]string{"first", "second"}[i]}}, 5)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return nil
-	})
-	requireWorkflowOK(t, env)
-	rows, err := repo.PendingOutgoing(context.Background(), 10)
-	if err != nil || len(rows) != 3 || rows[0].TurnID != "old" || rows[1].TurnID != "new" || rows[2].TurnID != "new" {
-		t.Fatalf("legacy behavior leaked into a new turn: %+v %v", rows, err)
+		if err := r.actFinish(ctx, finishInput(turn, nil)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := repo.PendingOutgoing(ctx, 10)
+	if err != nil || len(rows) != 3 || rows[0].TurnID != "first-turn" || rows[1].TurnID != "second-turn" || rows[2].TurnID != "second-turn" {
+		t.Fatalf("multi-message turn failed: %+v %v", rows, err)
 	}
 }
 
 func TestNewInputAfterReplyRetainsQueuedDeliveryState(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
-	_, err := repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "second", Conversation: conv, Text: "No more photos"}, 2)
+	ctx := context.Background()
+	_, err := repo.AcceptIncoming(ctx, domain.Incoming{ID: "second", Conversation: conv, Text: "No more photos"}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,22 +182,25 @@ func TestNewInputAfterReplyRetainsQueuedDeliveryState(t *testing.T) {
 		return finish("Stop sending the remaining parts."), nil
 	}}
 	a.Model = model
-	env := newEnv(a)
-	steered := false
-	env.SetOnActivityCompletedListener(func(info *activity.Info, _ converter.EncodedValue, err error) {
-		if info.ActivityType.Name == "ToolCall" && err == nil && !steered {
-			steered = true
-			env.SignalWorkflow(MessageSignal, Event{ID: "second"})
-		}
-	})
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 5})
-	requireWorkflowOK(t, env)
-	rows, err := repo.PendingOutgoing(context.Background(), 10)
-	if err != nil || len(rows) != 1 || model.count() != 2 || !steered {
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 5)
+	var steered atomic.Bool
+	r.hooks = &activityHooks{
+		onComplete: func(name string, _ any, err error) {
+			if name == "ToolCall" && err == nil && steered.CompareAndSwap(false, true) {
+				_ = r.SignalSession(ctx, conv.ID, Event{ID: "second"})
+			}
+		},
+	}
+	if err := r.SignalSession(ctx, conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
+	rows, err := repo.PendingOutgoing(ctx, 10)
+	if err != nil || len(rows) != 1 || model.count() != 2 || !steered.Load() {
 		t.Fatalf("new input failed to stop the series: %+v %v", rows, err)
 	}
-	raw, found, err := repo.LoadCheckpoint(context.Background(), "turn-done/"+rows[0].TurnID)
+	raw, found, err := repo.LoadCheckpoint(ctx, "turn-done/"+rows[0].TurnID)
 	var turn agent.Turn
 	if err != nil || !found || json.Unmarshal(raw, &turn) != nil || !turn.Sent || turn.Stats.FinishReason != "reply_queued" || len(turn.Input.IncomingIDs) != 2 {
 		t.Fatalf("steering forgot the delivered part or consumed request: %+v %v", turn, err)

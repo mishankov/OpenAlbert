@@ -66,7 +66,7 @@ test('поиск сохраняет запрос, имеет пустое сос
   await page.keyboard.press('Escape');
   await page.keyboard.press('Control+k');
   await expect(input).toHaveValue('совсемнесуществующийраздел');
-  await input.fill('Temporal');
+  await input.fill('SQLite');
   await input.dispatchEvent('keydown', { code: 'Enter', key: 'Enter', isComposing: true, bubbles: true });
   await expect(page.locator('#search-dialog')).toBeVisible();
   await input.dispatchEvent('keydown', { code: 'Enter', key: 'Enter', repeat: true, bubbles: true });
@@ -74,7 +74,7 @@ test('поиск сохраняет запрос, имеет пустое сос
   await page.keyboard.press('Escape');
   await page.locator('body').dispatchEvent('keydown', { code: 'KeyK', key: 'л', metaKey: true, bubbles: true });
   await expect(page.locator('#search-dialog')).toBeVisible();
-  await expect(input).toHaveValue('Temporal');
+  await expect(input).toHaveValue('SQLite');
 });
 
 test('узкий экран: меню, страницы и таблицы не растягивают документ', async ({ page }) => {

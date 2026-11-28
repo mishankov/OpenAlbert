@@ -2,18 +2,10 @@
 name: openalbert
 
 x-logging: &logging
-  driver: splunk
+  driver: local
   options:
-    splunk-url: "${DOCKER_LOGS_GATEWAY_URL:-http://127.0.0.1:9429}"
-    splunk-token: "openalbert-local"
-    splunk-format: "json"
-    splunk-verify-connection: "false"
-    splunk-source: "docker-compose"
-    splunk-sourcetype: "docker"
-    tag: "{{.Name}}"
-    labels: "compose_service,com.docker.compose.project"
-    mode: "non-blocking"
-    max-buffer-size: "4m"
+    max-size: "10m"
+    max-file: "3"
 
 services:
   backup:
@@ -34,12 +26,11 @@ services:
       - /tmp
     volumes:
       - .:/installation:ro
+      - ./data:/installation/data
       - ./backup-config:/etc/openalbert-backup:ro
-      - ./container_data/backup-state:/installation/container_data/backup-state
-      - ./container_data/backup-work:/var/lib/openalbert-backup
-      - /var/run/docker.sock:/var/run/docker.sock
-    logging:
-      driver: local
+      - ./backup-state:/installation/backup-state
+      - ./backup-work:/var/lib/openalbert-backup
+    logging: *logging
 
   stt:
     profiles: [local-stt]
@@ -59,7 +50,7 @@ services:
       STT_DOWNLOAD_MODEL: "${STT_DOWNLOAD_MODEL:-true}"
       OMP_NUM_THREADS: "${STT_THREADS:-2}"
     volumes:
-      - ./container_data/stt:/models
+      - ./stt-models:/models
     expose:
       - "8080"
     healthcheck:
@@ -97,156 +88,6 @@ services:
       retries: 4
     logging: *logging
 
-  log-gateway:
-    labels:
-      compose_service: log-gateway
-    build:
-      context: .
-      dockerfile: services/log-gateway/Dockerfile
-    restart: unless-stopped
-    init: true
-    ports:
-      - "127.0.0.1:9429:9429"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9429/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    logging: *logging
-
-  victorialogs:
-    labels:
-      compose_service: victorialogs
-    image: victoriametrics/victoria-logs:v1.54.0
-    restart: unless-stopped
-    command:
-      - -storageDataPath=/storage
-      - -retentionPeriod=30d
-      - -splunk.msgField=event.line.msg,event.line,event
-      - -splunk.streamFields=event.attrs.compose_service,event.attrs.com.docker.compose.project,event.tag,host,sourcetype
-    ports:
-      - "127.0.0.1:9428:9428"
-    volumes:
-      - ./container_data/victorialogs:/storage
-    logging: *logging
-
-  postgres:
-    labels:
-      compose_service: postgres
-    image: postgres:18.7-alpine
-    restart: unless-stopped
-    environment:
-      # Keep the existing bind and cold-backup layout across the major upgrade.
-      PGDATA: /var/lib/postgresql/data
-      POSTGRES_USER: openalbert
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-openalbert-local-dev}"
-      POSTGRES_DB: openalbert
-    ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - ./container_data/postgres:/var/lib/postgresql/data
-      - ./services/postgres/init.sql:/docker-entrypoint-initdb.d/01-databases.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U openalbert -d openalbert"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-    logging: *logging
-
-  temporal:
-    labels:
-      compose_service: temporal
-    image: temporalio/auto-setup:1.29.3
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      LOG_LEVEL: "${TEMPORAL_LOG_LEVEL:-warn}"
-      DB: postgres12
-      DB_PORT: "5432"
-      POSTGRES_USER: openalbert
-      POSTGRES_PWD: "${POSTGRES_PASSWORD:-openalbert-local-dev}"
-      POSTGRES_SEEDS: postgres
-      DBNAME: temporal
-      SKIP_DB_CREATE: "true"
-      VISIBILITY_DBNAME: temporal_visibility
-      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
-      TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_CLI_ADDRESS: temporal:7233
-      DEFAULT_NAMESPACE: "${TEMPORAL_NAMESPACE:-default}"
-    volumes:
-      - ./services/temporal/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/development-sql.yaml:ro
-    ports:
-      - "127.0.0.1:7233:7233"
-    healthcheck:
-      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-    logging: *logging
-
-  temporal-ui:
-    labels:
-      compose_service: temporal-ui
-    image: temporalio/ui:2.58.1
-    restart: unless-stopped
-    depends_on:
-      temporal:
-        condition: service_healthy
-    environment:
-      TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_UI_PORT: "8080"
-      TEMPORAL_DEFAULT_NAMESPACE: "${TEMPORAL_NAMESPACE:-default}"
-      TEMPORAL_AUTH_ENABLED: "false"
-      TEMPORAL_CORS_ORIGINS: "http://localhost:${TEMPORAL_UI_HOST_PORT:-8233},http://127.0.0.1:${TEMPORAL_UI_HOST_PORT:-8233}"
-    ports:
-      - "127.0.0.1:${TEMPORAL_UI_HOST_PORT:-8233}:8080"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/v1/namespaces"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 20s
-    logging: *logging
-
-  minio:
-    labels:
-      compose_service: minio
-    build:
-      context: .
-      dockerfile: services/minio/Dockerfile
-      target: minio
-    restart: unless-stopped
-    command: server /data --console-address :9001
-    environment:
-      MINIO_ROOT_USER: "${S3_ACCESS_KEY:-openalbert-local}"
-      MINIO_ROOT_PASSWORD: "${S3_SECRET_KEY:-openalbert-local-secret}"
-    ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
-    volumes:
-      - ./container_data/minio:/data
-    logging: *logging
-
-  minio-init:
-    labels:
-      compose_service: minio-init
-    build:
-      context: .
-      dockerfile: services/minio/Dockerfile
-      target: minio-init
-    depends_on:
-      minio:
-        condition: service_started
-    restart: on-failure
-    environment:
-      S3_ACCESS_KEY: "${S3_ACCESS_KEY:-openalbert-local}"
-      S3_SECRET_KEY: "${S3_SECRET_KEY:-openalbert-local-secret}"
-      S3_BUCKET: "${S3_BUCKET:-openalbert}"
-    logging: *logging
-
   openalbert:
     labels:
       compose_service: openalbert
@@ -260,20 +101,11 @@ services:
       stt:
         condition: service_started
         required: false
-      postgres:
-        condition: service_healthy
-      temporal:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     env_file:
       - path: ./models.env
         required: false
     environment:
-      DATABASE_URL: "postgres://openalbert:${POSTGRES_PASSWORD:-openalbert-local-dev}@postgres:5432/openalbert?sslmode=disable"
-      TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_NAMESPACE: "${TEMPORAL_NAMESPACE:-default}"
-      TEMPORAL_TASK_QUEUE: "${TEMPORAL_TASK_QUEUE:-openalbert}"
+      DATA_DIR: /data
       TELEGRAM_WIDGETS: "${TELEGRAM_WIDGETS:-auto}"
       TELEGRAM_BASE_URL: "${TELEGRAM_BASE_URL:-}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
@@ -320,26 +152,19 @@ services:
       DESKTOP_API_TOKEN: "${DESKTOP_API_TOKEN:-}"
       HTTP_ADDR: ":8080"
       INSPECTOR_PUBLIC_URL: "${INSPECTOR_PUBLIC_URL:-http://localhost:8080/inspect/}"
-      VICTORIALOGS_URL: "${VICTORIALOGS_URL-http://victorialogs:9428}"
-      S3_ENDPOINT: minio:9000
-      S3_ACCESS_KEY: "${S3_ACCESS_KEY:-openalbert-local}"
-      S3_SECRET_KEY: "${S3_SECRET_KEY:-openalbert-local-secret}"
-      S3_BUCKET: "${S3_BUCKET:-openalbert}"
-      S3_SECURE: "false"
       BACKUP_STATE_DIR: /data/backup-state
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      - ./container_data/knowledge:/data/knowledge
-      - ./container_data/chatgpt:/data/chatgpt
+      - ./data:/data
       - type: bind
         source: ${LLM_CONFIG_HOST_FILE:-./models.toml}
         target: /etc/openalbert/models.toml
         read_only: true
         bind:
           create_host_path: false
-      - ./container_data/computer/client:/data/computer:ro
-      - ./container_data/backup-state:/data/backup-state:ro
+      - ./computer/client:/data/computer:ro
+      - ./backup-state:/data/backup-state:ro
     logging: *logging
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]

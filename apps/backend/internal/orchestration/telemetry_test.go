@@ -36,10 +36,12 @@ func TestWorkflowSummaryCountsWorkAndPropagatesTurnToDelivery(t *testing.T) {
 		}
 		return reply("Done"), nil
 	}}
-	env := newEnv(a)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Minute, 4)
+	if err := r.SignalSession(context.Background(), conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
 	var summary map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(logs.snapshot()), "\n") {
 		var row map[string]any

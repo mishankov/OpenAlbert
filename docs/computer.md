@@ -27,7 +27,7 @@ COMPUTER_SSH_PASSWORD='your-password'
 
 Укажи ровно один способ входа. Для входа по ключу оставь `COMPUTER_SSH_PASSWORD=`
 и задай `COMPUTER_SSH_KEY_FILE=/data/computer/id_ed25519`. В основном Compose
-положи приватный ключ в `container_data/computer/client/id_ed25519`: каталог
+положи приватный ключ в `computer/client/id_ed25519`: каталог
 монтируется в backend как `/data/computer` только для чтения. Приложение работает
 от UID 10001: ключ должен быть доступен этому UID и иметь права 0600.
 При запуске backend без Docker путь относится к файловой системе его процесса.
@@ -133,8 +133,8 @@ docker compose start computer
 
 ## Перенос прежнего встроенного компьютера
 
-До первого обновления на эту схему сохрани существующий контейнер. Одного
-копирования `container_data/computer` недостаточно для пакетов и системных файлов.
+До первого обновления со старой схемы со встроенным компьютером сохрани существующий контейнер. Одного
+копирования прежнего каталога данных компьютера недостаточно для пакетов и системных файлов.
 Команды ниже относятся к установке готовых образов; для checkout используй её
 прежний Compose с `--project-directory . -f deploy/compose.local.yaml`.
 
@@ -150,11 +150,11 @@ docker compose start computer
 
 2. Скопируй шаблон в новый отдельный каталог, как описано выше. **Не собирай образ**:
    вместо него используется снимок прежнего компьютера. Перенеси копии каталогов
-   `client`, `server`, `home`, `workspace` из прежнего `container_data/computer`
+   `client`, `server`, `home`, `workspace` из прежнего каталога данных компьютера
    в новый каталог, сохранив владельцев и права. Например, на Linux:
 
    ```sh
-   sudo cp -a /path/to/installation/container_data/computer/. /path/to/albert-computer/
+   sudo cp -a /path/to/old-installation-computer-data/. /path/to/albert-computer/
    cd /path/to/albert-computer
    docker compose up -d --no-build --wait
    ```

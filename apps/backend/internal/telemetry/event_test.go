@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestWideEventAccumulatesAndEmitsOnce(t *testing.T) {
@@ -121,5 +122,38 @@ func TestCancellationAndCapacityAreNotSuccessOrFatalErrors(t *testing.T) {
 		if row["result"] != tc.outcome || row["level"] != "WARN" {
 			t.Fatalf("bad classification: %v", row)
 		}
+	}
+}
+
+func TestNewWithSinkWritesJSONAndInvokesSink(t *testing.T) {
+	var out bytes.Buffer
+	var mu sync.Mutex
+	type entry struct {
+		at     time.Time
+		level  string
+		msg    string
+		fields map[string]any
+	}
+	var records []entry
+	logger := NewWithSink(&out, func(occurredAt time.Time, level, msg string, fields map[string]any) {
+		mu.Lock()
+		records = append(records, entry{at: occurredAt, level: level, msg: msg, fields: fields})
+		mu.Unlock()
+	})
+	e := Start(context.Background(), logger, "turn.complete")
+	e.Set("turn_id", "turn-42")
+	e.End(nil)
+
+	if !strings.Contains(out.String(), `"turn_id":"turn-42"`) {
+		t.Fatalf("expected JSON output on writer, got %s", out.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 sink record, got %d", len(records))
+	}
+	rec := records[0]
+	if rec.at.IsZero() || rec.level != "INFO" || rec.fields["operation"] != "turn.complete" || rec.fields["turn_id"] != "turn-42" || rec.fields["service"] != "openalbert" {
+		t.Fatalf("unexpected sink record: %+v", rec)
 	}
 }

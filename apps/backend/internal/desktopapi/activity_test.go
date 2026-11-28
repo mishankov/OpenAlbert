@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +15,8 @@ import (
 
 func TestStatusReportsOwnerActivityLifecycle(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { statusActivityContract(t, storage.NewMemory()) })
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
-		}
-		repo, err := storage.Open(context.Background(), url)
+	t.Run("sqlite", func(t *testing.T) {
+		repo, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -9,19 +9,20 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-OWN_IMAGES = {"openalbert", "stt", "tts", "log-gateway", "minio", "minio-init", "backup"}
+OWN_IMAGES = {"openalbert", "stt", "tts", "backup"}
+REMOVED_SERVICES = {"postgres", "temporal", "temporal-ui", "minio", "minio-init", "victorialogs", "log-gateway"}
+REMOVED_ENV = {
+    "DATABASE_URL", "POSTGRES_PASSWORD", "POSTGRES_PORT",
+    "TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_TASK_QUEUE",
+    "TEMPORAL_UI_HOST_PORT", "TEMPORAL_LOG_LEVEL",
+    "S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_BUCKET", "S3_SECURE",
+    "VICTORIALOGS_URL", "DOCKER_LOGS_GATEWAY_URL",
+}
 TEST_ENV = {
     "OPENALBERT_IMAGE_PREFIX": "ghcr.io/example/openalbert",
     "OPENALBERT_IMAGE_TAG": "sha-" + "1" * 40,
-    "POSTGRES_PASSWORD": "ci-only-password",
-    "S3_ACCESS_KEY": "openalbert-ci",
-    "S3_SECRET_KEY": "ci-only-secret",
     "TELEGRAM_BOT_TOKEN": "123:ci-only-token",
     "TELEGRAM_ALLOWED_USER_IDS": "123",
-}
-INLINE_CONFIGS = {
-    "postgres": ("postgres-init", "services/postgres/init.sql", "/docker-entrypoint-initdb.d/01-databases.sql"),
-    "temporal": ("temporal-dynamicconfig", "services/temporal/dynamicconfig.yaml", "/etc/temporal/config/dynamicconfig/development-sql.yaml"),
 }
 
 
@@ -60,39 +61,38 @@ def check_pair(overrides):
     dev = config("deploy/compose.local.yaml", overrides=overrides)
     release = config("deploy/compose.yaml", overrides=overrides)
     assert dev["services"].keys() == release["services"].keys(), "Compose service sets differ"
+    assert not (REMOVED_SERVICES & release["services"].keys()), "Removed infrastructure service still present"
+    assert not release.get("configs"), "Release Compose must not define removed inline configs"
+    assert not dev.get("configs"), "Local Compose must not define removed inline configs"
     for name, original in dev["services"].items():
         expected = copy.deepcopy(original)
         actual = copy.deepcopy(release["services"][name])
+        assert name in OWN_IMAGES, f"{name}: unexpected service outside the 4-image catalogue"
         assert "build" not in actual, f"{name}: release must not build on the host"
-        if name in OWN_IMAGES:
-            assert "build" in expected, f"{name}: local development must build from source"
-            build = expected["build"]
-            assert Path(build["context"]) == ROOT, f"{name}: build context moved away from the repository root"
-            assert (ROOT / build["dockerfile"]).is_file(), f"{name}: Dockerfile is missing"
-            image = f'{TEST_ENV["OPENALBERT_IMAGE_PREFIX"]}/{name}:{TEST_ENV["OPENALBERT_IMAGE_TAG"]}'
-            assert actual.pop("image") == image, f"{name}: unexpected published image"
-            expected.pop("build")
-        else:
-            assert actual["image"] == expected["image"], f"{name}: upstream versions differ"
-        if name in INLINE_CONFIGS:
-            key, path, target = INLINE_CONFIGS[name]
-            assert release["configs"][key]["content"] == (ROOT / path).read_text(), f"{key}: inline config drifted"
-            expected["volumes"] = [v for v in expected.get("volumes", []) if v["target"] != target]
-            if not expected["volumes"]:
-                expected.pop("volumes")
-            assert actual.pop("configs") == [{"source": key, "target": target}], f"{key}: unexpected config mount"
+        assert "build" in expected, f"{name}: local development must build from source"
+        build = expected["build"]
+        assert Path(build["context"]) == ROOT, f"{name}: build context moved away from the repository root"
+        assert (ROOT / build["dockerfile"]).is_file(), f"{name}: Dockerfile is missing"
+        image = f'{TEST_ENV["OPENALBERT_IMAGE_PREFIX"]}/{name}:{TEST_ENV["OPENALBERT_IMAGE_TAG"]}'
+        assert actual.pop("image") == image, f"{name}: unexpected published image"
+        expected.pop("build")
         assert actual == expected, f"{name}: development/release runtime settings drifted"
+        driver = actual.get("logging", {}).get("driver")
+        assert driver in {"local", "json-file"}, f"{name}: unexpected logging driver {driver!r}"
+        leaked_env = REMOVED_ENV & actual.get("environment", {}).keys()
+        assert not leaked_env, f"{name}: removed environment variables present: {sorted(leaked_env)}"
         for volume in actual.get("volumes", []):
-            if name == "backup":
-                assert volume["type"] == "bind", "backup: requires explicit host binds"
+            assert volume["target"] != "/var/run/docker.sock", f"{name}: Docker socket must not be mounted"
+            if volume["type"] == "tmpfs":
                 continue
+            assert volume["type"] == "bind", f"{name}: expected bind volume for {volume['target']}"
+            assert "/container_data/" not in volume["source"], f"{name}: stale container_data path in {volume['source']}"
             if name == "openalbert" and volume["target"] == "/etc/openalbert/models.toml":
-                assert volume["type"] == "bind" and volume["read_only"]
+                assert volume["read_only"]
                 assert not volume.get("bind", {}).get("create_host_path", False)
                 assert Path(volume["source"]).name == "models.toml"
                 continue
-            assert volume["type"] == "bind" and "/container_data/" in volume["source"], f"{name}: release requires checkout files"
-            assert Path(volume["source"]).is_relative_to(ROOT / "container_data"), f"{name}: persistent data moved away from the repository root"
+            assert Path(volume["source"]).is_relative_to(ROOT), f"{name}: bind moved away from project root"
     return release
 
 
@@ -129,30 +129,38 @@ def check_user_computer():
 
 def main():
     current = check_pair({})
+    assert current["name"] == "openalbert", "Unexpected Compose project name"
+    assert set(current["services"]) == {"openalbert", "stt"}, "Default .env.example must enable only openalbert and stt"
+    app_binds = {v["target"]: v for v in current["services"]["openalbert"]["volumes"]}
+    assert Path(app_binds["/data"]["source"]) == ROOT / "data" and not app_binds["/data"].get("read_only", False)
+    assert Path(app_binds["/data/backup-state"]["source"]) == ROOT / "backup-state" and app_binds["/data/backup-state"]["read_only"]
+    stt_binds = {v["target"]: v for v in current["services"]["stt"]["volumes"]}
+    assert Path(stt_binds["/models"]["source"]) == ROOT / "stt-models"
+
     tunnel = config(["deploy/compose.yaml", "deploy/networking/compose.wireguard.yaml"])
     app_ports = tunnel["services"]["openalbert"]["ports"]
     assert {(p["host_ip"], str(p["published"]), p["target"]) for p in app_ports} == {
         ("127.0.0.1", "8080", 8080), ("10.77.0.2", "8080", 8080),
     }, "Desktop tunnel override must preserve loopback and bind only the dedicated WireGuard IP"
+
     assert "backup" not in current["services"], "Backups must be opt-in"
     with_backup = check_pair({"COMPOSE_PROFILES": "backup,local-stt"})
     backup = with_backup["services"]["backup"]
-    assert backup["logging"]["driver"] == "local", "backup must survive the log gateway pause"
     binds = {v["target"]: v for v in backup["volumes"]}
-    assert binds["/installation"]["read_only"] and binds["/etc/openalbert-backup"]["read_only"]
-    assert not binds["/installation/container_data/backup-state"].get("read_only", False)
-    for name, service in with_backup["services"].items():
-        if name != "backup":
-            assert not any(v["target"] == "/var/run/docker.sock" for v in service.get("volumes", [])), "Docker socket leaked to an application service"
-    assert current["name"] == "openalbert", "Unexpected Compose project name"
-    assert "stt" in current["services"], "Example settings must enable bundled speech recognition"
+    assert Path(binds["/installation"]["source"]) == ROOT and binds["/installation"]["read_only"]
+    assert Path(binds["/installation/data"]["source"]) == ROOT / "data" and not binds["/installation/data"].get("read_only", False)
+    assert Path(binds["/etc/openalbert-backup"]["source"]) == ROOT / "backup-config" and binds["/etc/openalbert-backup"]["read_only"]
+    assert Path(binds["/installation/backup-state"]["source"]) == ROOT / "backup-state" and not binds["/installation/backup-state"].get("read_only", False)
+    assert Path(binds["/var/lib/openalbert-backup"]["source"]) == ROOT / "backup-work" and not binds["/var/lib/openalbert-backup"].get("read_only", False)
+
     for stt_url in ["", "http://speech.example:8080/v1"]:
         for browser in ["true", "false"]:
             check_pair({"STT_BASE_URL": stt_url, "BROWSER_ENABLED": browser})
-        external = check_pair({"STT_BASE_URL": stt_url, "COMPOSE_PROFILES": ""})
-        assert "stt" not in external["services"], "Disabled bundled speech recognition must not start"
-        dependency = external["services"]["openalbert"].get("depends_on", {}).get("stt")
-        assert dependency is None or dependency.get("required") is False, "External speech recognition still requires the bundled service"
+        minimal = check_pair({"STT_BASE_URL": stt_url, "COMPOSE_PROFILES": ""})
+        assert set(minimal["services"]) == {"openalbert"}, "Minimal deployment must run only openalbert"
+        deps = minimal["services"]["openalbert"].get("depends_on") or {}
+        assert all(spec.get("required") is False for spec in deps.values()), "openalbert must have no required service dependencies"
+
     assert "tts" not in current["services"], "Bundled speech synthesis must be opt-in"
     assert current["services"]["openalbert"]["environment"]["TTS_BASE_URL"] == ""
     bundled = check_pair({"COMPOSE_PROFILES": "local-stt,local-tts", "TTS_BASE_URL": "http://tts:8080/v1",
@@ -166,34 +174,38 @@ def main():
     assert "tts" not in external["services"]
     app = external["services"]["openalbert"]["environment"]
     assert all(app[key] == value for key, value in external_tts.items()), "External synthesis settings were lost"
+
     assert not {"computer", "computer-init"} & current["services"].keys(), "Albert must not manage a user computer"
     assert set(current["services"]["openalbert"]["networks"]) == {"default"}
     assert current["services"]["openalbert"]["environment"]["COMPUTER_SSH_ADDRESS"] == ""
+
     bake = json.loads(subprocess.check_output(
         ["docker", "buildx", "bake", "-f", "deploy/docker-bake.hcl", "--print"], cwd=ROOT, text=True,
     ))
     assert set(bake["group"]["default"]["targets"]) == OWN_IMAGES, "Release build catalogue drifted"
     assert "computer" not in bake["target"], "User computers must not be built/published with Albert"
     check_user_computer()
+
     for address in ["", "remote.example:2222"]:
         configured = check_pair({"COMPUTER_SSH_ADDRESS": address})
         assert configured["services"]["openalbert"]["environment"]["COMPUTER_SSH_ADDRESS"] == address
-    for logs_url in ["", "http://logs.example:9428"]:
-        inspector_url = "https://inspect.example/inspect/"
-        release = check_pair({"VICTORIALOGS_URL": logs_url, "INSPECTOR_PUBLIC_URL": inspector_url})
-        app = release["services"]["openalbert"]["environment"]
-        assert app["VICTORIALOGS_URL"] == logs_url, "Explicit logs endpoint/disable setting was lost"
-        assert app["INSPECTOR_PUBLIC_URL"] == inspector_url, "Public inspector links were lost"
-    for variable in TEST_ENV.keys() - {"LLM_API_KEY"}:
+
+    inspector_url = "https://inspect.example/inspect/"
+    inspected = check_pair({"INSPECTOR_PUBLIC_URL": inspector_url})
+    assert inspected["services"]["openalbert"]["environment"]["INSPECTOR_PUBLIC_URL"] == inspector_url
+
+    for variable in TEST_ENV:
         result = render("deploy/compose.yaml", overrides={variable: ""}, env_file=".env.release.example")
         assert result.returncode and variable in result.stderr, f"{variable}: release should reject an empty required value"
-    plan = check_pair({"OPENAI_AUTH_MODE":"siwc", "LLM_API_KEY":""})
+
+    plan = check_pair({"OPENAI_AUTH_MODE": "siwc", "LLM_API_KEY": ""})
     assert plan["services"]["openalbert"]["environment"]["OPENAI_AUTH_MODE"] == "siwc"
     assert plan["services"]["openalbert"]["environment"]["LLM_API_KEY"] == ""
     disabled_consolidation = check_pair({"MEMORY_CONSOLIDATION_INTERVAL": "0"})
     assert disabled_consolidation["services"]["openalbert"]["environment"]["MEMORY_CONSOLIDATION_INTERVAL"] == "0"
     disabled_coding_reap = check_pair({"CODING_SESSION_STALE_TIMEOUT": "0"})
     assert disabled_coding_reap["services"]["openalbert"]["environment"]["CODING_SESSION_STALE_TIMEOUT"] == "0"
+
     exa_env = {
         "WEB_SEARCH_PROVIDER": "exa",
         "EXA_API_KEY": "exa-test-only",
@@ -203,10 +215,14 @@ def main():
     exa_checked = check_pair(exa_env)
     exa_app = exa_checked["services"]["openalbert"]["environment"]
     assert all(exa_app[key] == value for key, value in exa_env.items()), "Exa search settings were lost"
+
     app = current["services"]["openalbert"]["environment"]
+    assert app["DATA_DIR"] == "/data"
+    assert app["BACKUP_STATE_DIR"] == "/data/backup-state"
     assert app["LLM_CONFIG_FILE"] == "/etc/openalbert/models.toml"
     assert "LLM_MODEL" not in app and "LLM_BASE_URL" not in app
     assert app["LLM_API_KEY"] == "", "Custom credential names must not require the example key"
+
     # Standalone deployment requires compose + .env + model config, no source tree.
     with tempfile.TemporaryDirectory(prefix="openalbert-compose-") as directory:
         destination = Path(directory)

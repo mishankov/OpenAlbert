@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -15,16 +15,21 @@ import (
 	"openalbert/apps/backend/internal/domain"
 )
 
-// The contract suite also runs against a real Postgres database when configured.
-// Use a disposable database; test records are namespaced by a unique run ID.
+func openTestSQLite(t *testing.T) *Store {
+	t.Helper()
+	s, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	return s
+}
+
 func TestRepositoryContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { repositoryContract(t, NewMemory()) })
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL to test PostgreSQL persistence")
-		}
-		s, err := Open(context.Background(), url)
+	t.Run("sqlite", func(t *testing.T) { repositoryContract(t, openTestSQLite(t)) })
+	t.Run("sqlite-memory", func(t *testing.T) {
+		s, err := Open(context.Background(), ":memory:")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -334,13 +339,10 @@ func TestMemoryConcurrentInbox(t *testing.T) {
 	}
 }
 
-func TestPostgresRestartDurability(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL")
-	}
+func TestSQLiteRestartDurability(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, url)
+	dbPath := filepath.Join(t.TempDir(), "restart.db")
+	s, err := Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +392,7 @@ func TestPostgresRestartDurability(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
-	s, err = Open(ctx, url)
+	s, err = Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +409,7 @@ func TestPostgresRestartDurability(t *testing.T) {
 	var state string
 	var attempts int
 	var jsonState string
-	if err = s.pool.QueryRow(ctx, "SELECT state,attempts,data->>'state' FROM openalbert_outgoing WHERE id=$1", id).Scan(&state, &attempts, &jsonState); err != nil {
+	if err = s.queryRow(ctx, "SELECT state, attempts, json_extract(data, '$.state') FROM openalbert_outgoing WHERE id = ?1", id).Scan(&state, &attempts, &jsonState); err != nil {
 		t.Fatal(err)
 	}
 	if state != "unknown" || jsonState != "unknown" || attempts != 1 {
@@ -445,17 +447,9 @@ func TestPostgresRestartDurability(t *testing.T) {
 	}
 }
 
-func TestPostgresVoiceQueueFiltersBeforeLimit(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL")
-	}
+func TestSQLiteVoiceQueueFiltersBeforeLimit(t *testing.T) {
 	ctx := t.Context()
-	s, err := Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+	s := openTestSQLite(t)
 	nonce := fmt.Sprintf("voice-queue-%d", time.Now().UnixNano())
 	busy := domain.Conversation{ID: nonce + "-busy"}
 	other := domain.Conversation{ID: nonce + "-other"}
@@ -490,17 +484,9 @@ func TestPostgresVoiceQueueFiltersBeforeLimit(t *testing.T) {
 		}
 	}
 }
-func TestPostgresConcurrentInbox(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL")
-	}
+func TestSQLiteConcurrentInbox(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+	s := openTestSQLite(t)
 	prefix := fmt.Sprintf("parallel-%d", time.Now().UnixNano())
 	var wg sync.WaitGroup
 	for i := range 30 {
@@ -515,7 +501,7 @@ func TestPostgresConcurrentInbox(t *testing.T) {
 	}
 	wg.Wait()
 	var count int
-	if err = s.pool.QueryRow(ctx, "SELECT count(*) FROM openalbert_incoming WHERE id LIKE $1", prefix+"%").Scan(&count); err != nil {
+	if err := s.queryRow(ctx, "SELECT count(*) FROM openalbert_incoming WHERE id LIKE ?1", prefix+"%").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 10 {
@@ -580,17 +566,9 @@ func TestConcurrentTaskUpdateDetectsConflict(t *testing.T) {
 	}
 }
 
-func TestPostgresTaskCancellationWinsOverStaleWorker(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL")
-	}
+func TestSQLiteTaskCancellationWinsOverStaleWorker(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+	s := openTestSQLite(t)
 	scope := fmt.Sprintf("cas-%d", time.Now().UnixNano())
 	task, err := s.CreateTask(ctx, domain.Task{ID: "task", ConversationID: scope, Title: "watch", Status: "running"})
 	if err != nil {
@@ -639,18 +617,8 @@ func TestPostgresTaskCancellationWinsOverStaleWorker(t *testing.T) {
 		t.Fatalf("success=%d conflict=%d", success, conflicts)
 	}
 }
-func TestPostgresSafeOutboxRetryAndSummary(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL")
-	}
-	ctx := context.Background()
-	s, err := Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	safeOutboxRetryAndSummary(t, s)
+func TestSQLiteSafeOutboxRetryAndSummary(t *testing.T) {
+	safeOutboxRetryAndSummary(t, openTestSQLite(t))
 }
 func TestMemorySafeOutboxRetryAndSummary(t *testing.T) { safeOutboxRetryAndSummary(t, NewMemory()) }
 func safeOutboxRetryAndSummary(t *testing.T, r domain.Repository) {

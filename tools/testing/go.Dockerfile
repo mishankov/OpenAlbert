@@ -6,14 +6,12 @@ COPY tools/testing/go-modules.sh ./tools/testing/
 COPY go.mod go.sum ./
 COPY apps/backend/go.mod apps/backend/go.sum ./apps/backend/
 COPY services/backup/go.mod services/backup/go.sum ./services/backup/
-COPY services/log-gateway/go.mod ./services/log-gateway/
 COPY services/stt/go.mod ./services/stt/
 COPY shared/backup/go.mod shared/backup/go.sum ./shared/backup/
 RUN sh tools/testing/go-modules.sh mod download
 COPY apps/cli ./apps/cli
 COPY apps/backend ./apps/backend
 COPY services/backup ./services/backup
-COPY services/log-gateway ./services/log-gateway
 COPY services/stt ./services/stt
 COPY shared/backup ./shared/backup
 COPY shared/codemode ./shared/codemode

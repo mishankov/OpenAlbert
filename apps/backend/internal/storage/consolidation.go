@@ -28,29 +28,32 @@ func (s *Store) SaveMemoryConsolidation(ctx context.Context, report domain.Memor
 		return domain.MemoryConsolidationReport{}, err
 	}
 	raw = sanitizeJSONB(raw)
-	tag, err := s.pool.Exec(ctx, `INSERT INTO openalbert_memory_consolidations(id,scope,started_at,data) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`, report.ID, report.Scope, report.StartedAt, raw)
+	res, err := s.exec(ctx, `INSERT INTO openalbert_memory_consolidations(id, scope, started_at, data) VALUES(?1, ?2, ?3, ?4) ON CONFLICT(id) DO NOTHING`, report.ID, report.Scope, formatTime(report.StartedAt), string(raw))
 	if err != nil {
 		return domain.MemoryConsolidationReport{}, err
 	}
-	if tag.RowsAffected() == 1 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return domain.MemoryConsolidationReport{}, err
+	}
+	if n == 1 {
 		return report, nil
 	}
-	var existingScope string
-	var existingRaw []byte
-	if err := s.pool.QueryRow(ctx, `SELECT scope,data FROM openalbert_memory_consolidations WHERE id=$1`, report.ID).Scan(&existingScope, &existingRaw); err != nil {
+	var existingScope, existingRaw string
+	if err := s.queryRow(ctx, `SELECT scope, data FROM openalbert_memory_consolidations WHERE id = ?1`, report.ID).Scan(&existingScope, &existingRaw); err != nil {
 		return domain.MemoryConsolidationReport{}, err
 	}
 	if existingScope != report.Scope {
 		return domain.MemoryConsolidationReport{}, ErrConflict
 	}
-	return decode[domain.MemoryConsolidationReport](existingRaw)
+	return decode[domain.MemoryConsolidationReport]([]byte(existingRaw))
 }
 
 func (s *Store) ListMemoryConsolidations(ctx context.Context, scope string, limit int) ([]domain.MemoryConsolidationReport, error) {
 	if err := validID(scope); err != nil {
 		return nil, err
 	}
-	return selectJSON[domain.MemoryConsolidationReport](ctx, s.pool, `SELECT data FROM openalbert_memory_consolidations WHERE scope=$1 ORDER BY seq DESC LIMIT $2`, scope, limitValue(limit))
+	return selectJSON[domain.MemoryConsolidationReport](ctx, s, `SELECT data FROM openalbert_memory_consolidations WHERE scope = ?1 ORDER BY seq DESC LIMIT ?2`, scope, limitValue(limit))
 }
 
 func (m *Memory) SaveMemoryConsolidation(ctx context.Context, report domain.MemoryConsolidationReport) (domain.MemoryConsolidationReport, error) {
@@ -101,16 +104,11 @@ func (m *Memory) ListMemoryConsolidations(ctx context.Context, scope string, lim
 	return out, nil
 }
 
-func escapeLikePrefix(prefix string) string {
-	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-	return r.Replace(prefix) + "%"
-}
-
 func (s *Store) DeleteCheckpointsByPrefix(ctx context.Context, prefix string) error {
 	if err := validID(prefix); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM openalbert_checkpoints WHERE id LIKE $1 ESCAPE '\'`, escapeLikePrefix(prefix))
+	_, err := s.exec(ctx, `DELETE FROM openalbert_checkpoints WHERE substr(id, 1, length(?1)) = ?1`, prefix)
 	return err
 }
 

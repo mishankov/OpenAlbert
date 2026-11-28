@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -13,18 +12,7 @@ import (
 
 func TestMemoryConsolidationContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { consolidationContract(t, NewMemory()) })
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL to test PostgreSQL persistence")
-		}
-		s, err := Open(context.Background(), url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer s.Close()
-		consolidationContract(t, s)
-	})
+	t.Run("sqlite", func(t *testing.T) { consolidationContract(t, openTestSQLite(t)) })
 }
 
 func consolidationContract(t *testing.T, r domain.Repository) {

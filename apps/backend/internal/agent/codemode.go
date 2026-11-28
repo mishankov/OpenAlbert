@@ -12,8 +12,6 @@ import (
 
 	"github.com/mishankov/OpenAlbert/shared/codemode"
 	"openalbert/apps/backend/internal/domain"
-
-	"go.temporal.io/sdk/converter"
 )
 
 const CodemodeName = "codemode"
@@ -153,12 +151,12 @@ func (a *Activities) CodemodeStep(ctx context.Context, in CodemodeInput) (codemo
 	}
 	if len(result.Pending) > 0 {
 		// Reserve space for the exact encoded requests, the original script, and
-		// all bounded child results carried by the next Activity.
-		payload, err := converter.GetDefaultDataConverter().ToPayload(result)
+		// all bounded child results carried by the next step.
+		payload, err := json.Marshal(result)
 		if err != nil {
 			return codemode.Result{}, err
 		}
-		if len(result.Pending) > 12 || len(payload.Data) > 384<<10 {
+		if len(result.Pending) > 12 || len(payload) > 384<<10 {
 			return codemode.Result{Error: "Codemode batch is too large. Use smaller independent batches."}, nil
 		}
 	}

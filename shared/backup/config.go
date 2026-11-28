@@ -16,11 +16,11 @@ import (
 
 type Config struct {
 	Root            string `json:"root"`
-	ComposeFile     string `json:"compose_file"`
-	StateDir        string `json:"state_dir"`
+	ComposeFile     string `json:"compose_file,omitempty"`
+	ModelConfigFile string `json:"model_config_file,omitempty"`
+	StateDir        string `json:"state_dir,omitempty"`
 	WorkDir         string `json:"work_dir"`
 	Enabled         bool   `json:"enabled"`
-	ExcludeComputer bool   `json:"exclude_computer,omitempty"`
 	Time            string `json:"time"`
 	Timezone        string `json:"timezone"`
 	KeepDays        int    `json:"keep_days"`
@@ -35,7 +35,7 @@ type Config struct {
 }
 
 func LoadConfig(path string) (Config, error) {
-	c := Config{ComposeFile: "compose.yaml", Enabled: true, Time: "03:00", Timezone: "Europe/Moscow", KeepDays: 14, NoticeSeconds: 60, Secure: true, Prefix: "openalbert/", WorkDir: "/var/lib/openalbert-backup"}
+	c := Config{Enabled: true, Time: "03:00", Timezone: "Europe/Moscow", KeepDays: 14, NoticeSeconds: 0, Secure: true, Prefix: "openalbert/", WorkDir: "/var/lib/openalbert-backup"}
 	f, err := os.Open(path)
 	if err != nil {
 		return c, err
@@ -64,16 +64,28 @@ func (c *Config) Validate() error {
 	}
 	c.Root, c.WorkDir = filepath.Clean(c.Root), filepath.Clean(c.WorkDir)
 	if c.StateDir == "" {
-		c.StateDir = filepath.Join(c.Root, "container_data", "backup-state")
+		c.StateDir = filepath.Join(c.Root, "backup-state")
+	} else {
+		if !filepath.IsAbs(c.StateDir) {
+			return errors.New("state_dir must be an absolute path")
+		}
+		c.StateDir = filepath.Clean(c.StateDir)
 	}
-	if c.StateDir != filepath.Join(c.Root, "container_data", "backup-state") {
-		return errors.New("state_dir must be root/container_data/backup-state (the Compose read-only mount)")
+	dataDir := filepath.Join(c.Root, "data")
+	if c.StateDir == c.Root || within(dataDir, c.StateDir) || within(c.StateDir, dataDir) {
+		return errors.New("state_dir must not be root or overlap with root/data")
 	}
 	if within(c.Root, c.WorkDir) || within(c.WorkDir, c.Root) {
 		return errors.New("work_dir must be separate from the installation")
 	}
-	if !validComposeFile(c.ComposeFile) {
+	if within(c.StateDir, c.WorkDir) || within(c.WorkDir, c.StateDir) {
+		return errors.New("work_dir must be separate from state_dir")
+	}
+	if c.ComposeFile != "" && !validComposeFile(c.ComposeFile) {
 		return errors.New("compose_file must be compose.yaml or compose.local.yaml, optionally under deploy/")
+	}
+	if c.ModelConfigFile != "" && !validModelConfigPath(c.ModelConfigFile) {
+		return errors.New("model_config_file must be a relative .toml path inside root outside data/")
 	}
 	if c.CredentialsFile != "" && !filepath.IsAbs(c.CredentialsFile) {
 		return errors.New("credentials_file must be absolute")
@@ -121,4 +133,16 @@ func (c Config) NextRun(now time.Time) time.Time {
 
 func validComposeFile(name string) bool {
 	return name == "compose.yaml" || name == "compose.local.yaml" || name == "deploy/compose.yaml" || name == "deploy/compose.local.yaml"
+}
+
+func validModelConfigPath(path string) bool {
+	if path == "" || filepath.IsAbs(path) {
+		return false
+	}
+	clean := filepath.Clean(path)
+	if clean != path || strings.Contains(path, "..") || filepath.Ext(path) != ".toml" {
+		return false
+	}
+	slash := filepath.ToSlash(path)
+	return slash != "data" && !strings.HasPrefix(slash, "data/")
 }

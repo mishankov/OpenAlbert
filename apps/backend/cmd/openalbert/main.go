@@ -29,9 +29,6 @@ import (
 	"openalbert/apps/backend/internal/t3"
 	"openalbert/apps/backend/internal/telemetry"
 	"openalbert/apps/backend/internal/widgets"
-
-	"go.temporal.io/api/serviceerror"
-	"go.temporal.io/sdk/client"
 )
 
 func main() {
@@ -40,6 +37,7 @@ func main() {
 		os.Exit(1)
 	}
 }
+
 func run() error {
 	logger := telemetry.New(os.Stdout)
 	slog.SetDefault(logger)
@@ -59,7 +57,15 @@ func run() error {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	server := &http.Server{Addr: c.HTTPAddr, Handler: telemetry.HTTP(logger, mux), ReadHeaderTimeout: 5 * time.Second}
+	var activeLogger atomic.Pointer[slog.Logger]
+	activeLogger.Store(logger)
+	server := &http.Server{
+		Addr: c.HTTPAddr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			telemetry.HTTP(activeLogger.Load(), mux).ServeHTTP(w, r)
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	serverErrors := make(chan error, 1)
 	go func() { serverErrors <- server.ListenAndServe() }()
 	defer func() {
@@ -68,19 +74,22 @@ func run() error {
 		_ = server.Shutdown(closeCtx)
 	}()
 	databaseEvent := telemetry.Start(ctx, logger, "database.initialize")
-	repo, err := storage.Open(databaseEvent.Context(), c.DatabaseURL)
+	repo, err := storage.Open(databaseEvent.Context(), c.DatabasePath)
 	databaseEvent.End(err)
 	if err != nil {
-		return errors.New("database initialization failed")
+		return fmt.Errorf("database initialization failed: %w", err)
 	}
 	defer repo.Close()
-	artifacts, err := blob.New(ctx, repo, c.S3Endpoint, c.S3AccessKey, c.S3SecretKey, c.S3Bucket, c.S3Secure)
+	logger = telemetry.NewWithSink(os.Stdout, repo.WriteLog)
+	slog.SetDefault(logger)
+	activeLogger.Store(logger)
+	artifacts, err := blob.New(repo, c.ArtifactsDir)
 	if err != nil {
-		return errors.New("S3 initialization failed")
+		return fmt.Errorf("artifact storage initialization failed: %w", err)
 	}
 	knowledgeStore, err := knowledge.NewWithSoulFile(c.KnowledgeDir, c.SoulFile)
 	if err != nil {
-		return errors.New("knowledge initialization failed")
+		return fmt.Errorf("knowledge initialization failed: %w", err)
 	}
 	var plan *siwc.Client
 	if c.OpenAIAuthMode == "siwc" || c.OpenAIAuthMode == "auto" || (c.OpenAIAuthMode == "profiles" && c.Models.HasSubscription()) {
@@ -133,18 +142,6 @@ func run() error {
 	if err = telegram.ConfigureCommands(ctx); err != nil {
 		return fmt.Errorf("Telegram command setup failed: %w", err)
 	}
-	var logs domain.LogReader
-	if c.VictoriaLogsURL != "" {
-		logs, err = integrations.NewVictoriaLogs(c.VictoriaLogsURL, nil)
-		if err != nil {
-			return err
-		}
-	}
-	temporalClient, err := client.DialContext(ctx, client.Options{HostPort: c.TemporalAddress, Namespace: c.TemporalNamespace, Logger: sdkLogger{logger}})
-	if err != nil {
-		return errors.New("Temporal connection failed")
-	}
-	defer temporalClient.Close()
 	var browsers domain.Browser
 	if c.BrowserEnabled {
 		browsers, err = browser.New(ctx, browser.Config{Executable: c.BrowserExecutable, NoSandbox: c.BrowserNoSandbox})
@@ -154,7 +151,7 @@ func run() error {
 		defer browsers.Close()
 	}
 	activities := &agent.Activities{Codemode: true, OwnerUserID: c.TelegramOwnerUserID, AllowedGroupIDs: c.TelegramAllowedGroupIDs, WorkspaceGroupID: c.TelegramWorkspaceGroupID, Workspace: telegram, Browser: browsers, Repo: artifacts, Knowledge: knowledgeStore, Model: billing, Search: search, Messenger: telegram, Logger: logger, MinTaskInterval: c.TaskMinInterval, InspectorPublicURL: c.InspectorPublicURL}
-	activities.Logs = logs
+	activities.Logs = repo
 	if c.ComputerSSHAddress != "" {
 		activities.Computer, err = computer.New(computer.Config{Address: c.ComputerSSHAddress, User: c.ComputerSSHUser, Password: c.ComputerSSHPassword, KeyFile: c.ComputerSSHKeyFile})
 		if err != nil {
@@ -166,14 +163,22 @@ func run() error {
 	}
 	activities.STT = speech
 	activities.STTModel = c.STTModel
-	activities.TaskChanged = func(ctx context.Context, scope, id string) error {
-		err := temporalClient.SignalWorkflow(ctx, orchestration.TaskWorkflowID(id), "", orchestration.TaskSignal, "changed")
-		var missing *serviceerror.NotFound
-		if errors.As(err, &missing) {
-			return nil
-		}
-		return err
+	runtime := &orchestration.Runtime{
+		Repo:                        artifacts,
+		Activities:                  activities,
+		Telegram:                    telegram,
+		TTS:                         voice,
+		IdleTimeout:                 c.SessionIdleTimeout,
+		CodingSessionStaleTimeout:   c.CodingSessionStaleTimeout,
+		MaxSteps:                    c.MaxAgentSteps,
+		InitiativeInterval:          c.InitiativeInterval,
+		MemoryConsolidationInterval: c.MemoryConsolidationInterval,
+		Logger:                      logger,
+		OnPruneLogs: func(ctx context.Context) error {
+			return repo.PruneLogs(ctx, time.Now().UTC().AddDate(0, 0, -30))
+		},
 	}
+	activities.TaskChanged = runtime.NotifyTaskChanged
 	t3ControlPlane := t3.New(repo, artifacts, t3.Config{OwnerUserID: c.TelegramOwnerUserID, Logger: logger, TaskChanged: activities.TaskChanged})
 	activities.T3 = t3ControlPlane
 	activities.Widgets = &widgets.Controller{Repo: artifacts, Transport: telegram, TaskChanged: activities.TaskChanged}
@@ -193,25 +198,7 @@ func run() error {
 		t3ControlPlane.AddObserver(t3WorkspaceBridge)
 		callbacks.RegisterPrefix(agent.T3CallbackPrefix, t3WorkspaceBridge)
 	}
-	runtime := &orchestration.Runtime{Repo: artifacts, Activities: activities, Telegram: telegram, Callbacks: callbacks, TTS: voice, Client: temporalClient, TaskQueue: c.TemporalTaskQueue, IdleTimeout: c.SessionIdleTimeout, CodingSessionStaleTimeout: c.CodingSessionStaleTimeout, MaxSteps: c.MaxAgentSteps, InitiativeInterval: c.InitiativeInterval, MemoryConsolidationInterval: c.MemoryConsolidationInterval, Logger: logger}
-	worker := runtime.Worker()
-	if err = worker.Start(); err != nil {
-		return errors.New("Temporal worker startup failed")
-	}
-	defer worker.Stop()
-	sttWorker := runtime.STTWorker()
-	if err = sttWorker.Start(); err != nil {
-		return errors.New("STT worker startup failed")
-	}
-	defer sttWorker.Stop()
-	if browsers != nil {
-		for _, w := range runtime.BrowserWorkers() {
-			if err = w.Start(); err != nil {
-				return errors.New("browser worker startup failed")
-			}
-			defer w.Stop()
-		}
-	}
+	runtime.Callbacks = callbacks
 	(&desktopapi.API{Repo: artifacts, Memory: knowledgeStore, OwnerID: c.TelegramOwnerUserID, Token: c.DesktopAPIToken, Billing: billing, Activities: activities, T3: t3ControlPlane, Logger: logger}).Register(mux)
 	inspector.Register(mux, repo, artifacts)
 	inspector.RegisterMemory(mux, repo, knowledgeStore)
@@ -230,13 +217,11 @@ func run() error {
 	if searchProvider != "" {
 		event.Set("web_search_provider", searchProvider)
 	}
-	event.Set("log_search_enabled", logs != nil)
+	event.Set("log_search_enabled", true)
 	event.Set("browser_enabled", c.BrowserEnabled)
 	event.Set("computer_enabled", activities.Computer != nil)
 	event.Set("telegram_allow_bot_messages", c.TelegramAllowBotMessages)
 	event.Set("browser_limit", 5)
-	event.Set("namespace", c.TemporalNamespace)
-	event.Set("task_queue", c.TemporalTaskQueue)
 	event.End(nil)
 	select {
 	case <-ctx.Done():
@@ -250,11 +235,3 @@ func run() error {
 		return fmt.Errorf("health server failed: %w", err)
 	}
 }
-
-// SDK messages are operational metadata. Never pass provider payloads into this logger.
-type sdkLogger struct{ logger *slog.Logger }
-
-func (l sdkLogger) Debug(msg string, keyvals ...interface{}) { l.logger.Debug(msg, keyvals...) }
-func (l sdkLogger) Info(msg string, keyvals ...interface{})  { l.logger.Info(msg, keyvals...) }
-func (l sdkLogger) Warn(msg string, keyvals ...interface{})  { l.logger.Warn(msg, keyvals...) }
-func (l sdkLogger) Error(msg string, keyvals ...interface{}) { l.logger.Error(msg, keyvals...) }

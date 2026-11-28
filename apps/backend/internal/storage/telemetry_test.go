@@ -5,33 +5,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"openalbert/apps/backend/internal/telemetry"
 )
 
-func TestSQLTelemetryPostgres(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
-	}
-	repo, err := Open(context.Background(), url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer repo.Close()
+func TestSQLTelemetrySQLite(t *testing.T) {
+	repo := openTestSQLite(t)
 	var out bytes.Buffer
 	e := telemetry.Start(telemetry.WithFields(context.Background(), map[string]any{"turn_id": "turn"}), telemetry.New(&out), "test.sql")
 	ctx := e.Context()
 	var value string
-	if err = repo.pool.QueryRow(ctx, "SELECT $1::text", "PRIVATE_PARAMETER").Scan(&value); err != nil || value != "PRIVATE_PARAMETER" {
+	if err := repo.queryRow(ctx, "SELECT ?1", "PRIVATE_PARAMETER").Scan(&value); err != nil || value != "PRIVATE_PARAMETER" {
 		t.Fatalf("query row: value=%q err=%v", value, err)
 	}
-	rows, err := repo.pool.Query(ctx, "SELECT generate_series(1,3)")
+	rows, err := repo.query(ctx, "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x<3) SELECT x FROM cnt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,8 +34,9 @@ func TestSQLTelemetryPostgres(t *testing.T) {
 	if err = rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = repo.pool.Exec(ctx, "SELECT $1::int", "PRIVATE_BAD_PARAMETER"); err == nil {
-		t.Fatal("expected a PostgreSQL error")
+	rows.Close()
+	if _, err = repo.exec(ctx, "SELECT no_such_sqlite_function(?1)", "PRIVATE_BAD_PARAMETER"); err == nil {
+		t.Fatal("expected a SQLite error")
 	}
 	e.End(nil)
 	var row map[string]any
@@ -74,12 +65,8 @@ func TestSQLTracerFallbackIsQuietForFastQueriesAndRedactsErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			tracer := queryTracer{logger: telemetry.New(&out)}
-			ctx := tracer.TraceQueryStart(context.Background(), nil, pgx.TraceQueryStartData{SQL: "SELECT $1", Args: []any{"PRIVATE_PARAMETER"}})
-			state := ctx.Value(queryTraceKey{}).(queryTrace)
-			state.start = time.Now().Add(-tc.elapsed)
-			ctx = context.WithValue(ctx, queryTraceKey{}, state)
-			tracer.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{Err: tc.err})
+			tracer := sqlTracer{logger: telemetry.New(&out)}
+			tracer.record(context.Background(), "SELECT ?1", tc.elapsed, 0, tc.err)
 			if (out.Len() > 0) != tc.logged || strings.Contains(out.String(), "PRIVATE") {
 				t.Fatalf("bad fallback logging: %s", out.String())
 			}

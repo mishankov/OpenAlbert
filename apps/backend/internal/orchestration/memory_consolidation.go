@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -10,8 +11,7 @@ import (
 
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
-
-	"go.temporal.io/sdk/workflow"
+	"openalbert/apps/backend/internal/telemetry"
 )
 
 const (
@@ -31,39 +31,43 @@ func MemoryConsolidationWorkflowID(scope string) string {
 	return "memory-consolidation/" + agent.ID(scope)
 }
 
-func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInput) error {
-	ctx = options(ctx)
-	runID := workflow.GetInfo(ctx).WorkflowExecution.RunID
-	startedAt := workflow.Now(ctx).UTC()
+// RunMemoryConsolidation executes the two-phase memory consolidation pipeline
+// (profile/preferences followed by hygiene) and persists a final report.
+func (r *Runtime) RunMemoryConsolidation(ctx context.Context, in MemoryConsolidationInput) error {
+	r.ensureInit()
+	wfID := MemoryConsolidationWorkflowID(in.Scope)
+	ctx = telemetry.WithFields(ctx, map[string]any{"workflow_id": wfID})
+	runID := agent.ID(in.Scope, rand.Text())
+	startedAt := r.now().UTC()
 	trigger := in.Trigger
 	if trigger == "" {
 		trigger = "scheduled"
 	}
 
-	var prep agent.ConsolidationPrep
-	if err := workflow.ExecuteActivity(ctx, "PrepareMemoryConsolidation", agent.ConsolidationRunInput{
+	prep, err := r.actPrepareMemoryConsolidation(ctx, agent.ConsolidationRunInput{
 		RunID:      runID,
 		Scope:      in.Scope,
 		Trigger:    trigger,
 		BatchSize:  in.BatchSize,
 		MaxBatches: in.MaxBatches,
 		Now:        startedAt,
-	}).Get(ctx, &prep); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 
 	if prep.BeforeCount == 0 {
-		var report domain.MemoryConsolidationReport
-		return workflow.ExecuteActivity(ctx, "FinalizeMemoryConsolidation", agent.ConsolidationFinalizeInput{
+		_, err := r.actFinalizeMemoryConsolidation(ctx, agent.ConsolidationFinalizeInput{
 			RunID:              runID,
 			Scope:              in.Scope,
 			Trigger:            trigger,
 			StartedAt:          startedAt,
-			CompletedAt:        workflow.Now(ctx).UTC(),
+			CompletedAt:        r.now().UTC(),
 			Status:             "skipped",
 			BeforeCount:        0,
 			ProfileCharsBefore: prep.ProfileCharsBefore,
-		}).Get(ctx, &report)
+		})
+		return err
 	}
 
 	operations := []domain.MemoryConsolidationOperation{}
@@ -72,14 +76,14 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInp
 	p2CursorTime, p2CursorID := prep.StartPhase2Time, prep.StartPhase2ID
 
 	recordFailure := func(runErr error, failedBatchKey string, p1HasMore, p1FollowUp, p2HasMore bool) error {
-		cleanup, _ := workflow.NewDisconnectedContext(ctx)
-		var report domain.MemoryConsolidationReport
-		_ = workflow.ExecuteActivity(cleanup, "FinalizeMemoryConsolidation", agent.ConsolidationFinalizeInput{
+		cleanup, cancel := disconnectedCtx(ctx)
+		defer cancel()
+		_, _ = r.actFinalizeMemoryConsolidation(cleanup, agent.ConsolidationFinalizeInput{
 			RunID:              runID,
 			Scope:              in.Scope,
 			Trigger:            trigger,
 			StartedAt:          startedAt,
-			CompletedAt:        workflow.Now(ctx).UTC(),
+			CompletedAt:        r.now().UTC(),
 			Status:             "failed",
 			BeforeCount:        prep.BeforeCount,
 			ProfileCharsBefore: prep.ProfileCharsBefore,
@@ -95,20 +99,20 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInp
 			Operations:         operations,
 			FailedBatchKey:     failedBatchKey,
 			Error:              runErr.Error(),
-		}).Get(cleanup, &report)
+		})
 		return runErr
 	}
 
 	for i, batch := range prep.Phase1Batches {
-		var res agent.ConsolidationPhaseResult
-		if err := workflow.ExecuteActivity(ctx, "ConsolidateProfileBatch", agent.ConsolidationBatchInput{
+		res, err := r.actConsolidateProfileBatch(ctx, agent.ConsolidationBatchInput{
 			RunID:      runID,
 			Scope:      in.Scope,
 			Group:      prep.Group,
 			BatchIndex: i,
 			BatchIDs:   batch.IDs,
-			Now:        workflow.Now(ctx).UTC(),
-		}).Get(ctx, &res); err != nil {
+			Now:        r.now().UTC(),
+		})
+		if err != nil {
 			p2More := !prep.Phase1FollowUp && (prep.Phase2HasMore || len(prep.Phase2Batches) > 0)
 			return recordFailure(err, fmt.Sprintf("profile/%d", i), true, prep.Phase1FollowUp, p2More)
 		}
@@ -122,15 +126,15 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInp
 	}
 
 	for i, batch := range prep.Phase2Batches {
-		var batchResult agent.ConsolidationPhaseResult
-		if err := workflow.ExecuteActivity(ctx, "ConsolidateHygieneBatch", agent.ConsolidationBatchInput{
+		batchResult, err := r.actConsolidateHygieneBatch(ctx, agent.ConsolidationBatchInput{
 			RunID:      runID,
 			Scope:      in.Scope,
 			Group:      prep.Group,
 			BatchIndex: i,
 			BatchIDs:   batch.IDs,
-			Now:        workflow.Now(ctx).UTC(),
-		}).Get(ctx, &batchResult); err != nil {
+			Now:        r.now().UTC(),
+		})
+		if err != nil {
 			return recordFailure(err, fmt.Sprintf("hygiene/%d", i), false, false, true)
 		}
 		operations = append(operations, batchResult.Operations...)
@@ -142,13 +146,12 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInp
 	if prep.HasMore {
 		status = "partial"
 	}
-	var report domain.MemoryConsolidationReport
-	return workflow.ExecuteActivity(ctx, "FinalizeMemoryConsolidation", agent.ConsolidationFinalizeInput{
+	_, err = r.actFinalizeMemoryConsolidation(ctx, agent.ConsolidationFinalizeInput{
 		RunID:              runID,
 		Scope:              in.Scope,
 		Trigger:            trigger,
 		StartedAt:          startedAt,
-		CompletedAt:        workflow.Now(ctx).UTC(),
+		CompletedAt:        r.now().UTC(),
 		Status:             status,
 		BeforeCount:        prep.BeforeCount,
 		ProfileCharsBefore: prep.ProfileCharsBefore,
@@ -162,15 +165,17 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, in MemoryConsolidationInp
 		Phase2HasMore:      prep.Phase2HasMore,
 		HasMore:            prep.HasMore,
 		Operations:         operations,
-	}).Get(ctx, &report)
+	})
+	return err
 }
 
 func (r *Runtime) DispatchMemoryConsolidation(ctx context.Context, now time.Time) error {
+	r.ensureInit()
 	if r.MemoryConsolidationInterval <= 0 || r.Activities == nil || r.Activities.Knowledge == nil {
 		return nil
 	}
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = r.now().UTC()
 	}
 	conversations, err := r.Repo.ListConversations(ctx)
 	if err != nil {
@@ -241,15 +246,37 @@ func (r *Runtime) DispatchMemoryConsolidation(ctx context.Context, now time.Time
 			continue
 		}
 
-		wfID := MemoryConsolidationWorkflowID(conv.ID)
-		_, err = r.Client.ExecuteWorkflow(ctx, workflowOptions(wfID, r.TaskQueue), MemoryConsolidationWorkflow, MemoryConsolidationInput{
+		in := MemoryConsolidationInput{
 			Scope:   conv.ID,
 			Trigger: trigger,
-		})
-		if err != nil && !already(err) {
-			return err
 		}
-		if err == nil {
+		started := false
+		if r.hooks != nil && r.hooks.dispatchConsol != nil && r.hooks.dispatchConsol(in) {
+			started = true
+		} else {
+			r.mu.Lock()
+			if !r.activeConsolidation[conv.ID] {
+				r.activeConsolidation[conv.ID] = true
+				runCtx := r.bgCtxLocked(ctx)
+				r.mu.Unlock()
+				started = true
+				r.wg.Add(1)
+				go func(scope string, input MemoryConsolidationInput) {
+					defer r.wg.Done()
+					defer func() {
+						r.mu.Lock()
+						delete(r.activeConsolidation, scope)
+						r.mu.Unlock()
+					}()
+					if err := r.RunMemoryConsolidation(runCtx, input); err != nil && runCtx.Err() == nil {
+						r.record(runCtx, "memory.consolidation", err)
+					}
+				}(conv.ID, in)
+			} else {
+				r.mu.Unlock()
+			}
+		}
+		if started {
 			state.LastAttemptAt = now.UTC()
 			if raw, marshalErr := json.Marshal(state); marshalErr == nil {
 				if saveErr := r.Repo.SaveCheckpoint(ctx, agent.ConsolidationStateKey(conv.ID), raw); saveErr != nil {

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -15,18 +14,7 @@ import (
 
 func TestT3StoreContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { t3StoreContract(t, NewMemory()) })
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL to test PostgreSQL persistence")
-		}
-		s, err := Open(context.Background(), url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer s.Close()
-		t3StoreContract(t, s)
-	})
+	t.Run("sqlite", func(t *testing.T) { t3StoreContract(t, openTestSQLite(t)) })
 }
 
 func t3StoreContract(t *testing.T, s domain.T3Store) {

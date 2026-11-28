@@ -46,14 +46,14 @@ func (m *Memory) PublicTimeline(ctx context.Context, scope string, before int64,
 }
 
 func (s *Store) PublicTimeline(ctx context.Context, scope string, before int64, n int) ([]domain.PublicRecord, error) {
-	rows, err := s.pool.Query(ctx, `SELECT p.seq,p.kind,COALESCE(i.data,o.data),COALESCE(o.state,''),COALESCE(o.attempts,0)
+	rows, err := s.query(ctx, `SELECT p.seq, p.kind, COALESCE(i.data, o.data), COALESCE(o.state, ''), COALESCE(o.attempts, 0)
  FROM openalbert_public_timeline p
- LEFT JOIN openalbert_incoming i ON p.kind='incoming' AND i.id=p.source_id
- LEFT JOIN openalbert_outgoing o ON p.kind='outgoing' AND o.id=p.source_id
- WHERE p.conversation_id=$1 AND ($2::bigint=0 OR p.seq<$2)
- AND ((p.kind='incoming' AND COALESCE(i.data->>'command','')<>'stop')
- OR (p.kind='outgoing' AND (o.data->'conversation'->>'delivery_channel'='desktop' OR o.state IN ('sent','unknown'))))
- ORDER BY p.seq DESC LIMIT $3`, scope, before, n)
+ LEFT JOIN openalbert_incoming i ON p.kind = 'incoming' AND i.id = p.source_id
+ LEFT JOIN openalbert_outgoing o ON p.kind = 'outgoing' AND o.id = p.source_id
+ WHERE p.conversation_id = ?1 AND (?2 = 0 OR p.seq < ?2)
+ AND ((p.kind = 'incoming' AND COALESCE(json_extract(i.data, '$.command'), '') <> 'stop')
+ OR (p.kind = 'outgoing' AND (json_extract(o.data, '$.conversation.delivery_channel') = 'desktop' OR o.state IN ('sent', 'unknown'))))
+ ORDER BY p.seq DESC LIMIT ?3`, scope, before, n)
 	if err != nil {
 		return nil, err
 	}
@@ -61,20 +61,19 @@ func (s *Store) PublicTimeline(ctx context.Context, scope string, before int64, 
 	out := []domain.PublicRecord{}
 	for rows.Next() {
 		var p domain.PublicRecord
-		var kind, state string
-		var b []byte
+		var kind, raw, state string
 		var attempts int
-		if err = rows.Scan(&p.Seq, &kind, &b, &state, &attempts); err != nil {
+		if err = rows.Scan(&p.Seq, &kind, &raw, &state, &attempts); err != nil {
 			return nil, err
 		}
 		if kind == "incoming" {
-			v, e := decode[domain.Incoming](b)
+			v, e := decode[domain.Incoming]([]byte(raw))
 			if e != nil {
 				return nil, e
 			}
 			p.Incoming = &v
 		} else {
-			v, e := decode[domain.Outgoing](b)
+			v, e := decode[domain.Outgoing]([]byte(raw))
 			if e != nil {
 				return nil, e
 			}
@@ -89,8 +88,9 @@ func (s *Store) PublicTimeline(ctx context.Context, scope string, before int64, 
 
 // ListArtifacts returns metadata only; contents still pass through the blob store.
 func (s *Store) ListArtifacts(ctx context.Context, scope string) ([]domain.Artifact, error) {
-	return selectJSON[domain.Artifact](ctx, s.pool, "SELECT data FROM openalbert_artifacts WHERE conversation_id=$1 ORDER BY data->>'created_at' DESC,id", scope)
+	return selectJSON[domain.Artifact](ctx, s, "SELECT data FROM openalbert_artifacts WHERE conversation_id = ?1 ORDER BY created_at DESC, id ASC", scope)
 }
+
 func (m *Memory) ListArtifacts(ctx context.Context, scope string) ([]domain.Artifact, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
