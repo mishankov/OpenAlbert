@@ -5,16 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/storage"
-
-	"go.temporal.io/sdk/activity"
-	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/converter"
 )
 
 func TestNewSessionInterruptsTurnAndKeepsFollowingMessages(t *testing.T) {
@@ -56,28 +53,29 @@ func TestNewSessionInterruptsTurnAndKeepsFollowingMessages(t *testing.T) {
 		return reply("Fresh reply"), nil
 	}}
 	a.Model = model
-	env := newEnv(a)
-	reset, during := false, false
-	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, args converter.EncodedValues) {
-		if info.ActivityType.Name == "ToolCall" && !reset {
-			var in agent.ToolInput
-			if args.Get(&in) == nil && in.Call.Name == "web_read" {
-				reset = true
-				env.SignalWorkflow(MessageSignal, Event{ID: "new", NewSession: true})
-				env.SignalWorkflow(MessageSignal, Event{ID: "new", NewSession: true})
-				env.SignalWorkflow(MessageSignal, Event{ID: "after"})
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Minute, 4)
+	var reset, during atomic.Bool
+	r.hooks = &activityHooks{
+		onStart: func(name string, arg any) {
+			if name == "ToolCall" {
+				if in, ok := arg.(agent.ToolInput); ok && in.Call.Name == "web_read" && reset.CompareAndSwap(false, true) {
+					_ = r.SignalSession(ctx, conv.ID, Event{ID: "new", NewSession: true})
+					_ = r.SignalSession(ctx, conv.ID, Event{ID: "new", NewSession: true})
+					_ = r.SignalSession(ctx, conv.ID, Event{ID: "after"})
+				}
 			}
-		}
-		if info.ActivityType.Name == "StartNewSession" && !during {
-			during = true
-			env.SignalWorkflow(MessageSignal, Event{ID: "during"})
-		}
-	})
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
-	requireWorkflowOK(t, env)
-	if !reset || !during || model.count() != 3 {
-		t.Fatalf("unexpected reset flow: reset=%v during=%v model calls=%d", reset, during, model.count())
+			if name == "StartNewSession" && during.CompareAndSwap(false, true) {
+				_ = r.SignalSession(ctx, conv.ID, Event{ID: "during"})
+			}
+		},
+	}
+	if err := r.SignalSession(ctx, conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
+	if !reset.Load() || !during.Load() || model.count() != 3 {
+		t.Fatalf("unexpected reset flow: reset=%v during=%v model calls=%d", reset.Load(), during.Load(), model.count())
 	}
 	sessions, _ := repo.PendingAnalysis(ctx, 10)
 	if len(sessions) != 2 || sessions[0].ID == sessions[1].ID {
@@ -111,10 +109,12 @@ func TestNewCommandFirstNeedsNoModelAndIsRetrySafe(t *testing.T) {
 	if _, err := repo.AcceptIncoming(ctx, domain.Incoming{ID: "new-first", Conversation: conv, Text: "/new"}, 2); err != nil {
 		t.Fatal(err)
 	}
-	env := newEnv(a) // A nil model makes any accidental model call fail.
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "new-first", NewSession: true}) }, 0)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Minute, 4) // A nil model makes any accidental model call fail.
+	if err := r.SignalSession(ctx, conv.ID, Event{ID: "new-first", NewSession: true}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
 	sessions, _ := repo.PendingAnalysis(ctx, 10)
 	if len(sessions) != 1 {
 		t.Fatalf("first command created an empty previous session: %+v", sessions)
@@ -130,7 +130,7 @@ func TestNewCommandFirstNeedsNoModelAndIsRetrySafe(t *testing.T) {
 	if started, err := a.StartNewSession(ctx, conv.ID, previous, sessions[0].ID, []string{"new-first"}); err != nil || !started {
 		t.Fatalf("activity retry failed: %v %v", started, err)
 	}
-	// A stale signal in a later workflow must not reset its context again.
+	// A stale signal in a later session must not reset its context again.
 	started, err := a.StartNewSession(ctx, conv.ID, "later-session", "unexpected-session", []string{"new-first"})
 	if err != nil || started {
 		t.Fatalf("stale command reset a later session: %v %v", started, err)
@@ -139,26 +139,17 @@ func TestNewCommandFirstNeedsNoModelAndIsRetrySafe(t *testing.T) {
 	if len(out) != 1 {
 		t.Fatalf("confirmation repeated: %+v", out)
 	}
-	// The later workflow may receive only that stale command.
-	later := newEnv(a)
-	later.SetStartWorkflowOptions(client.StartWorkflowOptions{ID: "later-workflow"})
-	later.RegisterDelayedCallback(func() { later.SignalWorkflow(MessageSignal, Event{ID: "new-first", NewSession: true}) }, 0)
-	later.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 4})
-	requireWorkflowOK(t, later)
+	// A later session actor may receive only that stale command.
+	laterClk := NewFakeClock(time.Now().UTC())
+	later := newTestRuntime(a, laterClk, time.Second, 4)
+	if err := later.SignalSession(ctx, conv.ID, Event{ID: "new-first", NewSession: true}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, later, laterClk)
 	sessions, _ = repo.PendingAnalysis(ctx, 10)
 	if len(sessions) != 1 {
 		t.Fatalf("stale signal created another session: %+v", sessions)
 	}
-}
-
-type commandClient struct {
-	client.Client
-	events []Event
-}
-
-func (c *commandClient) SignalWithStartWorkflow(_ context.Context, _ string, _ string, arg any, _ client.StartWorkflowOptions, _ any, _ ...any) (client.WorkflowRun, error) {
-	c.events = append(c.events, arg.(Event))
-	return nil, nil
 }
 
 func TestDispatchRecognizesOnlyExplicitNewCommands(t *testing.T) {
@@ -176,15 +167,23 @@ func TestDispatchRecognizesOnlyExplicitNewCommands(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c := &commandClient{}
-	r := Runtime{Repo: repo, Client: c, TaskQueue: "test"}
+	var events []Event
+	r := Runtime{
+		Repo: repo,
+		hooks: &activityHooks{
+			dispatchEv: func(_ string, ev Event) bool {
+				events = append(events, ev)
+				return true
+			},
+		},
+	}
 	if err := r.DispatchOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(c.events) != len(inputs) {
-		t.Fatalf("lost events: %+v", c.events)
+	if len(events) != len(inputs) {
+		t.Fatalf("lost events: %+v", events)
 	}
-	for i, ev := range c.events {
+	for i, ev := range events {
 		if ev.NewSession != (i < 2) || ev.Stop {
 			t.Fatalf("wrong command dispatch: %+v", ev)
 		}

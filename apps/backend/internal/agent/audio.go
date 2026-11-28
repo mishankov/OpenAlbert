@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go.temporal.io/sdk/activity"
-	"go.temporal.io/sdk/temporal"
 	"openalbert/apps/backend/internal/domain"
 	"strings"
 	"sync"
@@ -82,26 +80,6 @@ func (a *Activities) attachmentArtifact(ctx context.Context, in RunInput, id str
 // workflow history, and the inspector can show an attachment while it is queued.
 func (a *Activities) PrepareAudio(ctx context.Context, in RunInput) (jobs []AudioInput, err error) {
 	ctx = runContext(ctx, in)
-	if activity.IsActivity(ctx) {
-		stop := make(chan struct{})
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				activity.RecordHeartbeat(ctx, "saving audio")
-				select {
-				case <-stop:
-					return
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-				}
-			}
-		}()
-		defer func() { close(stop); <-done }()
-	}
 	if err = a.Repo.StartSession(ctx, domain.Session{ID: in.SessionID, ConversationID: in.ConversationID, Status: "active", Trigger: "message", CreatedAt: time.Now().UTC()}); err != nil {
 		return
 	}
@@ -176,14 +154,14 @@ func (a *Activities) TranscribeAudio(ctx context.Context, in AudioInput) (out do
 		}
 	}
 	if a.STT == nil {
-		return out, temporal.NewNonRetryableApplicationError("STT is disabled", "stt_disabled", nil)
+		return out, domain.NewNonRetryableError("STT is disabled", "stt_disabled", nil)
 	}
 	art, ok, err := a.Repo.Artifact(ctx, in.Run.ConversationID, in.ArtifactID)
 	if err != nil {
 		return out, err
 	}
 	if !ok {
-		return out, temporal.NewNonRetryableApplicationError("Audio artifact is missing", "audio_missing", nil)
+		return out, domain.NewNonRetryableError("Audio artifact is missing", "audio_missing", nil)
 	}
 	sum := sha256.Sum256(art.Data)
 	key := ID(in.Run.ConversationID, hex.EncodeToString(sum[:]), a.STT.Profile())
@@ -204,7 +182,7 @@ func (a *Activities) TranscribeAudio(ctx context.Context, in AudioInput) (out do
 		return
 	}
 	if !claimed {
-		return out, temporal.NewApplicationError("Another attempt owns audio inference", "stt_busy")
+		return out, domain.NewRetryableError("Another attempt owns audio inference", "stt_busy", 0, nil)
 	}
 	c, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -222,9 +200,6 @@ func (a *Activities) TranscribeAudio(ctx context.Context, in AudioInput) (out do
 		tick := time.NewTicker(10 * time.Second)
 		defer tick.Stop()
 		for {
-			if activity.IsActivity(c) {
-				activity.RecordHeartbeat(c, "transcribing")
-			}
 			select {
 			case <-stopHeartbeat:
 				return
@@ -266,7 +241,7 @@ func (a *Activities) TranscribeAudio(ctx context.Context, in AudioInput) (out do
 		return out, e
 	}
 	if !committed {
-		return out, temporal.NewApplicationError("Audio lease was lost", "stt_lease_lost")
+		return out, domain.NewRetryableError("Audio lease was lost", "stt_lease_lost", 0, nil)
 	}
 	err = a.saveAudio(c, out)
 	return
@@ -280,11 +255,11 @@ func speechError(ctx context.Context, err error) error {
 	if errors.As(err, &status) {
 		code := status.HTTPStatus()
 		if code >= 400 && code < 500 && code != 408 && code != 429 {
-			return temporal.NewNonRetryableApplicationError(fmt.Sprintf("STT rejected audio (HTTP %d)", code), fmt.Sprintf("stt_http_%d", code), nil)
+			return domain.NewNonRetryableError(fmt.Sprintf("STT rejected audio (HTTP %d)", code), fmt.Sprintf("stt_http_%d", code), nil)
 		}
-		return temporal.NewApplicationError(fmt.Sprintf("STT temporarily unavailable (HTTP %d)", code), "stt_unavailable")
+		return domain.NewRetryableError(fmt.Sprintf("STT temporarily unavailable (HTTP %d)", code), "stt_unavailable", 0, nil)
 	}
-	return temporal.NewApplicationError("STT request failed", "stt_request_failed")
+	return domain.NewRetryableError("STT request failed", "stt_request_failed", 0, nil)
 }
 
 type AudioFailure struct {

@@ -40,8 +40,18 @@ without the user. If someone else merged it, report that instead.
 - **Waiting for required approval:** only human approval remains. Confirm
   that this is the actual blocker.
 - **Blocked:** explain what prevents readiness, what you tried, and what is
-  needed. Follow ship-pr's rules for asking the user.
+  needed. Follow ship-pr's rules for asking the user: prefer the harness's
+  structured interactive question tool so a user or orchestrator can answer it
+  cleanly, and fall back to starting your final reply with the question if no
+  question tool is available.
 
 In T3 Code, call `unwatch_pull_request` before the handoff or a question.
 Report the PR link, final head, verdict, proof, reviewer outcome, and remaining
 risks. State whether the PR is still open and unmerged.
+
+When the prompt or harness requests a structured output schema, submit the final
+handoff data matching that schema through the mechanism it specifies before
+ending the turn alongside your concise final reply (verdict, PR URL, head SHA,
+concise summary, and any blocking question or open decisions). Never fabricate
+missing fields; use `null` or empty values per the schema when not applicable
+(such as for merge commit while unmerged).

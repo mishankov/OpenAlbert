@@ -2,8 +2,9 @@ package backup
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,7 +14,16 @@ func TestSchedulerRestartCatchesUpOneMissedDeadline(t *testing.T) {
 	c, _ := fixture(t)
 	now := time.Now().UTC()
 	deadline := now.Add(-time.Hour)
-	old := State{Version: 1, Enabled: true, Time: c.Time, Timezone: c.Timezone, Phase: "completed", UpdatedAt: now.Add(-25 * time.Hour), NextRunAt: deadline, LastSuccess: &Copy{ID: "previous", CreatedAt: now.Add(-25 * time.Hour)}}
+	old := State{
+		Version:     1,
+		Enabled:     true,
+		Time:        c.Time,
+		Timezone:    c.Timezone,
+		Phase:       "completed",
+		UpdatedAt:   now.Add(-25 * time.Hour),
+		NextRunAt:   deadline,
+		LastSuccess: &Copy{ID: "previous", CreatedAt: now.Add(-25 * time.Hour)},
+	}
 	if err := AtomicJSON(filepath.Join(c.StateDir, "status.json"), old); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +50,16 @@ func TestSchedulerRestartCatchesUpOneMissedDeadline(t *testing.T) {
 func TestSchedulerRestartRecordsInterruptedUpload(t *testing.T) {
 	c, _ := fixture(t)
 	now := time.Now().UTC()
-	old := State{Version: 1, Enabled: true, Time: c.Time, Timezone: c.Timezone, RunID: "interrupted", Phase: "uploading", UpdatedAt: now, HeartbeatAt: now}
+	old := State{
+		Version:     1,
+		Enabled:     true,
+		Time:        c.Time,
+		Timezone:    c.Timezone,
+		RunID:       "interrupted",
+		Phase:       "uploading",
+		UpdatedAt:   now,
+		HeartbeatAt: now,
+	}
 	if err := AtomicJSON(filepath.Join(c.StateDir, "status.json"), old); err != nil {
 		t.Fatal(err)
 	}
@@ -58,62 +77,70 @@ func TestSchedulerRestartRecordsInterruptedUpload(t *testing.T) {
 	}
 }
 
-func TestContainerCannotBackUpAnotherProjectsData(t *testing.T) {
-	c, _ := fixture(t)
-	var steps []string
-	r := &Runner{Config: c, HostRoot: "/another-installation", Remote: &memoryRemote{}, Command: fakeCommands(t, c, &steps, false, nil)}
-	if err := r.Create(context.Background()); err == nil {
-		t.Fatal("accepted other installation's data")
+func TestManualRequestCompletesAndCleansWorkDir(t *testing.T) {
+	c, key := fixture(t)
+	remote := &memoryRemote{}
+	r := &Runner{Config: c, Remote: remote}
+	if err := r.Request(); err != nil {
+		t.Fatal(err)
 	}
-	if len(steps) != 0 {
-		t.Fatal("caused downtime despite data mount mismatch")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Serve(ctx, io.Discard) }()
+
+	reader := Reader{Dir: c.StateDir}
+	var final State
+	for deadline := time.Now().Add(8 * time.Second); time.Now().Before(deadline); {
+		if s, err := reader.Read(); err == nil && s.Phase == "completed" {
+			final = s
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if final.Phase != "completed" || final.LastSuccess == nil {
+		t.Fatalf("manual request did not complete: %+v", final)
+	}
+	if _, err := os.Stat(filepath.Join(c.StateDir, "request.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("request.json not removed after completion: %v", err)
+	}
+	assertWorkDirEmpty(t, c.WorkDir)
+
+	archivePath := filepath.Join(t.TempDir(), "manual.age")
+	if err := os.WriteFile(archivePath, remote.archiveBytes(final.LastSuccess.ID), 0600); err != nil {
+		t.Fatal(err)
+	}
+	identity := filepath.Join(t.TempDir(), "identity")
+	if err := os.WriteFile(identity, []byte(key.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Restore(context.Background(), archivePath, identity, filepath.Join(t.TempDir(), "restored")); err != nil {
+		t.Fatalf("manual backup restore failed: %v", err)
 	}
 }
 
-func TestManualRequestUsesSchedulerCleanupOnShutdown(t *testing.T) {
+func TestManualRequestFailureMarksFailedAndCleansWorkDir(t *testing.T) {
 	c, _ := fixture(t)
-	var steps []string
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	r := &Runner{Config: c, Remote: &memoryRemote{}}
-	r.Command = fakeCommands(t, c, &steps, false, cancel)
+	remote := &memoryRemote{
+		uploadErr: errors.New("simulated remote failure"),
+		onUpload:  cancel,
+	}
+	r := &Runner{Config: c, Remote: remote}
 	if err := r.Request(); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Serve(ctx, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if len(steps) != 2 || steps[0] != "stop" || steps[1] != "start" {
-		t.Fatalf("scheduler shutdown did not resume services: %v", steps)
-	}
 	s, err := (Reader{Dir: c.StateDir}).Read()
 	if err != nil || s.Phase != "failed" {
-		t.Fatalf("cancelled request reported as successful: %+v %v", s, err)
+		t.Fatalf("failed request reported as successful: %+v %v", s, err)
 	}
-}
-
-func TestResumeWaitsForHealthInsteadOfOnlyContainerRunning(t *testing.T) {
-	c, _ := fixture(t)
-	var steps []string
-	base := fakeCommands(t, c, &steps, false, nil)
-	probes := 0
-	r := &Runner{Config: c, Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if args[0] == "inspect" && args[len(args)-1] == "{{json .State}}" {
-			probes++
-			status := "starting"
-			if probes > 1 {
-				status = "healthy"
-			}
-			return json.Marshal(map[string]any{"Running": true, "Health": map[string]string{"Status": status}})
-		}
-		return base(ctx, name, args...)
-	}}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := r.resumeServices(ctx, []string{"postgres"}); err != nil {
-		t.Fatal(err)
-	}
-	if probes < 2 {
-		t.Fatal("accepted a running but not yet healthy service")
-	}
+	assertWorkDirEmpty(t, c.WorkDir)
 }

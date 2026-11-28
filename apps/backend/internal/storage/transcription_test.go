@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"openalbert/apps/backend/internal/domain"
-	"os"
 	"testing"
 	"time"
 )
@@ -43,15 +42,6 @@ func transcriptionContract(t *testing.T, repo domain.Repository) {
 	}
 }
 func TestTranscriptionLeaseMemory(t *testing.T) { transcriptionContract(t, NewMemory()) }
-func TestTranscriptionLeasePostgres(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("disposable PostgreSQL only")
-	}
-	repo, e := Open(context.Background(), url)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer repo.Close()
-	transcriptionContract(t, repo)
+func TestTranscriptionLeaseSQLite(t *testing.T) {
+	transcriptionContract(t, openTestSQLite(t))
 }

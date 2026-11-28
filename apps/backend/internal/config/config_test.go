@@ -1,13 +1,63 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 func validEnv(t testing.TB) map[string]string {
-	return map[string]string{"DATABASE_URL": "postgres://u:secret@localhost/db", "TELEGRAM_BOT_TOKEN": "secret-token", "TELEGRAM_ALLOWED_USER_IDS": "123, 123,456", "MAIN_MODEL_KEY": "secret-key", "LLM_CONFIG_FILE": modelFile(t, validModels), "YANDEX_API_KEY": "secret-yandex", "YANDEX_FOLDER_ID": "folder", "S3_ACCESS_KEY": "test", "S3_SECRET_KEY": "secret-s3"}
+	return map[string]string{"TELEGRAM_BOT_TOKEN": "secret-token", "TELEGRAM_ALLOWED_USER_IDS": "123, 123,456", "MAIN_MODEL_KEY": "secret-key", "LLM_CONFIG_FILE": modelFile(t, validModels), "YANDEX_API_KEY": "secret-yandex", "YANDEX_FOLDER_ID": "folder"}
+}
+
+func TestDataDirDefaultsAndOverrides(t *testing.T) {
+	env := map[string]string{
+		"TELEGRAM_BOT_TOKEN":        "tok",
+		"TELEGRAM_ALLOWED_USER_IDS": "42",
+		"MAIN_MODEL_KEY":            "key",
+		"LLM_CONFIG_FILE":           modelFile(t, validModels),
+	}
+	cfg, err := load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataDir != "./data" ||
+		cfg.DatabasePath != filepath.Join("./data", "openalbert.db") ||
+		cfg.ArtifactsDir != filepath.Join("./data", "artifacts") ||
+		cfg.KnowledgeDir != filepath.Join("./data", "knowledge") ||
+		cfg.OpenAITokenStore != filepath.Join("./data", "chatgpt", "credentials.json") ||
+		cfg.HTTPAddr != "127.0.0.1:8080" ||
+		cfg.BackupStateDir != "" {
+		t.Fatalf("unexpected data dir defaults: %+v", cfg)
+	}
+	env["DATA_DIR"] = "/srv/albert"
+	cfg, err = load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabasePath != "/srv/albert/openalbert.db" ||
+		cfg.ArtifactsDir != "/srv/albert/artifacts" ||
+		cfg.KnowledgeDir != "/srv/albert/knowledge" ||
+		cfg.OpenAITokenStore != "/srv/albert/chatgpt/credentials.json" {
+		t.Fatalf("DATA_DIR did not propagate: %+v", cfg)
+	}
+	env["DATABASE_PATH"] = "/custom/db.sqlite"
+	env["ARTIFACTS_DIR"] = "/custom/blobs"
+	env["KNOWLEDGE_DIR"] = "/custom/know"
+	env["OPENAI_TOKEN_STORE"] = "/custom/creds.json"
+	env["BACKUP_STATE_DIR"] = "/custom/backup-state"
+	cfg, err = load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabasePath != "/custom/db.sqlite" ||
+		cfg.ArtifactsDir != "/custom/blobs" ||
+		cfg.KnowledgeDir != "/custom/know" ||
+		cfg.OpenAITokenStore != "/custom/creds.json" ||
+		cfg.BackupStateDir != "/custom/backup-state" {
+		t.Fatalf("explicit overrides failed: %+v", cfg)
+	}
 }
 func TestLaunchSettings(t *testing.T) {
 	env := validEnv(t)
@@ -145,13 +195,10 @@ func TestRequiredOwnerAndSecrets(t *testing.T) {
 	}
 }
 func TestInvalidSettingsNeverEchoInput(t *testing.T) {
-	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "TELEGRAM_WORKSPACE_GROUP_ID", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_CONFIG_FILE", "INSPECTOR_PUBLIC_URL", "VICTORIALOGS_URL", "DATABASE_URL", "S3_SECURE", "TELEGRAM_ALLOW_BOT_MESSAGES", "S3_ENDPOINT", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX", "WEB_SEARCH_PROVIDER", "EXA_SEARCH_URL", "EXA_MONTHLY_BUDGET_USD"} {
+	for _, key := range []string{"TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_ALLOWED_GROUP_IDS", "TELEGRAM_WORKSPACE_GROUP_ID", "SESSION_IDLE_TIMEOUT", "MAX_AGENT_STEPS", "LLM_CONFIG_FILE", "INSPECTOR_PUBLIC_URL", "TELEGRAM_ALLOW_BOT_MESSAGES", "BROWSER_ENABLED", "BROWSER_NO_SANDBOX", "WEB_SEARCH_PROVIDER", "EXA_SEARCH_URL", "EXA_MONTHLY_BUDGET_USD"} {
 		t.Run(key, func(t *testing.T) {
 			env := validEnv(t)
 			env[key] = "secret-bad-value"
-			if key == "S3_ENDPOINT" {
-				env[key] = "https://secret-bad-value"
-			}
 			_, err := load(func(k string) string { return env[k] })
 			if err == nil {
 				t.Fatal("expected error")

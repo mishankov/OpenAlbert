@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
-"""Actual Compose MVP smoke. Uses local fake APIs; never contacts real Telegram/LLM/Yandex.
+"""Actual Compose MVP smoke. Uses local fake APIs; never contacts real Telegram/LLM/Yandex/Exa.
 With --with-browser, Chromium visits public example.com.
 
-Requires the local development infrastructure from deploy/compose.local.yaml and a built openalbert image.
-Creates an isolated application DB, knowledge volume and artifact bucket, then removes them.
-Does not alter the documentation server or stop infrastructure. Refuses a running OpenAlbert.
+Requires a built openalbert image (deploy/compose.local.yaml).
+Creates an isolated temporary /data directory (SQLite DB, local artifacts, knowledge),
+exercises end-to-end messaging, background tasks, session analysis, restart idempotency,
+and built-in SQLite log search, then removes the container and temp data.
+Refuses a running OpenAlbert container.
 """
 import argparse
 import base64
 import datetime
-import http.server
 import hashlib
+import http.server
 import json
 import os
-import re
 from pathlib import Path
+import re
+import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
-import urllib.parse
 import urllib.request
 import uuid
 
@@ -29,22 +31,6 @@ ROOT = Path(__file__).resolve().parents[2]
 def run(args, env, **kwargs):
     return subprocess.run(args, cwd=ROOT, env=env, check=True, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs).stdout.strip()
-
-
-def running_environment(compose, env, service, keys):
-    """Read only required settings from the running service selected by Compose."""
-    containers = run(compose + ["ps", "-q", service], env).splitlines()
-    if len(containers) != 1:
-        raise SystemExit(f"Expected one running {service} container in the selected Compose project.")
-    values = json.loads(run(["docker", "inspect", "--format", "{{json .Config.Env}}", containers[0]], env))
-    selected = {}
-    for entry in values:
-        key, separator, value = entry.partition("=")
-        if separator and key in keys:
-            selected[key] = value
-    if any(not selected.get(key) for key in keys):
-        raise SystemExit(f"Running {service} container is missing required infrastructure settings.")
-    return selected
 
 
 def model_config(base_url):
@@ -125,8 +111,6 @@ class FakeState:
                 "memories": [{"content": self.marker + " analyzed preference", "kind": "preference"}]})}
         names = [tool["function"]["name"] for tool in body.get("tools", [])]
         assert names == ["codemode"], f"unexpected agent model tools: {names}"
-        # Background notification rules follow the actual task as another user
-        # message. Select the task, while retaining subsequent tool results.
         last_user = max(i for i, message in enumerate(messages)
                         if message["role"] == "user" and not str(message["content"]).startswith("Complete the background work."))
         user_text = messages[last_user]["content"]
@@ -141,7 +125,6 @@ class FakeState:
             assert "error" not in receipt, f"Codemode script {call_id} failed: {receipt['error']}"
             assert "output" in receipt, f"missing Codemode output for {call_id}"
             results[call_id] = receipt["output"]
-        # A final empty assistant response ends the loop after delivery is queued.
         for call_id in ("call_interactive_done", "call_task_done"):
             if call_id in results:
                 assert results[call_id].get("state") == "queued", f"{call_id} did not queue a reply"
@@ -282,6 +265,16 @@ def handler_for(state):
     return Handler
 
 
+def query_sqlite(db_path, sql, params=()):
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+    try:
+        cur = conn.execute(sql, params)
+        rows = cur.fetchall()
+        return rows
+    finally:
+        conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=18089)
@@ -300,44 +293,36 @@ def smoke(args, settings_directory):
     env = {key: value for key, value in os.environ.items() if key in {
         "PATH", "HOME", "DOCKER_CONFIG", "DOCKER_HOST", "DOCKER_CONTEXT",
         "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_DEFAULT_PLATFORM", "COMPOSE_PROJECT_NAME"}}
-    env.setdefault("POSTGRES_PORT", "15432")
     # A service env_file bypasses --env-file, so redirect it before rendering.
-    # All other paths keep ROOT as their Compose project directory.
     source = (ROOT / "deploy/compose.local.yaml").read_text()
     copied_compose = settings_directory / "compose.yaml"
     copied_compose.write_text(source.replace("path: ./models.env", "path: /dev/null"))
     compose = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", str(ROOT / ".env.example"), "-f", str(copied_compose)]
     if run(compose + ["ps", "-q", "openalbert"], env):
         raise SystemExit("Stop your OpenAlbert container before running isolated smoke; it will not be replaced.")
-    postgres = running_environment(compose, env, "postgres", {"POSTGRES_USER", "POSTGRES_PASSWORD"})
-    minio = running_environment(compose, env, "minio", {"MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"})
-    temporal = running_environment(compose, env, "temporal", {"DEFAULT_NAMESPACE", "TEMPORAL_ADDRESS"})
-    postgres_user = postgres["POSTGRES_USER"]
-    postgres_password = postgres["POSTGRES_PASSWORD"]
-    s3 = {"S3_ACCESS_KEY": minio["MINIO_ROOT_USER"], "S3_SECRET_KEY": minio["MINIO_ROOT_PASSWORD"]}
-    # Compose interpolates override values too; retain literal dollars in credentials.
-    s3 = {key: value.replace("$", "$$") for key, value in s3.items()}
-    infrastructure = {"services": {
-        "minio-init": {"environment": s3},
-        "openalbert": {"environment": {**s3,
-            "TEMPORAL_NAMESPACE": temporal["DEFAULT_NAMESPACE"].replace("$", "$$"),
-            "TEMPORAL_ADDRESS": temporal["TEMPORAL_ADDRESS"].replace("$", "$$")}}}}
-    infrastructure_path = settings_directory / "infrastructure.json"
-    infrastructure_path.write_text(json.dumps(infrastructure))
-    compose += ["-f", str(infrastructure_path)]
     marker = "mvp-smoke-" + uuid.uuid4().hex[:12]
-    db = marker.replace("-", "_")
-    volume = "openalbert_" + db
-    bucket = marker
-    # Every external key/endpoint is replaced. No dotenv secret is read by fake APIs.
     search_provider = getattr(args, "search_provider", "exa")
-    env.update(TELEGRAM_BOT_TOKEN="smoke-token", TELEGRAM_ALLOWED_USER_IDS="42", TELEGRAM_OWNER_USER_ID="42",
-               TELEGRAM_ALLOWED_GROUP_IDS="", LLM_API_KEY="smoke-key",
-               WEB_SEARCH_PROVIDER="", EXA_API_KEY="", EXA_SEARCH_URL="",
-               YANDEX_API_KEY="", YANDEX_FOLDER_ID="", YANDEX_SEARCH_URL="",
-               SESSION_IDLE_TIMEOUT="2s", INITIATIVE_INTERVAL="0", MEMORY_CONSOLIDATION_INTERVAL="0", TASK_MIN_INTERVAL="1s",
-               MAX_AGENT_STEPS="12", TELEGRAM_BASE_URL=f"http://{args.host_address}:{args.port}",
-               TEMPORAL_TASK_QUEUE=marker)
+    env.update(
+        COMPOSE_PROFILES="",
+        STT_BASE_URL="",
+        TELEGRAM_BOT_TOKEN="smoke-token",
+        TELEGRAM_ALLOWED_USER_IDS="42",
+        TELEGRAM_OWNER_USER_ID="42",
+        TELEGRAM_ALLOWED_GROUP_IDS="",
+        LLM_API_KEY="smoke-key",
+        WEB_SEARCH_PROVIDER="",
+        EXA_API_KEY="",
+        EXA_SEARCH_URL="",
+        YANDEX_API_KEY="",
+        YANDEX_FOLDER_ID="",
+        YANDEX_SEARCH_URL="",
+        SESSION_IDLE_TIMEOUT="2s",
+        INITIATIVE_INTERVAL="0",
+        MEMORY_CONSOLIDATION_INTERVAL="0",
+        TASK_MIN_INTERVAL="1s",
+        MAX_AGENT_STEPS="12",
+        TELEGRAM_BASE_URL=f"http://{args.host_address}:{args.port}",
+    )
     if not args.without_search:
         if search_provider == "yandex":
             env.update(YANDEX_API_KEY="smoke-key", YANDEX_FOLDER_ID="smoke-folder",
@@ -348,58 +333,66 @@ def smoke(args, settings_directory):
     state = FakeState(marker, args.without_search, args.with_browser)
     server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), handler_for(state))
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    created = False
     app_created = False
     try:
-        run(compose + ["exec", "-T", "postgres", "psql", "-U", postgres_user, "-d", "postgres", "-c", f'CREATE DATABASE "{db}"'], env)
-        created = True
-        run(compose + ["run", "--rm", "--no-deps", "-e", "S3_BUCKET=" + bucket, "minio-init"], env)
         with tempfile.TemporaryDirectory(prefix="openalbert-smoke-") as temp:
-            models = Path(temp) / "models.toml"
+            temp_path = Path(temp)
+            data_dir = temp_path / "data"
+            data_dir.mkdir(mode=0o777)
+            models = temp_path / "models.toml"
             models.write_text(model_config(f"http://{args.host_address}:{args.port}/v1"))
             env["LLM_CONFIG_HOST_FILE"] = str(models)
-            # JSON is also valid YAML. Overrides only the application service, no infrastructure recreation.
-            override = {"services": {"openalbert": {"labels": {"openalbert.smoke": marker},
-                "environment": {"DATABASE_URL": f"postgres://{urllib.parse.quote(postgres_user, safe='')}:{urllib.parse.quote(postgres_password, safe='')}@postgres:5432/{db}?sslmode=disable", "S3_BUCKET": bucket},
-                "volumes": [{"type": "volume", "source": "smoke_knowledge", "target": "/data/knowledge"}]}},
-                "volumes": {"smoke_knowledge": {"name": volume}}}
-            path = Path(temp) / "override.json"
-            path.write_text(json.dumps(override))
-            cmd = compose + ["-f", str(path)]
-            def sql(query):
-                return run(compose + ["exec", "-T", "postgres", "psql", "-U", postgres_user, "-d", db, "-Atc", query], env)
+            override = {
+                "services": {
+                    "openalbert": {
+                        "labels": {"openalbert.smoke": marker},
+                        "volumes": [{"type": "bind", "source": str(data_dir), "target": "/data"}],
+                    }
+                }
+            }
+            override_path = temp_path / "override.json"
+            override_path.write_text(json.dumps(override))
+            cmd = compose + ["-f", str(override_path)]
+            db_path = data_dir / "openalbert.db"
+
+            def sql_one(query, params=()):
+                rows = query_sqlite(db_path, query, params)
+                return rows[0][0] if rows else None
+
             def health():
                 with urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2) as response:
                     return json.load(response).get("status") == "ok"
+
             print("Starting isolated OpenAlbert container with local fake APIs", flush=True)
             app_created = True
             run(cmd + ["up", "-d", "--no-deps", "--no-build", "openalbert"], env)
             wait_until("application health", health)
             wait_until("two Telegram replies", lambda: len(state.sent) >= 2)
-            wait_until("closed sessions analyzed", lambda: sql("SELECT count(*) > 0 AND bool_and(analyzed) FROM openalbert_sessions") == "t")
-            assert sql("SELECT count(*) FROM openalbert_incoming WHERE handled") == "1", "incoming message not persisted exactly once"
-            assert sql("SELECT count(*) FROM openalbert_tasks WHERE data->>'status'='completed'") == "1", "task not completed"
-            assert sql("SELECT count(*) FROM openalbert_artifacts WHERE octet_length(content)=0") == str(2 if args.with_browser else 1), "artifact body should live in S3"
+            wait_until("closed sessions analyzed",
+                       lambda: sql_one("SELECT count(*) > 0 AND MIN(analyzed) = 1 FROM openalbert_sessions") == 1)
+            assert sql_one("SELECT count(*) FROM openalbert_incoming WHERE handled = 1") == 1, "incoming message not persisted exactly once"
+            assert sql_one("SELECT count(*) FROM openalbert_tasks WHERE json_extract(data, '$.status') = 'completed'") == 1, "task not completed"
+            assert sql_one("SELECT count(*) FROM openalbert_artifacts WHERE length(content) = 0") == (2 if args.with_browser else 1), "artifact body should live on local filesystem"
             assert len(state.sent) == 2 and all(str(message["chat_id"]) == "42" for message in state.sent), "unexpected deliveries"
             assert {"rich" if "rich_message" in message else "ordinary" for message in state.sent} == {"ordinary", "rich"}, "both reply formats must reach Telegram"
             assert state.searches == (0 if args.without_search else 1), "search adapter was not called exactly once"
             assert state.analyses > 0, "post-session analysis did not run"
-            knowledge = run(cmd + ["exec", "-T", "openalbert", "sh", "-c", "find /data/knowledge -type f -exec cat {} \\;"], env)
-            assert marker + " preference" in knowledge, "automatic memory not saved"
-            # Read the actual object from the isolated bucket through mc; no direct API shortcuts.
-            objects = run(compose + ["run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "minio-init", "-c",
-                          'mc alias set local http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null && mc find "$1"', "sh", "local/" + bucket], env).splitlines()
-            assert len(objects) == (2 if args.with_browser else 1), "unexpected artifact object count"
-            document_id = sql("SELECT id FROM openalbert_artifacts WHERE data->>'name'='smoke.txt'")
-            document_key = "local/" + bucket + "/artifacts/" + hashlib.sha256(b"personal:42").hexdigest() + "/" + hashlib.sha256(document_id.encode()).hexdigest()
-            assert document_key in objects, "document object not found"
+
+            knowledge_files = [p.read_text() for p in (data_dir / "knowledge").rglob("*") if p.is_file()]
+            assert any(marker + " preference" in content for content in knowledge_files), "automatic memory not saved"
+
+            document_id = sql_one("SELECT id FROM openalbert_artifacts WHERE json_extract(data, '$.name') = 'smoke.txt'")
+            assert document_id, "document artifact row missing"
+            scope_hash = hashlib.sha256(b"personal:42").hexdigest()
+            doc_hash = hashlib.sha256(document_id.encode()).hexdigest()
+            artifact_file = data_dir / "artifacts" / scope_hash / doc_hash
+            assert artifact_file.is_file(), f"document blob not found at {artifact_file}"
+            assert artifact_file.read_bytes() == state.document, "local artifact differs from downloaded document"
             if args.with_browser:
-                assert sql("SELECT count(*) FROM openalbert_artifacts WHERE data->>'mime'='image/png'") == "1", "browser screenshot metadata missing"
+                assert sql_one("SELECT count(*) FROM openalbert_artifacts WHERE json_extract(data, '$.mime') = 'image/png'") == 1, "browser screenshot metadata missing"
                 processes = run(cmd + ["exec", "-T", "openalbert", "sh", "-c", "ps -o comm"], env).splitlines()
                 assert not any(name.strip() in ("chromium", "chrome") for name in processes), "Chromium survived closed session"
-            content = run(compose + ["run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "minio-init", "-c",
-                          'mc alias set local http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null && mc cat "$1"', "sh", document_key], env)
-            assert content == state.document.decode(), "S3 artifact differs from downloaded document"
+
             old_completions = state.completions
             old_analyses = state.analyses
             with state.lock:
@@ -412,32 +405,38 @@ def smoke(args, settings_directory):
             time.sleep(4)
             assert len(state.sent) == 2, "restart duplicated Telegram delivery"
             assert state.completions == old_completions and state.analyses == old_analyses, "restart repeated finished model work"
-            assert sql("SELECT count(*) FROM openalbert_incoming") == "1", "duplicate incoming inserted"
-            knowledge = run(cmd + ["exec", "-T", "openalbert", "sh", "-c", "find /data/knowledge -type f -exec cat {} \\;"], env)
-            assert marker + " preference" in knowledge, "memory did not survive restart"
-            def logs_for(expression, limit=100):
-                query = urllib.parse.urlencode({"query": expression, "limit": str(limit)})
-                with urllib.request.urlopen("http://localhost:9428/select/logsql/query?" + query, timeout=3) as response:
-                    return [json.loads(line) for line in response if line.strip()]
-            def logged():
-                return logs_for(f'task_queue:"{marker}" operation:application.started', 10)
-            events = wait_until("application wide events in VictoriaLogs", lambda: logged() if len(logged()) >= 2 else None, timeout=20)
-            assert all(event["result"] == "success" and "duration_ms" in event for event in events)
-            assert all(event.get("service") == "openalbert" for event in events), "container service metadata missing"
-            turn_id = sql("SELECT data->>'turn_id' FROM openalbert_outgoing WHERE data->>'trigger'='message' LIMIT 1")
+            assert sql_one("SELECT count(*) FROM openalbert_incoming") == 1, "duplicate incoming inserted"
+            knowledge_files = [p.read_text() for p in (data_dir / "knowledge").rglob("*") if p.is_file()]
+            assert any(marker + " preference" in content for content in knowledge_files), "memory did not survive restart"
+
+            started_logs = wait_until(
+                "application wide events in SQLite logs",
+                lambda: rows if len(rows := query_sqlite(db_path, "SELECT level, service, fields FROM openalbert_logs WHERE json_extract(fields, '$.operation') = 'application.started'")) >= 2 else None,
+                timeout=20,
+            )
+            for level, service, raw in started_logs:
+                fields = json.loads(raw)
+                assert service == "openalbert" and fields.get("result") == "success" and "duration_ms" in fields
+
+            turn_id = sql_one("SELECT json_extract(data, '$.turn_id') FROM openalbert_outgoing WHERE json_extract(data, '$.trigger') = 'message' LIMIT 1")
             assert turn_id, "reply trace missing from persistent outbox"
+
             def traced():
-                rows = logs_for(f'turn_id:"{turn_id}"')
-                operations = {row.get("operation") for row in rows}
-                return rows if {"turn.prepare", "llm.complete", "tool.execute", "turn.complete", "telegram.deliver"} <= operations else None
-            traced_events = wait_until("correlated turn events in VictoriaLogs", traced, timeout=20)
-            summary = next(row for row in traced_events if row.get("operation") == "turn.complete")
+                rows = query_sqlite(db_path, "SELECT level, message, fields FROM openalbert_logs WHERE json_extract(fields, '$.turn_id') = ?", (turn_id,))
+                parsed = [(lvl, msg, json.loads(raw)) for lvl, msg, raw in rows]
+                operations = {f.get("operation") for _, _, f in parsed}
+                return parsed if {"turn.prepare", "llm.complete", "tool.execute", "turn.complete", "telegram.deliver"} <= operations else None
+
+            traced_events = wait_until("correlated turn events in SQLite logs", traced, timeout=20)
+            summary = next(f for _, _, f in traced_events if f.get("operation") == "turn.complete")
             assert float(summary["processing_ms"]) > 0 and int(summary["model_calls"]) >= 2
             assert summary["delivery_state"] == "queued", "processing claimed actual delivery"
-            assert all(row.get("_msg", "").startswith("[openalbert]") and row.get("level") in ("info", "warn", "error") for row in traced_events), "normalized message or level missing"
+            assert all(lvl in ("info", "warn", "error") for lvl, _, _ in traced_events), "normalized log level missing"
+
             print(json.dumps({"result": "passed", "incoming": 1, "deliveries": 2, "task": "completed", "search_requests": state.searches,
-                              "session_analyses": state.analyses, "s3_document": "verified", "memory": "survived restart",
-                              "duplicate_delivery": False, "browser": "page, screenshot and process cleanup verified" if args.with_browser else "not exercised", "wide_events": len(events), "traced_events": len(traced_events), "telegram_formats": ["ordinary", "rich"]}, ensure_ascii=False), flush=True)
+                              "session_analyses": state.analyses, "local_document": "verified", "memory": "survived restart",
+                              "duplicate_delivery": False, "browser": "page, screenshot and process cleanup verified" if args.with_browser else "not exercised",
+                              "wide_events": len(started_logs), "traced_events": len(traced_events), "telegram_formats": ["ordinary", "rich"]}, ensure_ascii=False), flush=True)
     except Exception:
         if app_created:
             print(run(compose + ["logs", "--tail=60", "openalbert"], env), flush=True)
@@ -448,12 +447,6 @@ def smoke(args, settings_directory):
             subprocess.run(compose + ["rm", "-f", "openalbert"], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         server.shutdown()
         server.server_close()
-        if created:
-            run(compose + ["exec", "-T", "postgres", "psql", "-U", postgres_user, "-d", "postgres", "-c", f'DROP DATABASE "{db}" WITH (FORCE)'], env)
-        subprocess.run(["docker", "volume", "rm", volume], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(compose + ["run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "minio-init", "-c",
-                       'mc alias set local http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null && mc rb --force "$1"', "sh", "local/" + bucket],
-                       cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

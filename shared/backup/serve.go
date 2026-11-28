@@ -15,8 +15,8 @@ type request struct {
 	ID string `json:"id"`
 }
 
-// Request queues a manual attempt for the scheduler process, so Docker's stop
-// signal reaches the same process that owns the active backup and its cleanup.
+// Request queues a manual attempt for the scheduler process, so stop signals
+// reach the same process that owns the active backup and its cleanup.
 func (r *Runner) Request() error {
 	lock, err := r.lock()
 	if err != nil {
@@ -29,12 +29,9 @@ func (r *Runner) Request() error {
 	return AtomicJSON(filepath.Join(r.Config.StateDir, "request.json"), request{ID: rand.Text()})
 }
 
-// initialize preserves the previous deadline so a container restart can catch up
-// one missed run. A fresh installation waits for its first scheduled deadline.
-func (r *Runner) initialize(ctx context.Context, now time.Time) (time.Time, error) {
-	if err := r.Recover(ctx); err != nil {
-		return time.Time{}, err
-	}
+// initialize preserves the previous deadline so a restart can catch up one
+// missed run. A fresh installation waits for its first scheduled deadline.
+func (r *Runner) initialize(_ context.Context, now time.Time) (time.Time, error) {
 	lock, err := r.lock()
 	if err != nil {
 		return time.Time{}, err
@@ -66,8 +63,8 @@ func (r *Runner) initialize(ctx context.Context, now time.Time) (time.Time, erro
 	return next, nil
 }
 
-// Serve owns the schedule inside the independent backup container. Create runs
-// serially, keeps its own heartbeat, and never stops the controller service.
+// Serve owns the schedule in a long-running backup process (Compose service or
+// standalone binary). Create runs serially and keeps its own heartbeat.
 func (r *Runner) Serve(ctx context.Context, log io.Writer) error {
 	next, err := r.initialize(ctx, time.Now())
 	if err != nil {

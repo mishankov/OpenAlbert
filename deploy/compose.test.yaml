@@ -1,37 +1,7 @@
 # Disposable integration environment, independent of deploy/compose.local.yaml and .env.
 services:
-  postgres:
-    image: postgres:18.7-alpine
-    environment:
-      POSTGRES_USER: openalbert
-      POSTGRES_PASSWORD: local-test-password
-      POSTGRES_DB: openalbert_test
-    tmpfs: [/var/lib/postgresql]
-    healthcheck:
-      test: [CMD-SHELL, pg_isready -h 127.0.0.1 -U openalbert -d openalbert_test]
-      interval: 2s
-      timeout: 3s
-      retries: 30
-  victorialogs:
-    image: victoriametrics/victoria-logs:v1.54.0
   go:
     build:
       context: .
       dockerfile: tools/testing/go.Dockerfile
-    environment:
-      OPENALBERT_TEST_DATABASE_URL: postgres://openalbert:local-test-password@postgres:5432/openalbert_test?sslmode=disable
-      OPENALBERT_TEST_VICTORIALOGS_URL: http://victorialogs:9428
-    depends_on:
-      postgres: {condition: service_healthy}
-      victorialogs: {condition: service_started}
-    # Wait for the real HTTP endpoint, rather than silently skipping the contract.
-    entrypoint: [/bin/sh, -ec]
-    command:
-      - >-
-        for attempt in $$(seq 1 30); do
-          if curl --fail --silent http://victorialogs:9428/health >/dev/null; then
-            exec sh tools/testing/go-modules.sh test -mod=readonly -json -race -p 1 -count=1 -timeout 10m ./...;
-          fi;
-          sleep 1;
-        done;
-        echo 'VictoriaLogs did not become ready' >&2; exit 1
+    command: ["sh", "tools/testing/go-modules.sh", "test", "-mod=readonly", "-json", "-race", "-p", "1", "-count=1", "-timeout", "10m", "./..."]

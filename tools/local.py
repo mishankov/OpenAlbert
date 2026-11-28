@@ -21,7 +21,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports/local"
-COMPONENTS = ("openalbert", "stt", "tts", "log-gateway", "minio", "minio-init", "backup")
+COMPONENTS = ("openalbert", "stt", "tts", "backup")
 COMMANDS = ("check", "test", "test:go", "test:computer", "test:backup", "test:web", "images", "verify", "publish", "reports")
 
 
@@ -183,13 +183,9 @@ class Run:
     def go(self):
         compose = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", "/dev/null", "-f", "deploy/compose.test.yaml", "-p", self.repository]
         try:
-            self.command("go-services", compose + ["up", "-d", "--wait", "--wait-timeout", "90", "postgres", "victorialogs"])
             self.command("go-race-integration", compose + ["run", "--build", "--rm", "go"], timeout=1800)
         finally:
-            try:
-                self.command("go-service-logs", compose + ["logs", "--no-color"], timeout=60)
-            finally:
-                self.command("go-cleanup", compose + ["down", "--volumes", "--remove-orphans", "--rmi", "local"], timeout=120)
+            self.command("go-cleanup", compose + ["down", "--volumes", "--remove-orphans", "--rmi", "local"], timeout=120)
 
     def computer(self):
         image = self.repository + ":computer-test"
@@ -230,14 +226,10 @@ class Run:
         images = {name: f"{self.repository}:{name}-{arch}" for name in COMPONENTS}
         self.data["images"][arch] = images
         self.save()
-        env["MINIO_SMOKE_IMAGE"] = images["minio"]
         for component, image in images.items():
             self.command(f"smoke-{component}-{arch}", ["bash", "tools/smoke/smoke-image.sh", component, image], env=env, timeout=900)
         if deployment:
-            args = [sys.executable, "tools/smoke/release-smoke.py"]
-            for component, image in images.items():
-                if component not in {"stt", "tts", "backup"}:
-                    args += ["--image", component + "=" + image]
+            args = [sys.executable, "tools/smoke/release-smoke.py", "--image", "openalbert=" + images["openalbert"]]
             self.command("deployment-" + arch, args, env=env, timeout=1200)
 
     def native_arch(self):

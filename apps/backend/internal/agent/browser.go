@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"go.temporal.io/sdk/activity"
-	"go.temporal.io/sdk/temporal"
 	"openalbert/apps/backend/internal/domain"
 )
 
@@ -121,26 +119,8 @@ func boundBrowserResult(out *domain.BrowserResult) {
 	}
 }
 func (a *Activities) BrowserToolCall(ctx context.Context, in ToolInput) (string, error) {
-	if activity.IsActivity(ctx) {
-		stop := make(chan struct{})
-		defer close(stop)
-		go func() {
-			ticker := time.NewTicker(3 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-stop:
-					return
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					activity.RecordHeartbeat(ctx)
-				}
-			}
-		}()
-	}
 	return a.ToolCall(ctx, in)
 }
 func browserCapacityError() error {
-	return temporal.NewApplicationErrorWithOptions("Browser capacity is occupied; waiting for a session to release a slot", "browser_capacity", temporal.ApplicationErrorOptions{NextRetryDelay: 5 * time.Second})
+	return domain.NewRetryableError("Browser capacity is occupied; waiting for a session to release a slot", "browser_capacity", 5*time.Second, nil)
 }

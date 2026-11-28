@@ -8,7 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -76,12 +76,8 @@ func TestAuthenticationAndOrigins(t *testing.T) {
 }
 func TestAPIContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { apiContract(t, storage.NewMemory()) })
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
-		}
-		repo, err := storage.Open(context.Background(), url)
+	t.Run("sqlite", func(t *testing.T) {
+		repo, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -11,22 +11,65 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"filippo.io/age"
 )
 
+const ManifestVersion = 2
+
 type Manifest struct {
-	Version              int               `json:"version"`
-	CreatedAt            time.Time         `json:"created_at"`
-	ComposeFile          string            `json:"compose_file"`
-	ModelConfigFile      string            `json:"model_config_file,omitempty"`
-	ModelCredentialsFile string            `json:"model_credentials_file,omitempty"`
-	Images               map[string]string `json:"images"`
+	Version              int       `json:"version"`
+	CreatedAt            time.Time `json:"created_at"`
+	ComposeFile          string    `json:"compose_file,omitempty"`
+	ModelConfigFile      string    `json:"model_config_file,omitempty"`
+	ModelCredentialsFile string    `json:"model_credentials_file,omitempty"`
 }
 
-func archive(ctx context.Context, c Config, output string, manifest Manifest) (err error) {
+// isTempBackupFile matches atomic-write temp files created by OpenAlbert's
+// knowledge, blob, and backup state writers so online backups never archive or
+// fail on in-flight temporary names.
+func isTempBackupFile(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasPrefix(name, ".openalbert-") ||
+		strings.HasPrefix(name, ".tmp-") ||
+		strings.HasSuffix(lower, ".tmp")
+}
+
+// inspectRelativePath checks each path segment below root top-down so a
+// symlinked parent directory is caught even if the leaf does not exist.
+func inspectRelativePath(root, rel string) (os.FileInfo, bool, error) {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	cur := root
+	for i, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return nil, false, errors.New("invalid relative backup path")
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, false, errors.New("backup inputs must be regular files or directories, not symlinks/devices")
+		}
+		if i < len(parts)-1 && !info.IsDir() {
+			return nil, false, errors.New("backup input parent is not a directory")
+		}
+		if i == len(parts)-1 {
+			return info, true, nil
+		}
+	}
+	return nil, false, errors.New("empty relative backup path")
+}
+
+func archive(ctx context.Context, c Config, snapshotPath, output string, manifest Manifest) (err error) {
+	if manifest.Version != ManifestVersion {
+		return errors.New("unsupported backup manifest version")
+	}
 	f, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
@@ -45,68 +88,216 @@ func archive(ctx context.Context, c Config, output string, manifest Manifest) (e
 	defer func() { err = errors.Join(err, gz.Close()) }()
 	tw := tar.NewWriter(gz)
 	defer func() { err = errors.Join(err, tw.Close()) }()
-	raw, _ := json.Marshal(manifest)
+
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
 	if err = tw.WriteHeader(&tar.Header{Name: "backup-manifest.json", Mode: 0600, Uid: os.Getuid(), Gid: os.Getgid(), Size: int64(len(raw)), ModTime: manifest.CreatedAt}); err != nil {
 		return err
 	}
 	if _, err = tw.Write(raw); err != nil {
 		return err
 	}
-	paths := []string{".env", c.ComposeFile, "container_data/postgres", "container_data/minio", "container_data/knowledge"}
-	if manifest.ModelCredentialsFile != "" {
-		if manifest.ModelCredentialsFile != "models.env" {
-			return errors.New("invalid model credentials archive path")
+
+	writeFile := func(rel, srcPath string, metaInfo os.FileInfo, optional bool) error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		paths = append(paths, manifest.ModelCredentialsFile)
-	}
-	if manifest.ModelConfigFile != "" {
-		if !validModelConfigPath(manifest.ModelConfigFile) {
-			return errors.New("invalid model configuration archive path")
+		var (
+			input *os.File
+			fInfo os.FileInfo
+		)
+		const maxOpenAttempts = 5
+		for attempt := range maxOpenAttempts {
+			lstatInfo, err := os.Lstat(srcPath)
+			if err != nil {
+				if optional && errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			if lstatInfo.Mode()&os.ModeSymlink != 0 || !lstatInfo.Mode().IsRegular() {
+				return errors.New("backup inputs must be regular files or directories, not symlinks/devices")
+			}
+			f, err := os.Open(srcPath)
+			if err != nil {
+				if optional && errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			info, statErr := f.Stat()
+			if statErr != nil {
+				return errors.Join(statErr, f.Close())
+			}
+			if !info.Mode().IsRegular() {
+				return errors.Join(errors.New("backup inputs must be regular files or directories, not symlinks/devices"), f.Close())
+			}
+			if os.SameFile(lstatInfo, info) {
+				input, fInfo = f, info
+				break
+			}
+			_ = f.Close()
+			if attempt == maxOpenAttempts-1 {
+				return errors.New("file changed repeatedly during archive")
+			}
 		}
-		paths = append(paths, manifest.ModelConfigFile)
+		headerInfo := metaInfo
+		if headerInfo == nil {
+			headerInfo = fInfo
+		}
+		h, err := tar.FileInfoHeader(headerInfo, "")
+		if err != nil {
+			return errors.Join(err, input.Close())
+		}
+		h.Name = filepath.ToSlash(rel)
+		h.Size = fInfo.Size()
+		h.ModTime = fInfo.ModTime()
+		if err = tw.WriteHeader(h); err != nil {
+			return errors.Join(err, input.Close())
+		}
+		written, copyErr := io.Copy(tw, &contextReader{ctx: ctx, r: input})
+		closeErr := input.Close()
+		if copyErr != nil || closeErr != nil {
+			return errors.Join(copyErr, closeErr)
+		}
+		if written != h.Size {
+			return errors.New("file size changed during archive")
+		}
+		return nil
 	}
-	if filepath.Base(c.ComposeFile) == "compose.local.yaml" {
-		paths = append(paths, "services/postgres/init.sql", "services/temporal/dynamicconfig.yaml")
+
+	// Archive data directory header and online SQLite snapshot (never the live DB or WAL/SHM files).
+	dataInfo, ok, err := inspectRelativePath(c.Root, "data")
+	if err != nil {
+		return err
 	}
-	if _, ok := manifest.Images["computer"]; ok {
-		paths = append(paths, "container_data/computer")
+	if !ok || !dataInfo.IsDir() {
+		return errors.New("required data directory is missing")
 	}
-	for _, name := range paths {
-		err = filepath.WalkDir(filepath.Join(c.Root, name), func(path string, entry fs.DirEntry, walkErr error) error {
+	dataHeader, err := tar.FileInfoHeader(dataInfo, "")
+	if err != nil {
+		return err
+	}
+	dataHeader.Name = "data"
+	if err = tw.WriteHeader(dataHeader); err != nil {
+		return err
+	}
+
+	origDBInfo, ok, err := inspectRelativePath(c.Root, "data/openalbert.db")
+	if err != nil {
+		return err
+	}
+	if !ok || !origDBInfo.Mode().IsRegular() {
+		return errors.New("required data/openalbert.db is missing")
+	}
+	if err = writeFile("data/openalbert.db", snapshotPath, origDBInfo, false); err != nil {
+		return err
+	}
+
+	walkDir := func(rel string, required bool) error {
+		info, exists, err := inspectRelativePath(c.Root, rel)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if required {
+				return errors.New("required backup directory is missing: " + rel)
+			}
+			return nil
+		}
+		if !info.IsDir() {
+			return errors.New("backup directory input is not a directory: " + rel)
+		}
+		rootDir := filepath.Join(c.Root, rel)
+		return filepath.WalkDir(rootDir, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
+				if path != rootDir && errors.Is(walkErr, os.ErrNotExist) {
+					return nil
+				}
 				return walkErr
 			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			// External tablespaces, symlinked data and device files require a different backup layout.
-			if info.Mode()&os.ModeSymlink != 0 || (!info.Mode().IsRegular() && !info.IsDir()) {
-				return errors.New("backup inputs must be regular files or directories, not symlinks/devices")
-			}
-			h, err := tar.FileInfoHeader(info, "")
-			if err != nil {
-				return err
-			}
-			h.Name, _ = filepath.Rel(c.Root, path)
-			h.Name = filepath.ToSlash(h.Name)
-			if err = tw.WriteHeader(h); err != nil {
-				return err
-			}
-			if info.IsDir() {
+			if !entry.IsDir() && isTempBackupFile(entry.Name()) {
 				return nil
 			}
-			input, err := os.Open(path)
+			fi, err := entry.Info()
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			if fi.Mode()&os.ModeSymlink != 0 || (!fi.Mode().IsRegular() && !fi.IsDir()) {
+				return errors.New("backup inputs must be regular files or directories, not symlinks/devices")
+			}
+			entryRel, err := filepath.Rel(c.Root, path)
 			if err != nil {
 				return err
 			}
-			_, err = io.Copy(tw, &contextReader{ctx: ctx, r: input})
-			return errors.Join(err, input.Close())
+			if fi.IsDir() {
+				h, err := tar.FileInfoHeader(fi, "")
+				if err != nil {
+					return err
+				}
+				h.Name = filepath.ToSlash(entryRel)
+				return tw.WriteHeader(h)
+			}
+			return writeFile(entryRel, path, nil, true)
 		})
+	}
+
+	if err = walkDir("data/knowledge", true); err != nil {
+		return err
+	}
+	if err = walkDir("data/artifacts", false); err != nil {
+		return err
+	}
+
+	archiveFile := func(rel string, required bool) error {
+		info, exists, err := inspectRelativePath(c.Root, rel)
 		if err != nil {
+			return err
+		}
+		if !exists {
+			if required {
+				return errors.New("required backup file is missing: " + rel)
+			}
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("backup file input must be a regular file: " + rel)
+		}
+		return writeFile(rel, filepath.Join(c.Root, rel), info, !required)
+	}
+
+	if err = archiveFile(".env", false); err != nil {
+		return err
+	}
+	if manifest.ModelCredentialsFile != "" {
+		if manifest.ModelCredentialsFile != "models.env" {
+			return errors.New("invalid model credentials archive path")
+		}
+		if err = archiveFile(manifest.ModelCredentialsFile, true); err != nil {
+			return err
+		}
+	}
+	if manifest.ModelConfigFile != "" {
+		if !validModelConfigPath(manifest.ModelConfigFile) {
+			return errors.New("invalid model configuration archive path")
+		}
+		if err = archiveFile(manifest.ModelConfigFile, true); err != nil {
+			return err
+		}
+	}
+	if manifest.ComposeFile != "" {
+		if !validComposeFile(manifest.ComposeFile) {
+			return errors.New("invalid compose archive path")
+		}
+		if err = archiveFile(manifest.ComposeFile, true); err != nil {
 			return err
 		}
 	}
@@ -125,7 +316,7 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	return r.r.Read(p)
 }
 
-// Restore only writes into a newly created directory. It never starts services.
+// Restore only writes into a newly created directory and verifies the restored SQLite snapshot.
 func Restore(ctx context.Context, encryptedPath, identityPath, destination string) (err error) {
 	if !filepath.IsAbs(destination) {
 		return errors.New("restore destination must be absolute")
@@ -176,9 +367,13 @@ func Restore(ctx context.Context, encryptedPath, identityPath, destination strin
 			return err
 		}
 		name := filepath.FromSlash(h.Name)
+		slashName := filepath.ToSlash(filepath.Clean(name))
 		target := filepath.Join(destination, name)
 		if filepath.IsAbs(name) || !within(destination, target) || target == destination || seen[target] {
 			return errors.New("unsafe or duplicate archive path")
+		}
+		if slashName == "data/openalbert.db-wal" || slashName == "data/openalbert.db-shm" {
+			return errors.New("archive must not contain live sqlite WAL/SHM files")
 		}
 		seen[target] = true
 		if h.Typeflag != tar.TypeDir && h.Typeflag != tar.TypeReg {
@@ -191,8 +386,8 @@ func Restore(ctx context.Context, encryptedPath, identityPath, destination strin
 			if err = os.MkdirAll(target, 0700); err != nil {
 				return err
 			}
-			copy := *h
-			directories = append(directories, &copy)
+			headerCopy := *h
+			directories = append(directories, &headerCopy)
 			continue
 		}
 		out, e := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
@@ -221,62 +416,45 @@ func Restore(ctx context.Context, encryptedPath, identityPath, destination strin
 		}
 	}
 	var m Manifest
-	if err = readJSON(filepath.Join(destination, "backup-manifest.json"), &m); err != nil || m.Version != 1 || !validComposeFile(m.ComposeFile) {
+	if err = readJSON(filepath.Join(destination, "backup-manifest.json"), &m); err != nil || m.Version != ManifestVersion {
 		return errors.New("missing or invalid restore manifest")
 	}
-	requiredPaths := []string{".env", m.ComposeFile, "container_data/postgres", "container_data/minio", "container_data/knowledge"}
+	if m.ComposeFile != "" {
+		if !validComposeFile(m.ComposeFile) {
+			return errors.New("invalid compose restore path")
+		}
+		if info, e := os.Lstat(filepath.Join(destination, m.ComposeFile)); e != nil || !info.Mode().IsRegular() {
+			return errors.New("restored compose file is missing or not a regular file")
+		}
+	}
 	if m.ModelCredentialsFile != "" {
 		if m.ModelCredentialsFile != "models.env" {
 			return errors.New("invalid model credentials restore path")
 		}
-		if info, e := os.Stat(filepath.Join(destination, m.ModelCredentialsFile)); e != nil || !info.Mode().IsRegular() {
+		if info, e := os.Lstat(filepath.Join(destination, m.ModelCredentialsFile)); e != nil || !info.Mode().IsRegular() {
 			return errors.New("restored model credentials are not a regular file")
 		}
-		requiredPaths = append(requiredPaths, m.ModelCredentialsFile)
 	}
 	if m.ModelConfigFile != "" {
 		if !validModelConfigPath(m.ModelConfigFile) {
 			return errors.New("invalid model configuration restore path")
 		}
-		requiredPaths = append(requiredPaths, m.ModelConfigFile)
-		if info, e := os.Stat(filepath.Join(destination, m.ModelConfigFile)); e != nil || !info.Mode().IsRegular() {
+		if info, e := os.Lstat(filepath.Join(destination, m.ModelConfigFile)); e != nil || !info.Mode().IsRegular() {
 			return errors.New("restored model configuration is not a regular file")
 		}
 	}
-	if _, ok := m.Images["computer"]; ok {
-		requiredPaths = append(requiredPaths, "container_data/computer")
+	dbPath := filepath.Join(destination, "data", "openalbert.db")
+	if info, e := os.Lstat(dbPath); e != nil || !info.Mode().IsRegular() {
+		return errors.New("incomplete backup archive: missing data/openalbert.db")
 	}
-	for _, required := range requiredPaths {
-		if required == "" || strings.Contains(required, "..") {
-			return errors.New("invalid restore manifest path")
-		}
-		if _, err = os.Stat(filepath.Join(destination, required)); err != nil {
-			return errors.New("incomplete backup archive")
-		}
+	knowledgePath := filepath.Join(destination, "data", "knowledge")
+	if info, e := os.Lstat(knowledgePath); e != nil || !info.IsDir() {
+		return errors.New("incomplete backup archive: missing data/knowledge")
 	}
-	services := map[string]map[string]any{}
-	for name, image := range m.Images {
-		services[name] = map[string]any{"image": image}
-	}
-	if m.ModelConfigFile != "" {
-		if services["openalbert"] == nil {
-			return errors.New("restore manifest has no application image")
-		}
-		// A configured absolute host path belongs to the original installation.
-		// Override only this bind so recovery is portable to a new directory.
-		services["openalbert"]["volumes"] = []map[string]any{{"type": "bind", "source": "./" + strings.ReplaceAll(filepath.ToSlash(m.ModelConfigFile), "$", "$$"), "target": "/etc/openalbert/models.toml", "read_only": true, "bind": map[string]bool{"create_host_path": false}}}
-	}
-	if len(services) == 0 {
-		return errors.New("restore manifest has no image digests")
-	}
-	if err = AtomicJSON(filepath.Join(destination, "compose.backup-images.json"), map[string]any{"services": services}); err != nil {
+	if err = verifySQLite(ctx, dbPath); err != nil {
 		return err
 	}
 	return nil
-}
-
-func validModelConfigPath(path string) bool {
-	return path != "" && !filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.Contains(path, "..") && filepath.Ext(path) == ".toml" && !strings.HasPrefix(filepath.ToSlash(path), "container_data/")
 }
 
 func restoreMetadata(path string, h *tar.Header) error {
@@ -284,10 +462,6 @@ func restoreMetadata(path string, h *tar.Header) error {
 		if err := os.Chown(path, h.Uid, h.Gid); err != nil {
 			return err
 		}
-	} else if st, err := os.Stat(path); err != nil {
-		return err
-	} else if stat, ok := st.Sys().(*syscall.Stat_t); ok && (int(stat.Uid) != h.Uid || int(stat.Gid) != h.Gid) {
-		return errors.New("restore requires root to preserve original ownership")
 	}
 	if err := os.Chmod(path, os.FileMode(h.Mode)&0777); err != nil {
 		return err

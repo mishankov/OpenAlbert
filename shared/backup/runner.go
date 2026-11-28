@@ -5,16 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,37 +18,18 @@ import (
 var validID = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$`)
 var ErrBusy = errors.New("another backup operation is running")
 
-type Command func(context.Context, string, ...string) ([]byte, error)
-
-func RunCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	out, err := exec.CommandContext(ctx, name, args...).Output()
-	// Docker errors can contain interpolated .env values. Never publish raw output.
-	if err != nil {
-		return nil, fmt.Errorf("%s command failed", filepath.Base(name))
-	}
-	return out, nil
-}
-
 type Runner struct {
-	Config      Config
-	Remote      Remote
-	Command     Command
-	HostRoot    string
-	ProjectName string
-	mu          sync.Mutex
-	state       State
+	Config Config
+	Remote Remote
+	mu     sync.Mutex
+	state  State
 }
 
-func (r *Runner) compose(ctx context.Context, args ...string) ([]byte, error) {
-	command := r.Command
-	if command == nil {
-		command = RunCommand
+func NewRunner(_ context.Context, c Config) (*Runner, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
 	}
-	base := []string{"compose", "--project-directory", r.Config.Root, "--env-file", filepath.Join(r.Config.Root, ".env"), "-f", filepath.Join(r.Config.Root, r.Config.ComposeFile)}
-	if r.ProjectName != "" {
-		base = append(base, "--project-name", r.ProjectName)
-	}
-	return command(ctx, "docker", append(base, args...)...)
+	return &Runner{Config: c}, nil
 }
 
 func (r *Runner) lock() (*os.File, error) {
@@ -86,7 +62,8 @@ func (r *Runner) save(phase, code string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.state.Phase, r.state.ErrorCode = phase, code
-	r.state.UpdatedAt, r.state.HeartbeatAt = time.Now().UTC(), time.Now().UTC()
+	now := time.Now().UTC()
+	r.state.UpdatedAt, r.state.HeartbeatAt = now, now
 	return AtomicJSON(filepath.Join(r.Config.StateDir, "status.json"), r.state)
 }
 
@@ -94,7 +71,10 @@ func (r *Runner) emit(kind, code string) error {
 	if err := publicDirectory(filepath.Join(r.Config.StateDir, "events")); err != nil {
 		return err
 	}
-	e := Event{ID: r.state.RunID + "-" + kind, RunID: r.state.RunID, Kind: kind, At: time.Now().UTC(), ErrorCode: code}
+	r.mu.Lock()
+	runID := r.state.RunID
+	r.mu.Unlock()
+	e := Event{ID: runID + "-" + kind, RunID: runID, Kind: kind, At: time.Now().UTC(), ErrorCode: code}
 	return AtomicJSON(filepath.Join(r.Config.StateDir, "events", e.ID+".json"), e)
 }
 
@@ -125,221 +105,174 @@ func (r *Runner) heartbeat(ctx context.Context, done chan<- struct{}) {
 	}
 }
 
-func (r *Runner) preflight(ctx context.Context) ([]string, Manifest, error) {
-	c := r.Config
-	var m Manifest
-	for _, input := range []string{c.Root, filepath.Join(c.Root, ".env"), filepath.Join(c.Root, c.ComposeFile)} {
-		info, err := os.Lstat(input)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 {
-			return nil, m, errors.New("backup inputs are missing or symlinked")
-		}
-	}
-	modelCredentials := ""
-	if info, err := os.Lstat(filepath.Join(c.Root, "models.env")); err == nil {
-		if !info.Mode().IsRegular() {
-			return nil, m, errors.New("model credentials must be a regular file without symlinks")
-		}
-		modelCredentials = "models.env"
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, m, errors.New("cannot inspect model credentials")
-	}
-	if err := os.MkdirAll(c.WorkDir, 0700); err != nil {
-		return nil, m, err
-	}
-	actualRoot, e := filepath.EvalSymlinks(c.Root)
-	if e != nil {
-		return nil, m, e
-	}
-	actualWork, e := filepath.EvalSymlinks(c.WorkDir)
-	if e != nil {
-		return nil, m, e
-	}
-	if within(actualRoot, actualWork) || within(actualWork, actualRoot) {
-		return nil, m, errors.New("staging directory resolves inside the installation")
-	}
-	if err := os.Chmod(c.WorkDir, 0700); err != nil {
-		return nil, m, err
-	}
-	raw, err := r.compose(ctx, "config", "--format", "json")
-	if err != nil {
-		return nil, m, err
-	}
-	var config struct {
-		Services map[string]struct {
-			Image   string                                  `json:"image"`
-			Volumes []struct{ Type, Source, Target string } `json:"volumes"`
-		} `json:"services"`
-	}
-	if err = json.Unmarshal(raw, &config); err != nil {
-		return nil, m, errors.New("cannot read Compose configuration")
-	}
-	modelConfig := ""
-	type dataMount struct{ path, target string }
-	expected := map[string][]dataMount{"postgres": {{"postgres", "/var/lib/postgresql/data"}}, "minio": {{"minio", "/data"}}, "openalbert": {{"knowledge", "/data/knowledge"}}}
-	if _, ok := config.Services["computer"]; ok && !c.ExcludeComputer {
-		expected["computer"] = []dataMount{{"computer/server", "/etc/openalbert-ssh"}, {"computer/home", "/home/albert"}, {"computer/workspace", "/workspace"}}
-		expected["openalbert"] = append(expected["openalbert"], dataMount{"computer/client", "/data/computer"})
-	}
-	var size int64
-	for service, mounts := range expected {
-		for _, mount := range mounts {
-			for path := filepath.Join(c.Root, "container_data", mount.path); path != c.Root; path = filepath.Dir(path) {
-				info, e := os.Lstat(path)
-				if e != nil || info.Mode()&os.ModeSymlink != 0 {
-					return nil, m, errors.New("backup data directories must not be symlinks")
-				}
-			}
-			found := false
-			for _, v := range config.Services[service].Volumes {
-				if v.Target == mount.target {
-					source := filepath.Clean(v.Source)
-					found = v.Type == "bind" && (source == filepath.Join(c.Root, "container_data", mount.path) || (r.HostRoot != "" && source == filepath.Join(r.HostRoot, "container_data", mount.path)))
-				}
-			}
-			if !found {
-				return nil, m, errors.New("unsupported data mounts; backup requires the standard container_data layout")
-			}
-			err = filepath.WalkDir(filepath.Join(c.Root, "container_data", mount.path), func(_ string, entry os.DirEntry, e error) error {
-				if e != nil {
-					return e
-				}
-				info, e := entry.Info()
-				if e != nil {
-					return e
-				}
-				if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
-					return errors.New("backup data contains unsupported links or special files")
-				}
-				size += info.Size()
-				return ctx.Err()
-			})
-			if err != nil {
-				return nil, m, err
-			}
-		}
-	}
-	var stat syscall.Statfs_t
-	if err = syscall.Statfs(c.WorkDir, &stat); err != nil {
-		return nil, m, err
-	}
-	if uint64(size)+(64<<20) > stat.Bavail*uint64(stat.Bsize) {
-		return nil, m, errors.New("insufficient staging disk space")
-	}
-	raw, err = r.compose(ctx, "ps", "--status", "running", "--services")
-	if err != nil {
-		return nil, m, err
-	}
-	running := withoutController(strings.Fields(string(raw)))
-	sort.Strings(running)
-	for _, required := range []string{"openalbert", "temporal", "postgres", "minio"} {
-		if !contains(running, required) {
-			return nil, m, errors.New("all four core services must be running before backup")
-		}
-	}
-	m = Manifest{Version: 1, CreatedAt: time.Now().UTC(), ComposeFile: c.ComposeFile, ModelCredentialsFile: modelCredentials, Images: map[string]string{}}
-	command := r.Command
-	if command == nil {
-		command = RunCommand
-	}
-	for name, service := range config.Services {
-		if name == ControllerService || (name == "computer" && c.ExcludeComputer) {
-			continue
-		}
-		if service.Image == "" {
-			return nil, m, errors.New("backup requires named images; build and tag local images first")
-		}
-		image := service.Image
-		// A mutable tag may have been pulled since the container was started.
-		ids, e := r.compose(ctx, "ps", "--all", "--quiet", name)
+func walkDirSize(ctx context.Context, dir string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, e error) error {
 		if e != nil {
-			return nil, m, e
-		}
-		if containers := strings.Fields(string(ids)); len(containers) > 0 {
-			if dataMounts, ok := expected[name]; ok {
-				mountJSON, e := command(ctx, "docker", "inspect", containers[0], "--format", "{{json .Mounts}}")
-				if e != nil {
-					return nil, m, e
-				}
-				var mounts []mount
-				if json.Unmarshal(mountJSON, &mounts) != nil {
-					return nil, m, errors.New("cannot inspect running data mounts")
-				}
-				if name == "openalbert" {
-					for _, volume := range mounts {
-						if volume.Destination != "/etc/openalbert/models.toml" {
-							continue
-						}
-						root := c.Root
-						if r.HostRoot != "" {
-							root = r.HostRoot
-						}
-						relative, e := filepath.Rel(root, filepath.Clean(volume.Source))
-						if e != nil || volume.Type != "bind" || !validModelConfigPath(relative) || modelConfig != "" {
-							return nil, m, errors.New("backup requires one TOML model configuration inside the installation")
-						}
-						for path := filepath.Join(c.Root, relative); path != c.Root; path = filepath.Dir(path) {
-							info, e := os.Lstat(path)
-							if e != nil || info.Mode()&os.ModeSymlink != 0 || (path == filepath.Join(c.Root, relative) && !info.Mode().IsRegular()) {
-								return nil, m, errors.New("model configuration is missing, symlinked or not a regular file")
-							}
-						}
-						modelConfig = relative
-					}
-					if modelConfig == "" {
-						return nil, m, errors.New("backup requires the application's TOML model configuration bind")
-					}
-				}
-				hostRoot := r.HostRoot
-				if hostRoot == "" {
-					hostRoot = c.Root
-				}
-				for _, data := range dataMounts {
-					found := false
-					for _, v := range mounts {
-						if v.Type == "bind" && v.Destination == data.target && filepath.Clean(v.Source) == filepath.Join(hostRoot, "container_data", data.path) {
-							found = true
-						}
-					}
-					if !found {
-						return nil, m, errors.New("running service data differs from the installation being backed up")
-					}
-				}
+			if path != dir && errors.Is(e, os.ErrNotExist) {
+				return nil
 			}
-			installed, e := command(ctx, "docker", "inspect", containers[0], "--format", "{{.Image}}")
-			if e != nil {
-				return nil, m, e
+			return e
+		}
+		if !entry.IsDir() && isTempBackupFile(entry.Name()) {
+			return nil
+		}
+		info, e := entry.Info()
+		if e != nil {
+			if errors.Is(e, os.ErrNotExist) {
+				return nil
 			}
-			image = strings.TrimSpace(string(installed))
-		} else if _, required := expected[name]; required {
-			return nil, m, errors.New("running core service container is missing")
+			return e
 		}
-		raw, err = command(ctx, "docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}")
-		if err != nil {
-			return nil, m, errors.New("cannot resolve installed image digest")
+		if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+			return errors.New("backup data contains unsupported links or special files")
 		}
-		var digests []string
-		if json.Unmarshal(raw, &digests) != nil || len(digests) == 0 {
-			return nil, m, errors.New("all images must have registry digests for portable restore; use published images")
+		if info.Mode().IsRegular() {
+			total += info.Size()
 		}
-		m.Images[name] = digests[0]
-	}
-	m.ModelConfigFile = modelConfig
-	return running, m, nil
+		return ctx.Err()
+	})
+	return total, err
 }
 
-func contains(values []string, value string) bool {
-	for _, v := range values {
-		if v == value {
-			return true
+func (r *Runner) preflight(ctx context.Context) (Manifest, error) {
+	c := r.Config
+	var m Manifest
+
+	rootInfo, err := os.Lstat(c.Root)
+	if err != nil || rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return m, errors.New("installation root is missing, symlinked, or not a directory")
+	}
+
+	if err := os.MkdirAll(c.WorkDir, 0700); err != nil {
+		return m, err
+	}
+	actualRoot, err := filepath.EvalSymlinks(c.Root)
+	if err != nil {
+		return m, err
+	}
+	actualWork, err := filepath.EvalSymlinks(c.WorkDir)
+	if err != nil {
+		return m, err
+	}
+	if within(actualRoot, actualWork) || within(actualWork, actualRoot) {
+		return m, errors.New("staging directory resolves inside the installation")
+	}
+	if err := os.Chmod(c.WorkDir, 0700); err != nil {
+		return m, err
+	}
+
+	dbInfo, ok, err := inspectRelativePath(c.Root, "data/openalbert.db")
+	if err != nil {
+		return m, err
+	}
+	if !ok || !dbInfo.Mode().IsRegular() {
+		return m, errors.New("required data/openalbert.db is missing or not a regular file")
+	}
+	dbSize := dbInfo.Size()
+	if walInfo, walErr := os.Lstat(filepath.Join(c.Root, "data", "openalbert.db-wal")); walErr == nil && walInfo.Mode().IsRegular() {
+		dbSize += walInfo.Size()
+	}
+
+	var otherSize int64
+	inspectDir := func(rel string, required bool) error {
+		info, exists, err := inspectRelativePath(c.Root, rel)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if required {
+				return errors.New("required backup directory is missing: " + rel)
+			}
+			return nil
+		}
+		if !info.IsDir() {
+			return errors.New("backup directory input is not a directory: " + rel)
+		}
+		sz, err := walkDirSize(ctx, filepath.Join(c.Root, rel))
+		if err != nil {
+			return err
+		}
+		otherSize += sz
+		return nil
+	}
+
+	if err := inspectDir("data/knowledge", true); err != nil {
+		return m, err
+	}
+	if err := inspectDir("data/artifacts", false); err != nil {
+		return m, err
+	}
+
+	inspectOptionalFile := func(rel string) (bool, error) {
+		info, exists, err := inspectRelativePath(c.Root, rel)
+		if err != nil {
+			return false, err
+		}
+		if !exists {
+			return false, nil
+		}
+		if !info.Mode().IsRegular() {
+			return false, errors.New("backup input must be a regular file without symlinks: " + rel)
+		}
+		otherSize += info.Size()
+		return true, nil
+	}
+
+	if _, err := inspectOptionalFile(".env"); err != nil {
+		return m, err
+	}
+
+	modelCredentials := ""
+	if ok, err := inspectOptionalFile("models.env"); err != nil {
+		return m, err
+	} else if ok {
+		modelCredentials = "models.env"
+	}
+
+	modelConfigTarget := c.ModelConfigFile
+	if modelConfigTarget == "" {
+		modelConfigTarget = "models.toml"
+	}
+	modelConfig := ""
+	if ok, err := inspectOptionalFile(modelConfigTarget); err != nil {
+		return m, err
+	} else if ok {
+		modelConfig = filepath.ToSlash(modelConfigTarget)
+	}
+
+	composeFile := ""
+	if c.ComposeFile != "" {
+		if ok, err := inspectOptionalFile(c.ComposeFile); err != nil {
+			return m, err
+		} else if ok {
+			composeFile = filepath.ToSlash(c.ComposeFile)
 		}
 	}
-	return false
+
+	// WorkDir holds both the SQLite snapshot and the encrypted archive before upload.
+	var requiredSpace uint64 = 64 << 20
+	if dbSize > 0 {
+		requiredSpace += uint64(dbSize) * 2
+	}
+	if otherSize > 0 {
+		requiredSpace += uint64(otherSize)
+	}
+	if err := checkDiskSpace(c.WorkDir, requiredSpace); err != nil {
+		return m, err
+	}
+
+	m = Manifest{
+		Version:              ManifestVersion,
+		CreatedAt:            time.Now().UTC(),
+		ComposeFile:          composeFile,
+		ModelConfigFile:      modelConfig,
+		ModelCredentialsFile: modelCredentials,
+	}
+	return m, nil
 }
 
 func (r *Runner) Create(ctx context.Context) (err error) {
-	if err = r.Recover(ctx); err != nil {
-		return err
-	}
 	lock, err := r.lock()
 	if err != nil {
 		return err
@@ -353,7 +286,11 @@ func (r *Runner) Create(ctx context.Context) (err error) {
 	if _, err = rand.Read(nonce[:]); err != nil {
 		return err
 	}
+	r.mu.Lock()
 	r.state.RunID = time.Now().UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(nonce[:])
+	runID := r.state.RunID
+	r.mu.Unlock()
+
 	code := "preflight_failed"
 	defer func() {
 		if err != nil {
@@ -368,17 +305,17 @@ func (r *Runner) Create(ctx context.Context) (err error) {
 	done := make(chan struct{})
 	go r.heartbeat(pulseCtx, done)
 	defer func() { cancel(); <-done }()
+
 	if r.Remote == nil {
 		r.Remote, err = NewS3(ctx, r.Config)
 		if err != nil {
 			return err
 		}
 	}
-	// Verify the remote before causing any downtime.
 	if _, err = r.Remote.List(ctx); err != nil {
 		return err
 	}
-	running, manifest, err := r.preflight(ctx)
+	manifest, err := r.preflight(ctx)
 	if err != nil {
 		return err
 	}
@@ -394,57 +331,34 @@ func (r *Runner) Create(ctx context.Context) (err error) {
 		case <-timer.C:
 		}
 	}
+
 	stage, err := os.MkdirTemp(r.Config.WorkDir, "run-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(stage)
+
+	snapshotPath := filepath.Join(r.Config.WorkDir, "snapshot-"+runID+".db")
+	defer os.Remove(snapshotPath)
+
+	code = "snapshot_failed"
+	if err = r.save("snapshotting", ""); err != nil {
+		return err
+	}
+	if err = snapshotSQLite(ctx, filepath.Join(r.Config.Root, "data", "openalbert.db"), snapshotPath); err != nil {
+		return err
+	}
+
 	path := filepath.Join(stage, "archive.tar.gz.age")
 	code = "local_copy_failed"
 	if err = r.save("copying", ""); err != nil {
 		return err
 	}
-	// Always attempt resumption, even if stop partially fails or the caller cancels.
-	resume := func() error {
-		cleanup, stop := context.WithTimeout(context.Background(), 4*time.Minute)
-		defer stop()
-		return r.resumeServices(cleanup, running)
-	}
-	stopped := true
-	if err = AtomicJSON(filepath.Join(r.Config.StateDir, "resume.json"), running); err != nil {
+	if err = archive(ctx, r.Config, snapshotPath, path, manifest); err != nil {
 		return err
 	}
-	defer func() {
-		if stopped {
-			resumeErr := resume()
-			if resumeErr == nil {
-				_ = os.Remove(filepath.Join(r.Config.StateDir, "resume.json"))
-			} else {
-				code = "restart_failed"
-			}
-			err = errors.Join(err, resumeErr)
-		}
-	}()
-	if _, err = r.compose(ctx, append([]string{"stop", "--timeout", "90"}, running...)...); err != nil {
-		return err
-	}
-	if remaining, e := r.compose(ctx, "ps", "--status", "running", "--services"); e != nil || len(withoutController(strings.Fields(string(remaining)))) != 0 {
-		return errors.New("services did not stop; refusing a live file copy")
-	}
-	if err = archive(ctx, r.Config, path, manifest); err != nil {
-		return err
-	}
-	code = "restart_failed"
-	if err = r.save("restarting", ""); err != nil {
-		return err
-	}
-	if err = resume(); err != nil {
-		return err
-	}
-	stopped = false
-	if err = os.Remove(filepath.Join(r.Config.StateDir, "resume.json")); err != nil {
-		return err
-	}
+	_ = os.Remove(snapshotPath)
+
 	code = "upload_failed"
 	if err = r.save("uploading", ""); err != nil {
 		return err
@@ -460,10 +374,18 @@ func (r *Runner) Create(ctx context.Context) (err error) {
 		return err
 	}
 	loc, _ := time.LoadLocation(r.Config.Timezone)
-	copy := Copy{ID: r.state.RunID, Day: manifest.CreatedAt.In(loc).Format("2006-01-02"), CreatedAt: manifest.CreatedAt, Key: r.Config.Prefix + "copies/" + r.state.RunID + "/archive.tar.gz.age", SHA256: hex.EncodeToString(hash.Sum(nil)), Size: size}
-	if err = r.Remote.Upload(ctx, copy, path); err != nil {
+	copyDesc := Copy{
+		ID:        runID,
+		Day:       manifest.CreatedAt.In(loc).Format("2006-01-02"),
+		CreatedAt: manifest.CreatedAt,
+		Key:       r.Config.Prefix + "copies/" + runID + "/archive.tar.gz.age",
+		SHA256:    hex.EncodeToString(hash.Sum(nil)),
+		Size:      size,
+	}
+	if err = r.Remote.Upload(ctx, copyDesc, path); err != nil {
 		return err
 	}
+
 	code = "rotation_failed"
 	copies, err := r.Remote.List(ctx)
 	if err != nil {
@@ -472,13 +394,13 @@ func (r *Runner) Create(ctx context.Context) (err error) {
 	// Never rotate unless the newly committed copy is visible in the inventory.
 	found := false
 	for _, c := range copies {
-		found = found || c.ID == copy.ID
+		found = found || c.ID == copyDesc.ID
 	}
 	if !found {
 		return errors.New("new backup is absent from verified inventory")
 	}
 	r.mu.Lock()
-	r.state.LastSuccess = &copy
+	r.state.LastSuccess = &copyDesc
 	r.state.Copies = copies
 	r.mu.Unlock()
 	for _, old := range Expired(copies, r.Config.KeepDays) {
@@ -507,7 +429,7 @@ func (r *Runner) Create(ctx context.Context) (err error) {
 	if err = r.emit("completed", ""); err != nil {
 		return err
 	}
-	// Bound the public event spool. Temporal owns already-started event executions.
+	// Bound the public event spool.
 	entries, _ := os.ReadDir(filepath.Join(r.Config.StateDir, "events"))
 	for _, entry := range entries {
 		if info, e := entry.Info(); e == nil && info.ModTime().Before(time.Now().AddDate(0, 0, -90)) {

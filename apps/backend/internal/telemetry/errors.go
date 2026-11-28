@@ -72,7 +72,7 @@ func Classify(err error) Diagnostic {
 			return known[code]
 		}
 	}
-	return Diagnostic{Code: "operation_failed", Reason: "Operation failed; inspect the associated workflow and stored result"}
+	return Diagnostic{Code: "operation_failed", Reason: "Operation failed; inspect the stored session trace and logs"}
 }
 
 func httpDiagnostic(code int) Diagnostic {
@@ -98,16 +98,16 @@ func httpDiagnostic(code int) Diagnostic {
 var known = map[string]Diagnostic{
 	"initiative_task_update_denied":  {Code: "initiative_task_update_denied", Reason: "Initiative checks cannot modify existing tasks"},
 	"logs_access_denied":             {Code: "logs_access_denied", Reason: "Log search requires the owner's private chat or its scheduled tasks"},
-	"logs_disabled":                  {Code: "logs_disabled", Reason: "VictoriaLogs read access is not configured"},
-	"logs_invalid_response":          {Code: "logs_invalid_response", Reason: "VictoriaLogs returned malformed data or data outside the authorized conversation"},
-	"logs_response_limit":            {Code: "logs_response_limit", Reason: "VictoriaLogs response exceeds the read limit or could not be read"},
+	"logs_disabled":                  {Code: "logs_disabled", Reason: "Operational log store is not configured"},
+	"logs_invalid_response":          {Code: "logs_invalid_response", Reason: "Operational log store returned malformed data or data outside the authorized conversation"},
+	"logs_response_limit":            {Code: "logs_response_limit", Reason: "Operational log query response exceeds the read limit or could not be read"},
 	"connection_failed":              {Code: "connection_failed", Reason: "Network connection to the upstream could not be established or maintained", Retryable: true},
 	"unsupported_content_type":       {Code: "unsupported_content_type", Reason: "Page reader received a format other than HTML or plain text; use the browser or an artifact reader"},
 	"response_too_large":             {Code: "response_too_large", Reason: "Upstream response exceeds the configured size limit"},
 	"response_read_failed":           {Code: "response_read_failed", Reason: "Upstream response body could not be read", Retryable: true},
 	"model_response_truncated":       {Code: "model_response_truncated", Reason: "Model response reached the provider token limit before completing"},
 	"invalid_model_response":         {Code: "invalid_model_response", Reason: "Model returned missing, empty or malformed content or tool calls"},
-	"model_response_too_large":       {Code: "model_response_too_large", Reason: "Model response exceeds the Activity payload limit"},
+	"model_response_too_large":       {Code: "model_response_too_large", Reason: "Model response exceeds the payload limit"},
 	"too_many_tool_calls":            {Code: "too_many_tool_calls", Reason: "Model requested more tool calls than one step permits"},
 	"browser_unavailable":            {Code: "browser_unavailable", Reason: "Chromium could not start or has stopped; open a new browser session"},
 	"browser_page_limit":             {Code: "browser_page_limit", Reason: "Browser has reached its page limit; close an unused page"},
@@ -150,13 +150,10 @@ var known = map[string]Diagnostic{
 var errorCodes = map[string]string{
 	"initiative checks cannot update existing tasks; read tasks or create a justified new task, and keep the check result in the run history": "initiative_task_update_denied",
 	"log search is only available in the owner's private chat or its scheduled tasks":                                                         "logs_access_denied",
-	"log search is disabled; VICTORIALOGS_URL is not configured":                                                                              "logs_disabled",
+	"log search is disabled; operational log store is not configured":                                                                         "logs_disabled",
 	"invalid log filters":                                                    "invalid_arguments",
 	"log timestamps must be RFC3339 with a timezone":                         "invalid_arguments",
 	"log time range must be positive and at most 24 hours":                   "invalid_arguments",
-	"invalid VictoriaLogs response":                                          "logs_invalid_response",
-	"VictoriaLogs response exceeds limit or could not be read":               "logs_response_limit",
-	"VictoriaLogs query failed":                                              "upstream_unavailable",
 	"web response is not HTML or plain text":                                 "unsupported_content_type",
 	"upstream body read failed":                                              "response_read_failed",
 	"upstream response exceeds size limit":                                   "response_too_large",

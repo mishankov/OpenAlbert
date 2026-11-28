@@ -12,10 +12,6 @@ import (
 	"github.com/mishankov/OpenAlbert/shared/backup"
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
-
-	"github.com/stretchr/testify/mock"
-	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/mocks"
 )
 
 func TestBackupEventRunsWithoutUserMessageAndQueuesFailureNotice(t *testing.T) {
@@ -37,9 +33,10 @@ func TestBackupEventRunsWithoutUserMessageAndQueuesFailureNotice(t *testing.T) {
 		}
 		return reply("Не удалось загрузить резервную копию в S3."), nil
 	}}
-	env := newEnv(a)
-	env.ExecuteWorkflow(BackupEventWorkflow, BackupEventInput{ConversationID: owner.ID, Event: backup.Event{ID: "run-failed", Kind: "failed", At: now}, MaxSteps: 3})
-	requireWorkflowOK(t, env)
+	r := &Runtime{Repo: repo, Activities: a, MaxSteps: 3, Clock: NewFakeClock(now)}
+	if err := r.RunBackupEvent(context.Background(), BackupEventInput{ConversationID: owner.ID, Event: backup.Event{ID: "run-failed", Kind: "failed", At: now}, MaxSteps: 3}); err != nil {
+		t.Fatal(err)
+	}
 	out, err := repo.PendingOutgoing(context.Background(), 10)
 	if err != nil || len(out) != 1 || out[0].Conversation.ID != owner.ID {
 		t.Fatalf("failure notification not queued: %+v %v", out, err)
@@ -63,18 +60,25 @@ func TestBackupDispatchDeduplicatesRestartsAndChoosesOwnerOnly(t *testing.T) {
 	if err := backup.AtomicJSON(filepath.Join(dir, "events", e.ID+".json"), e); err != nil {
 		t.Fatal(err)
 	}
-	cl := &mocks.Client{}
-	cl.On("ExecuteWorkflow", mock.Anything, mock.MatchedBy(func(o client.StartWorkflowOptions) bool { return strings.HasPrefix(o.ID, "backup-event/") }), mock.Anything, mock.MatchedBy(func(in BackupEventInput) bool { return in.ConversationID == owner.ID && in.Event.ID == e.ID })).Return(nil, nil).Once()
-	r := &Runtime{Repo: repo, Activities: a, Client: cl, MaxSteps: 3}
+	var dispatched []BackupEventInput
+	hook := &activityHooks{
+		dispatchBackup: func(in BackupEventInput) bool {
+			dispatched = append(dispatched, in)
+			return true
+		},
+	}
+	r := &Runtime{Repo: repo, Activities: a, MaxSteps: 3, hooks: hook}
 	if err := r.DispatchBackupEvents(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// A new runtime instance represents a process restart; its in-memory state is empty.
-	r = &Runtime{Repo: repo, Activities: a, Client: cl, MaxSteps: 3}
+	r = &Runtime{Repo: repo, Activities: a, MaxSteps: 3, hooks: hook}
 	if err := r.DispatchBackupEvents(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	cl.AssertExpectations(t)
+	if len(dispatched) != 1 || dispatched[0].ConversationID != owner.ID || dispatched[0].Event.ID != e.ID {
+		t.Fatalf("unexpected dispatched backup events: %+v", dispatched)
+	}
 	// Claiming dispatch is persisted separately from turn completion and inbox state.
 	raw, ok, err := repo.LoadCheckpoint(context.Background(), "backup-dispatch/"+agent.ID(owner.ID, e.ID))
 	if err != nil || !ok || string(raw) != string(json.RawMessage(`true`)) {
@@ -95,9 +99,18 @@ func TestBackupFailureAlertSurvivesModelOutageAndIsIdempotent(t *testing.T) {
 		return domain.Message{}, errors.New("model unavailable")
 	}}
 	event := backup.Event{ID: "outage", Kind: "failed", At: now}
-	env := newEnv(a)
-	env.ExecuteWorkflow(BackupEventWorkflow, BackupEventInput{ConversationID: owner.ID, Event: event, MaxSteps: 3})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(now)
+	r := &Runtime{Repo: repo, Activities: a, MaxSteps: 3, Clock: clk}
+	var runErr error
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		runErr = r.RunBackupEvent(context.Background(), BackupEventInput{ConversationID: owner.ID, Event: event, MaxSteps: 3})
+	}()
+	waitWithFakeClock(t, r, clk)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
 	for i := 0; i < 2; i++ {
 		if err := a.BackupAlert(context.Background(), agent.BackupAlertInput{ConversationID: owner.ID, Event: event}); err != nil {
 			t.Fatal(err)

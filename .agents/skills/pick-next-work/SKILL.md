@@ -32,3 +32,7 @@ For prioritization, return the recommendation and alternatives that would materi
 For an explicit choose-and-implement request, select within the user's constraints and continue without asking for the same authorization again. When `ship-pr` or `stage-pr` was requested, read that skill if available and pass it the selected item and handoff. If unavailable, report the missing skill instead of claiming to execute it. Leave implementation, review, and PR delivery to that workflow.
 
 Update selection/status records only when included in the requested workflow. Never infer merge authority merely from selecting or implementing an item.
+
+When genuinely blocked on a user decision, prefer the harness's structured interactive question tool so a user or orchestrator can answer it cleanly; if no question tool is available, start your final reply with the question.
+
+When the prompt or harness requests a structured output schema, submit the final handoff data matching that schema through the mechanism it specifies before ending the turn alongside your concise final reply (verdict or selected item, concise summary, PR URL, head SHA, or published artifact/revision if applicable, and any blocking question or open decisions). Never fabricate missing fields; use `null` or empty values per the schema when not applicable.

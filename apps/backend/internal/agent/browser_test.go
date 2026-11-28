@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"go.temporal.io/sdk/temporal"
 	"openalbert/apps/backend/internal/domain"
 	"strings"
 	"testing"
@@ -87,8 +86,7 @@ func TestBrowserCapacityRetriesWithoutCachingOrPerformingAnAction(t *testing.T) 
 	a.Browser = f
 	in := ToolInput{RunKey: "capacity", SessionID: "session", Conversation: conv, Call: domain.ToolCall{ID: "open", Name: "browser_open", Arguments: json.RawMessage(`{"url":"https://example.com"}`)}}
 	_, err := a.BrowserToolCall(context.Background(), in)
-	var capacity *temporal.ApplicationError
-	if !errors.As(err, &capacity) || capacity.Type() != "browser_capacity" {
+	if domain.ErrorCode(err) != "browser_capacity" || domain.IsNonRetryable(err) {
 		t.Fatal("capacity was cached as a tool error", err)
 	}
 	f.err = nil

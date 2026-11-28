@@ -106,10 +106,12 @@ func TestVoiceReplyWorkflow(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			env := newEnv(a)
-			env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: incomingID}) }, 0)
-			env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: tc.steps})
-			requireWorkflowOK(t, env)
+			clk := NewFakeClock(time.Now().UTC())
+			sessionRT := newTestRuntime(a, clk, time.Second, tc.steps)
+			if err := sessionRT.SignalSession(ctx, conv.ID, Event{ID: incomingID}); err != nil {
+				t.Fatal(err)
+			}
+			waitWithFakeClock(t, sessionRT, clk)
 
 			history, err := repo.ConversationHistory(ctx, conv.ID, "завтра в полдень", 0, 10)
 			if err != nil || len(history) != 1 || history[0].Content != answer || len(history[0].ToolCalls) != 1 || history[0].ToolCalls[0].Name != "send_voice" {

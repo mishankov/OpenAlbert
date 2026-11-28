@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 
-	"go.temporal.io/sdk/temporal"
+	"openalbert/apps/backend/internal/domain"
 )
 
 // AnalysisContextLimitErrorType is also the durable session failure code.
@@ -15,5 +15,5 @@ func (a *Activities) finishAnalysisContextFailure(ctx context.Context, sessionID
 	if err := a.Repo.MarkAnalysisFailed(ctx, sessionID, AnalysisContextLimitErrorType); err != nil {
 		return err
 	}
-	return temporal.NewNonRetryableApplicationError(ErrAnalysisContextLimit.Error(), AnalysisContextLimitErrorType, ErrAnalysisContextLimit)
+	return domain.NewNonRetryableError(ErrAnalysisContextLimit.Error(), AnalysisContextLimitErrorType, ErrAnalysisContextLimit)
 }

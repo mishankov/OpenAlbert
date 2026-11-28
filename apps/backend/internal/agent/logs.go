@@ -22,7 +22,7 @@ func (a *Activities) logSearchAccess(in ToolInput) error {
 		return errors.New("log search is only available in the owner's private chat or its scheduled tasks")
 	}
 	if a.Logs == nil {
-		return errors.New("log search is disabled; VICTORIALOGS_URL is not configured")
+		return errors.New("log search is disabled; operational log store is not configured")
 	}
 	return nil
 }

@@ -88,7 +88,7 @@ and background tasks retain their existing delivery behavior.
 
 `{"client_message_id":"<UUID>"}` → 202 `{"accepted":true}`.
 An idempotent stop command for the single conversation, dispatched through the
-existing workflow. It does not erase history or drafts.
+built-in orchestrator. It does not erase history or drafts.
 
 ### GET /api/v1/tasks
 
@@ -117,7 +117,7 @@ Voice recordings use the same upload and message routes: `voice-<UUID>.m4a`,
 `Content-Type: audio/mp4`, followed by POST messages with the returned attachment
 ID. The API identifies the M4A audio container even when the generic HTTP sniffer
 calls it `video/mp4`; malformed or video-containing data claimed as `audio/mp4`
-returns `invalid_request`. Uploaded audio reaches the existing STT workflow
+returns `invalid_request`. Uploaded audio reaches the existing STT pipeline
 without a Telegram download. The STT decoder enforces the real five-minute
 limit. Voice upload/POST retries preserve the same message UUID and uploaded ID.
 Public history contains attachment metadata, with audio bytes available only
@@ -142,7 +142,7 @@ Authenticated with the same `DESKTOP_API_TOKEN` Bearer header for `openalbert ac
 - `POST /api/v1/agent/tools/{name}` — executes an authorized owner server tool in owner scope and records its trace under `trigger="coding"`.
 - `POST /api/v1/coding/sessions` — registers a `coding:<session_id>` conversation and active session for Inspector.
 - `POST /api/v1/coding/sessions/{id}/sync` — idempotently persists coding messages (including nested Codemode `parent_tool_call_id` records) and local/MCP tool traces for Inspector.
-- `POST /api/v1/coding/sessions/{id}/close` — closes the coding session so post-session `AnalysisWorkflow` extracts durable user preferences/facts into `personal:<owner id>`.
+- `POST /api/v1/coding/sessions/{id}/close` — closes the coding session so post-session analysis extracts durable user preferences/facts into `personal:<owner id>`.
 
 ## Client behavior
 

@@ -1,16 +1,15 @@
 flowchart LR
-    accTitle: Доставка логов в VictoriaLogs
-    accDescr: Собственный код OpenAlbert формирует широкие события, инфраструктура пишет штатные логи, и все контейнеры отправляют потоки через logging driver в VictoriaLogs.
-    subgraph Containers["Контейнеры OpenAlbert"]
-        App["Go-компоненты<br/>Wide Events в JSON"]
-        Infra["Temporal · PostgreSQL<br/>и вспомогательные службы"]
-    end
-    Driver["Logging driver<br/>на Docker-хосте"]
-    Normalize["log-gateway<br/>service · level · turn_id<br/>Подтверждение после записи"]
-    Logs[("VictoriaLogs")]
-    Query["Диагностика по задаче,<br/>сессии и попытке"]
-    App -->|"stdout / stderr"| Driver
-    Infra -->|"stdout / stderr"| Driver
-    Driver -->|"Splunk HEC"| Normalize
-    Normalize -->|"JSON Lines"| Logs
-    Logs --> Query
+    accTitle: Хранение широких событий и вывод логов
+    accDescr: Go-приложение OpenAlbert формирует широкие события и одновременно пишет их во встроенную таблицу SQLite openalbert_logs и в stdout/stderr. Вспомогательные контейнеры пишут штатные логи в stdout/stderr под управлением Docker local driver.
+    App["OpenAlbert · Go<br/>Wide Events (slog · JSON)"]
+    Aux["Опциональные сервисы<br/>stt · tts · backup"]
+    SQLite[("SQLite · openalbert_logs<br/>Хранение 30 дней")]
+    Query["Диагностика<br/>logs_search · sqlite3"]
+    Stream["stdout / stderr<br/>Docker local driver · journald"]
+
+    App -->|"Синхронная запись"| SQLite
+    SQLite --> Query
+    App -->|"JSON Lines"| Stream
+    Aux -->|"stdout / stderr"| Stream
+    classDef optional fill:#f5f5f5,stroke:#999,stroke-dasharray:5 5,color:#666
+    class Aux optional

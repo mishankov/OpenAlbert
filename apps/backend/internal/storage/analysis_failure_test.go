@@ -49,11 +49,13 @@ func analysisFailureContract(t *testing.T, repo domain.Repository, nonce, scope 
 		stored, analyzed = r.sessions[session.ID], r.analyzed[session.ID]
 		r.mu.Unlock()
 	case *Store:
-		var raw []byte
-		if err := r.pool.QueryRow(ctx, "SELECT data,analyzed FROM openalbert_sessions WHERE id=$1", session.ID).Scan(&raw, &analyzed); err != nil {
+		var raw string
+		var analyzedInt int
+		if err := r.queryRow(ctx, "SELECT data, analyzed FROM openalbert_sessions WHERE id = ?1", session.ID).Scan(&raw, &analyzedInt); err != nil {
 			t.Fatal(err)
 		}
-		if err := json.Unmarshal(raw, &stored); err != nil {
+		analyzed = analyzedInt != 0
+		if err := json.Unmarshal([]byte(raw), &stored); err != nil {
 			t.Fatal(err)
 		}
 	default:

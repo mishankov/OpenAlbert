@@ -9,7 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -25,12 +25,8 @@ func TestT3APIContract(t *testing.T) {
 		mem := storage.NewMemory()
 		t3APIContract(t, mem, mem)
 	})
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL to test PostgreSQL persistence")
-		}
-		store, err := storage.Open(context.Background(), url)
+	t.Run("sqlite", func(t *testing.T) {
+		store, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -5,13 +5,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
-	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -19,14 +19,62 @@ import (
 	"filippo.io/age"
 )
 
+func createTestSQLiteDB(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	for _, stmt := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA synchronous=NORMAL",
+		"CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)",
+		"INSERT INTO notes (id, body) VALUES (1, 'Albert remembers'), (2, 'SQLite WAL mode')",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed sqlite %q: %v", stmt, err)
+		}
+	}
+}
+
 func fixture(t *testing.T) (Config, *age.X25519Identity) {
 	t.Helper()
 	key, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := Config{Root: filepath.Join(t.TempDir(), "installation"), WorkDir: t.TempDir(), ComposeFile: "compose.yaml", Enabled: true, Time: "03:00", Timezone: "Europe/Moscow", KeepDays: 2, Endpoint: "backup.example:9000", Bucket: "backups", Prefix: "instance/", Recipient: key.Recipient().String()}
-	for name, value := range map[string]string{".env": "TOKEN=never-publish-this-secret", "compose.yaml": "services: {}", "models.toml": "# synthetic model configuration", "container_data/postgres/PG_VERSION": "17", "container_data/minio/bucket/object": "artifact body", "container_data/knowledge/SOUL.md": "I am Albert", "container_data/stt/weights": "excluded", "container_data/victorialogs/log": "excluded", "container_data/backup-state/old": "excluded"} {
+	c := Config{
+		Root:        filepath.Join(t.TempDir(), "installation"),
+		WorkDir:     t.TempDir(),
+		ComposeFile: "compose.yaml",
+		Enabled:     true,
+		Time:        "03:00",
+		Timezone:    "Europe/Moscow",
+		KeepDays:    2,
+		Endpoint:    "backup.example:9000",
+		Bucket:      "backups",
+		Prefix:      "instance/",
+		Recipient:   key.Recipient().String(),
+	}
+	createTestSQLiteDB(t, filepath.Join(c.Root, "data", "openalbert.db"))
+	for name, value := range map[string]string{
+		".env":                            "TOKEN=never-publish-this-secret",
+		"compose.yaml":                    "services: {}",
+		"models.toml":                     "# synthetic model configuration",
+		"data/knowledge/SOUL.md":          "I am Albert",
+		"data/knowledge/.openalbert-123":  "in-flight knowledge temp",
+		"data/artifacts/blob.bin":         "artifact body",
+		"data/artifacts/inprogress.1.tmp": "in-flight artifact temp",
+		"data/chatgpt/oauth.json":         `{"token":"synthetic-oauth-token"}`,
+		"data/extra/excluded.txt":         "excluded",
+		"backup-state/old.json":           "excluded",
+		"unrelated-host-file.txt":         "excluded",
+	} {
 		path := filepath.Join(c.Root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			t.Fatal(err)
@@ -39,6 +87,98 @@ func fixture(t *testing.T) (Config, *age.X25519Identity) {
 		t.Fatal(err)
 	}
 	return c, key
+}
+
+func assertWorkDirEmpty(t *testing.T, workDir string) {
+	t.Helper()
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("work_dir not cleaned up: %v", names)
+	}
+}
+
+type memoryRemote struct {
+	mu        sync.Mutex
+	copies    []Copy
+	archives  map[string][]byte
+	uploadErr error
+	deleted   []string
+	onUpload  func()
+}
+
+func (m *memoryRemote) List(context.Context) ([]Copy, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]Copy(nil), m.copies...), nil
+}
+
+func (m *memoryRemote) Upload(ctx context.Context, c Copy, path string) error {
+	m.mu.Lock()
+	onUpload := m.onUpload
+	uploadErr := m.uploadErr
+	m.mu.Unlock()
+	if onUpload != nil {
+		onUpload()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if uploadErr != nil {
+		return uploadErr
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.archives == nil {
+		m.archives = map[string][]byte{}
+	}
+	m.archives[c.ID] = b
+	m.copies = append(m.copies, c)
+	return nil
+}
+
+func (*memoryRemote) Download(context.Context, Copy, string) error { return errors.New("unused") }
+
+func (m *memoryRemote) Delete(_ context.Context, c Copy) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleted = append(m.deleted, c.ID)
+	var kept []Copy
+	for _, old := range m.copies {
+		if old.ID != c.ID {
+			kept = append(kept, old)
+		}
+	}
+	m.copies = kept
+	return nil
+}
+
+func (m *memoryRemote) archiveBytes(id string) []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]byte(nil), m.archives[id]...)
+}
+
+func (m *memoryRemote) deletedIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.deleted...)
+}
+
+func (m *memoryRemote) seed(copies ...Copy) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copies = append(m.copies, copies...)
 }
 
 func TestArchiveEncryptedRestoreAndAuthentication(t *testing.T) {
@@ -54,23 +194,41 @@ func TestArchiveEncryptedRestoreAndAuthentication(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(c.Root, "models.env"), credentials, 0600); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "archive.age")
-	m := Manifest{Version: 1, CreatedAt: time.Now(), ComposeFile: c.ComposeFile, ModelConfigFile: modelConfigFile, ModelCredentialsFile: "models.env", Images: map[string]string{"openalbert": "registry/app@sha256:abc"}}
-	if err := archive(context.Background(), c, path, m); err != nil {
+	snapshotPath := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := snapshotSQLite(context.Background(), filepath.Join(c.Root, "data", "openalbert.db"), snapshotPath); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := os.ReadFile(path)
-	if bytes.Contains(data, []byte("never-publish")) || bytes.Contains(data, []byte("synthetic-analysis-secret")) || !bytes.HasPrefix(data, []byte("age-encryption.org/v1")) {
+	path := filepath.Join(t.TempDir(), "archive.age")
+	m := Manifest{
+		Version:              ManifestVersion,
+		CreatedAt:            time.Now().UTC(),
+		ComposeFile:          c.ComposeFile,
+		ModelConfigFile:      filepath.ToSlash(modelConfigFile),
+		ModelCredentialsFile: "models.env",
+	}
+	if err := archive(context.Background(), c, snapshotPath, path, m); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("never-publish")) || bytes.Contains(data, []byte("synthetic-analysis-secret")) || bytes.Contains(data, []byte("synthetic-oauth-token")) || !bytes.HasPrefix(data, []byte("age-encryption.org/v1")) {
 		t.Fatal("archive not encrypted")
 	}
 	identity := filepath.Join(t.TempDir(), "identity")
-	_ = os.WriteFile(identity, []byte(key.String()), 0600)
+	if err := os.WriteFile(identity, []byte(key.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
 	destination := filepath.Join(t.TempDir(), "restore")
 	if err := Restore(context.Background(), path, identity, destination); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{".env", modelConfigFile, "models.env", "compose.yaml", "container_data/postgres/PG_VERSION", "container_data/minio/bucket/object", "container_data/knowledge/SOUL.md"} {
-		want, _ := os.ReadFile(filepath.Join(c.Root, name))
+	for _, name := range []string{".env", modelConfigFile, "models.env", "compose.yaml", "data/knowledge/SOUL.md", "data/artifacts/blob.bin"} {
+		want, err := os.ReadFile(filepath.Join(c.Root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
 		got, err := os.ReadFile(filepath.Join(destination, name))
 		if err != nil || !bytes.Equal(want, got) {
 			t.Fatalf("restore %s: %v", name, err)
@@ -79,26 +237,19 @@ func TestArchiveEncryptedRestoreAndAuthentication(t *testing.T) {
 	if info, err := os.Stat(filepath.Join(destination, "models.env")); err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("model credential permissions were not retained: %v", err)
 	}
-	for _, name := range []string{"stt", "victorialogs", "backup-state"} {
-		if _, err := os.Stat(filepath.Join(destination, "container_data", name)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("restored excluded %s", name)
+	for _, excluded := range []string{"data/chatgpt", "data/extra", "data/knowledge/.openalbert-123", "data/artifacts/inprogress.1.tmp", "backup-state", "unrelated-host-file.txt", "data/openalbert.db-wal", "data/openalbert.db-shm"} {
+		if _, err := os.Lstat(filepath.Join(destination, excluded)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("restored excluded path %s: %v", excluded, err)
 		}
 	}
-	var overrides struct {
-		Services map[string]struct {
-			Volumes []struct {
-				Source   string `json:"source"`
-				Target   string `json:"target"`
-				ReadOnly bool   `json:"read_only"`
-			} `json:"volumes"`
-		} `json:"services"`
-	}
-	if err := readJSON(filepath.Join(destination, "compose.backup-images.json"), &overrides); err != nil {
+	db, err := sql.Open("sqlite", sqliteDSN(filepath.Join(destination, "data", "openalbert.db"), true))
+	if err != nil {
 		t.Fatal(err)
 	}
-	volumes := overrides.Services["openalbert"].Volumes
-	if len(volumes) != 1 || volumes[0].Source != "./config/provider$$BACKUP_MODEL.toml" || volumes[0].Target != "/etc/openalbert/models.toml" || !volumes[0].ReadOnly {
-		t.Fatalf("model configuration bind was not relocated for portable restore: %+v", volumes)
+	defer db.Close()
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM notes").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("restored sqlite rows: count=%d err=%v", count, err)
 	}
 	if err := Restore(context.Background(), path, identity, destination); err == nil {
 		t.Fatal("overwrote existing restore")
@@ -117,277 +268,510 @@ func TestArchiveEncryptedRestoreAndAuthentication(t *testing.T) {
 	}
 }
 
-func TestPreflightOptionalModelCredentials(t *testing.T) {
-	for _, scenario := range []string{"absent", "present", "symlink", "directory"} {
-		t.Run(scenario, func(t *testing.T) {
-			c, _ := fixture(t)
-			path := filepath.Join(c.Root, "models.env")
-			switch scenario {
-			case "present":
-				if err := os.WriteFile(path, []byte("ANALYSIS_LLM_API_KEY=synthetic-analysis-secret\n"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			case "symlink":
-				if err := os.Symlink(filepath.Join(c.Root, ".env"), path); err != nil {
-					t.Fatal(err)
-				}
-			case "directory":
-				if err := os.Mkdir(path, 0700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			var steps []string
-			_, manifest, err := (&Runner{Config: c, Command: fakeCommands(t, c, &steps, false, nil)}).preflight(context.Background())
-			if scenario == "absent" || scenario == "present" {
-				want := ""
-				if scenario == "present" {
-					want = "models.env"
-				}
-				if err != nil || manifest.ModelCredentialsFile != want {
-					t.Fatalf("optional model credentials: %q %v", manifest.ModelCredentialsFile, err)
-				}
-			} else if err == nil {
-				t.Fatal("nonregular model credentials accepted")
-			}
-		})
-	}
-}
-
-func TestPreflightModelConfigurationInsideInstallation(t *testing.T) {
-	for _, scenario := range []string{"nested", "host-root", "controller-root", "missing", "external", "symlink"} {
-		t.Run(scenario, func(t *testing.T) {
-			c, _ := fixture(t)
-			source := filepath.Join(c.Root, "config", "provider.toml")
-			if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(source, []byte("# synthetic TOML"), 0644); err != nil {
-				t.Fatal(err)
-			}
-			switch scenario {
-			case "missing":
-				if err := os.Remove(source); err != nil {
-					t.Fatal(err)
-				}
-			case "external":
-				source = filepath.Join(t.TempDir(), "outside.toml")
-			case "symlink":
-				if err := os.Remove(source); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(filepath.Join(c.Root, "models.toml"), source); err != nil {
-					t.Fatal(err)
-				}
-			}
-			hostRoot := ""
-			if scenario == "host-root" || scenario == "controller-root" {
-				hostRoot = "/host/openalbert-installation"
-				if scenario == "host-root" {
-					source = filepath.Join(hostRoot, "config", "provider.toml")
-				}
-			}
-			var steps []string
-			base := fakeCommands(t, c, &steps, false, nil)
-			command := func(ctx context.Context, name string, args ...string) ([]byte, error) {
-				raw, err := base(ctx, name, args...)
-				if err != nil || args[0] != "inspect" || args[len(args)-1] != "{{json .Mounts}}" {
-					return raw, err
-				}
-				if hostRoot != "" {
-					raw = []byte(strings.ReplaceAll(string(raw), c.Root, hostRoot))
-				}
-				if args[1] != "id-openalbert" {
-					return raw, nil
-				}
-				var mounts []mount
-				if err := json.Unmarshal(raw, &mounts); err != nil {
-					t.Fatal(err)
-				}
-				for i := range mounts {
-					if mounts[i].Destination == "/etc/openalbert/models.toml" {
-						mounts[i].Source = source
-					}
-				}
-				// The Compose render still points at the existing default models.toml.
-				// Only the running container knows the shell override used at startup.
-				return json.Marshal(mounts)
-			}
-			_, manifest, err := (&Runner{Config: c, Command: command, HostRoot: hostRoot}).preflight(context.Background())
-			if scenario == "nested" || scenario == "host-root" {
-				if err != nil || manifest.ModelConfigFile != filepath.Join("config", "provider.toml") {
-					t.Fatalf("nested model configuration: %+v %v", manifest, err)
-				}
-			} else if err == nil {
-				t.Fatal("unsafe or missing model configuration accepted")
-			}
-		})
-	}
-}
-
-func TestCheckoutArchiveRestoresComputerAndComposePaths(t *testing.T) {
+func TestArchiveSurvivesConcurrentAtomicKnowledgeRenames(t *testing.T) {
 	c, key := fixture(t)
-	c.ComposeFile = "deploy/compose.local.yaml"
-	if err := c.Validate(); err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Continuously atomically replace data/knowledge/SOUL.md using the writer's
+	// .openalbert-* temp-file + rename pattern while archiving.
+	knowledgeDir := filepath.Join(c.Root, "data", "knowledge")
+	target := filepath.Join(knowledgeDir, "SOUL.md")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ctx.Err() == nil; i++ {
+			tmp, err := os.CreateTemp(knowledgeDir, ".openalbert-*")
+			if err != nil {
+				return
+			}
+			_, _ = tmp.WriteString(fmt.Sprintf("version-%d\n", i))
+			_ = tmp.Close()
+			_ = os.Rename(tmp.Name(), target)
+		}
+	}()
+
+	for range 5 {
+		snapDir := t.TempDir()
+		snapshotPath := filepath.Join(snapDir, "openalbert.db")
+		if err := snapshotSQLite(ctx, filepath.Join(c.Root, "data", "openalbert.db"), snapshotPath); err != nil {
+			t.Fatal(err)
+		}
+		outPath := filepath.Join(t.TempDir(), "archive.tar.gz.age")
+		m := Manifest{Version: ManifestVersion, CreatedAt: time.Now().UTC(), ComposeFile: "compose.yaml"}
+		if err := archive(ctx, c, snapshotPath, outPath, m); err != nil {
+			cancel()
+			<-done
+			t.Fatalf("archive failed during concurrent atomic knowledge rename: %v", err)
+		}
+		idFile := filepath.Join(t.TempDir(), "id")
+		if err := os.WriteFile(idFile, []byte(key.String()), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := Restore(ctx, outPath, idFile, filepath.Join(t.TempDir(), "out")); err != nil {
+			cancel()
+			<-done
+			t.Fatalf("restore failed: %v", err)
+		}
+	}
+	cancel()
+	<-done
+}
+
+func TestRestorePreservesPermissionsNonRootDifferentUID(t *testing.T) {
+	c, key := fixture(t)
+	snapshotPath := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := snapshotSQLite(context.Background(), filepath.Join(c.Root, "data", "openalbert.db"), snapshotPath); err != nil {
 		t.Fatal(err)
 	}
-	files := map[string]string{
-		c.ComposeFile:                                    "services: {}",
-		"services/postgres/init.sql":                     "CREATE DATABASE temporal;",
-		"services/temporal/dynamicconfig.yaml":           "limit: 1",
-		"container_data/computer/client/id_ed25519":      "private test key",
-		"container_data/computer/server/authorized_keys": "public test key",
-		"container_data/computer/home/file.txt":          "home data",
-		"container_data/computer/workspace/result.txt":   "work data",
+	dbBytes, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for name, value := range files {
-		path := filepath.Join(c.Root, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	manifestBytes, err := json.Marshal(Manifest{Version: ManifestVersion, CreatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	enc, err := age.Encrypt(&buf, key.Recipient())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(enc)
+	tw := tar.NewWriter(gz)
+	now := time.Now().UTC().Truncate(time.Second)
+	entries := []struct {
+		header *tar.Header
+		body   []byte
+	}{
+		{&tar.Header{Name: "backup-manifest.json", Typeflag: tar.TypeReg, Mode: 0600, Uid: 65534, Gid: 65534, Size: int64(len(manifestBytes)), ModTime: now}, manifestBytes},
+		{&tar.Header{Name: "data", Typeflag: tar.TypeDir, Mode: 0755, Uid: 65534, Gid: 65534, ModTime: now}, nil},
+		{&tar.Header{Name: "data/openalbert.db", Typeflag: tar.TypeReg, Mode: 0600, Uid: 65534, Gid: 65534, Size: int64(len(dbBytes)), ModTime: now}, dbBytes},
+		{&tar.Header{Name: "data/knowledge", Typeflag: tar.TypeDir, Mode: 0755, Uid: 65534, Gid: 65534, ModTime: now}, nil},
+		{&tar.Header{Name: "data/knowledge/SOUL.md", Typeflag: tar.TypeReg, Mode: 0640, Uid: 65534, Gid: 65534, Size: int64(len("hello")), ModTime: now}, []byte("hello")},
+	}
+	for _, entry := range entries {
+		if err := tw.WriteHeader(entry.header); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
-			t.Fatal(err)
+		if len(entry.body) > 0 {
+			if _, err := tw.Write(entry.body); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
-	path := filepath.Join(t.TempDir(), "archive.age")
-	m := Manifest{Version: 1, CreatedAt: time.Now(), ComposeFile: c.ComposeFile, ModelConfigFile: "models.toml", Images: map[string]string{"computer": "registry/computer@sha256:abc", "openalbert": "registry/app@sha256:abc"}}
-	if err := archive(context.Background(), c, path, m); err != nil {
+	if err := errors.Join(tw.Close(), gz.Close(), enc.Close()); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "cross-uid.age")
+	if err := os.WriteFile(archivePath, buf.Bytes(), 0600); err != nil {
 		t.Fatal(err)
 	}
 	identity := filepath.Join(t.TempDir(), "identity")
 	if err := os.WriteFile(identity, []byte(key.String()), 0600); err != nil {
 		t.Fatal(err)
 	}
-	destination := filepath.Join(t.TempDir(), "restore")
-	if err := Restore(context.Background(), path, identity, destination); err != nil {
-		t.Fatal(err)
+	dest := filepath.Join(t.TempDir(), "restore")
+	if err := Restore(context.Background(), archivePath, identity, dest); err != nil {
+		t.Fatalf("non-root restore with different UID/GID failed: %v", err)
 	}
-	for name, want := range files {
-		got, err := os.ReadFile(filepath.Join(destination, name))
-		if err != nil || string(got) != want {
-			t.Fatalf("restore %s: %q, %v", name, got, err)
-		}
+	info, err := os.Stat(filepath.Join(dest, "data/knowledge/SOUL.md"))
+	if err != nil || info.Mode().Perm() != 0640 {
+		t.Fatalf("permissions not preserved: %v", err)
 	}
 }
 
-func TestRestoreRejectsTraversalAndLinks(t *testing.T) {
+func TestBareBinaryMinimalLayoutCreateAndRestore(t *testing.T) {
+	key, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "bare-install")
+	createTestSQLiteDB(t, filepath.Join(root, "data", "openalbert.db"))
+	if err := os.MkdirAll(filepath.Join(root, "data", "knowledge"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "data", "knowledge", "SOUL.md"), []byte("minimal"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{
+		Root:      root,
+		WorkDir:   t.TempDir(),
+		Enabled:   true,
+		Time:      "03:00",
+		Timezone:  "UTC",
+		KeepDays:  7,
+		Endpoint:  "backup.example:9000",
+		Bucket:    "backups",
+		Prefix:    "bare/",
+		Recipient: key.Recipient().String(),
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	remote := &memoryRemote{}
+	r, err := NewRunner(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Remote = remote
+	if err := r.Create(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertWorkDirEmpty(t, c.WorkDir)
+	s, err := (Reader{Dir: c.StateDir}).Read()
+	if err != nil || s.Phase != "completed" || s.LastSuccess == nil {
+		t.Fatalf("unexpected state: %+v %v", s, err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "archive.age")
+	if err := os.WriteFile(archivePath, remote.archiveBytes(s.LastSuccess.ID), 0600); err != nil {
+		t.Fatal(err)
+	}
+	identity := filepath.Join(t.TempDir(), "identity")
+	if err := os.WriteFile(identity, []byte(key.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "restore")
+	if err := Restore(context.Background(), archivePath, identity, dest); err != nil {
+		t.Fatal(err)
+	}
+	var m Manifest
+	if err := readJSON(filepath.Join(dest, "backup-manifest.json"), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Version != ManifestVersion || m.ComposeFile != "" || m.ModelConfigFile != "" || m.ModelCredentialsFile != "" {
+		t.Fatalf("unexpected manifest: %+v", m)
+	}
+	if got, err := os.ReadFile(filepath.Join(dest, "data", "knowledge", "SOUL.md")); err != nil || string(got) != "minimal" {
+		t.Fatalf("knowledge not restored: %q %v", got, err)
+	}
+}
+
+func TestPreflightOptionalFilesAndSymlinkRejection(t *testing.T) {
+	t.Run("models.env", func(t *testing.T) {
+		for _, scenario := range []string{"absent", "present", "symlink", "directory"} {
+			t.Run(scenario, func(t *testing.T) {
+				c, _ := fixture(t)
+				path := filepath.Join(c.Root, "models.env")
+				switch scenario {
+				case "present":
+					if err := os.WriteFile(path, []byte("KEY=val\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink":
+					if err := os.Symlink(filepath.Join(c.Root, ".env"), path); err != nil {
+						t.Fatal(err)
+					}
+				case "directory":
+					if err := os.Mkdir(path, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				m, err := (&Runner{Config: c}).preflight(context.Background())
+				if scenario == "absent" || scenario == "present" {
+					want := ""
+					if scenario == "present" {
+						want = "models.env"
+					}
+					if err != nil || m.ModelCredentialsFile != want {
+						t.Fatalf("optional model credentials: %q %v", m.ModelCredentialsFile, err)
+					}
+				} else if err == nil {
+					t.Fatal("nonregular model credentials accepted")
+				}
+			})
+		}
+	})
+
+	t.Run("model_config_file", func(t *testing.T) {
+		for _, scenario := range []string{"default", "nested", "missing", "symlink-file", "symlink-parent"} {
+			t.Run(scenario, func(t *testing.T) {
+				c, _ := fixture(t)
+				switch scenario {
+				case "nested":
+					c.ModelConfigFile = filepath.Join("config", "provider.toml")
+					target := filepath.Join(c.Root, c.ModelConfigFile)
+					if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(target, []byte("# nested"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				case "missing":
+					if err := os.Remove(filepath.Join(c.Root, "models.toml")); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink-file":
+					c.ModelConfigFile = filepath.Join("config", "provider.toml")
+					target := filepath.Join(c.Root, c.ModelConfigFile)
+					if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(filepath.Join(c.Root, "models.toml"), target); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink-parent":
+					c.ModelConfigFile = filepath.Join("config", "provider.toml")
+					if err := os.Symlink(t.TempDir(), filepath.Join(c.Root, "config")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := c.Validate(); err != nil {
+					t.Fatal(err)
+				}
+				m, err := (&Runner{Config: c}).preflight(context.Background())
+				switch scenario {
+				case "default":
+					if err != nil || m.ModelConfigFile != "models.toml" {
+						t.Fatalf("default model config: %+v %v", m, err)
+					}
+				case "nested":
+					if err != nil || m.ModelConfigFile != "config/provider.toml" {
+						t.Fatalf("nested model config: %+v %v", m, err)
+					}
+				case "missing":
+					if err != nil || m.ModelConfigFile != "" {
+						t.Fatalf("missing optional model config: %+v %v", m, err)
+					}
+				default:
+					if err == nil {
+						t.Fatalf("accepted symlinked model config (%s)", scenario)
+					}
+				}
+			})
+		}
+	})
+}
+
+func TestRestoreRejectsTraversalLinksWALAndCorruptDB(t *testing.T) {
 	_, key := fixture(t)
 	identity := filepath.Join(t.TempDir(), "key")
-	_ = os.WriteFile(identity, []byte(key.String()), 0600)
-	for _, h := range []*tar.Header{{Name: "../outside", Typeflag: tar.TypeReg, Size: 1, Mode: 0600}, {Name: "/absolute", Typeflag: tar.TypeReg, Size: 1, Mode: 0600}, {Name: "link", Typeflag: tar.TypeSymlink, Linkname: "/tmp"}} {
+	if err := os.WriteFile(identity, []byte(key.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeArchive := func(t *testing.T, items []struct {
+		h    *tar.Header
+		body []byte
+	}) string {
+		t.Helper()
 		var b bytes.Buffer
-		e, _ := age.Encrypt(&b, key.Recipient())
+		e, err := age.Encrypt(&b, key.Recipient())
+		if err != nil {
+			t.Fatal(err)
+		}
 		gz := gzip.NewWriter(e)
 		tw := tar.NewWriter(gz)
-		_ = tw.WriteHeader(h)
-		if h.Size > 0 {
-			_, _ = tw.Write([]byte("x"))
+		for _, item := range items {
+			if err := tw.WriteHeader(item.h); err != nil {
+				t.Fatal(err)
+			}
+			if len(item.body) > 0 {
+				if _, err := tw.Write(item.body); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
-		_ = tw.Close()
-		_ = gz.Close()
-		_ = e.Close()
+		if err := errors.Join(tw.Close(), gz.Close(), e.Close()); err != nil {
+			t.Fatal(err)
+		}
 		path := filepath.Join(t.TempDir(), "bad.age")
-		_ = os.WriteFile(path, b.Bytes(), 0600)
+		if err := os.WriteFile(path, b.Bytes(), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	for _, h := range []*tar.Header{
+		{Name: "../outside", Typeflag: tar.TypeReg, Size: 1, Mode: 0600},
+		{Name: "/absolute", Typeflag: tar.TypeReg, Size: 1, Mode: 0600},
+		{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "/tmp"},
+		{Name: "data/openalbert.db-wal", Typeflag: tar.TypeReg, Size: 1, Mode: 0600},
+	} {
+		var body []byte
+		if h.Size > 0 {
+			body = []byte("x")
+		}
+		path := writeArchive(t, []struct {
+			h    *tar.Header
+			body []byte
+		}{{h, body}})
 		if err := Restore(context.Background(), path, identity, filepath.Join(t.TempDir(), "restore")); err == nil {
 			t.Fatalf("accepted unsafe header %+v", h)
 		}
 	}
+
+	// Corrupt SQLite database must fail integrity check during Restore.
+	mBytes, _ := json.Marshal(Manifest{Version: ManifestVersion, CreatedAt: time.Now().UTC()})
+	corruptDB := []byte("not a sqlite database at all")
+	corruptArchive := writeArchive(t, []struct {
+		h    *tar.Header
+		body []byte
+	}{
+		{&tar.Header{Name: "backup-manifest.json", Typeflag: tar.TypeReg, Size: int64(len(mBytes)), Mode: 0600}, mBytes},
+		{&tar.Header{Name: "data/openalbert.db", Typeflag: tar.TypeReg, Size: int64(len(corruptDB)), Mode: 0600}, corruptDB},
+		{&tar.Header{Name: "data/knowledge", Typeflag: tar.TypeDir, Mode: 0755}, nil},
+	})
+	dest := filepath.Join(t.TempDir(), "restore-corrupt")
+	if err := Restore(context.Background(), corruptArchive, identity, dest); err == nil {
+		t.Fatal("accepted corrupt sqlite database")
+	}
+	if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("failed corrupt restore left destination directory")
+	}
+
+	// Manifest version 1 must be rejected.
+	v1Bytes, _ := json.Marshal(Manifest{Version: 1, CreatedAt: time.Now().UTC()})
+	v1Archive := writeArchive(t, []struct {
+		h    *tar.Header
+		body []byte
+	}{
+		{&tar.Header{Name: "backup-manifest.json", Typeflag: tar.TypeReg, Size: int64(len(v1Bytes)), Mode: 0600}, v1Bytes},
+	})
+	if err := Restore(context.Background(), v1Archive, identity, filepath.Join(t.TempDir(), "restore-v1")); err == nil {
+		t.Fatal("accepted v1 manifest")
+	}
 }
 
-func TestExcludeComputerCreateAndRestore(t *testing.T) {
+func TestCreateOnlineSnapshotUnderConcurrentWrites(t *testing.T) {
 	c, key := fixture(t)
-	c.ExcludeComputer = true
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	if err := AtomicJSON(configPath, c); err != nil {
+	dbPath := filepath.Join(c.Root, "data", "openalbert.db")
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath, false))
+	if err != nil {
 		t.Fatal(err)
 	}
-	var err error
-	if c, err = LoadConfig(configPath); err != nil || !c.ExcludeComputer {
-		t.Fatalf("cannot load computer exclusion: %v", err)
-	}
-	// Real virtual environments contain links; none of the computer tree should
-	// be inspected, archived or required at restore time when it is excluded.
-	home := filepath.Join(c.Root, "container_data/computer/home")
-	if err := os.MkdirAll(home, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(home, "private.txt"), []byte("computer-only data"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("/usr/bin/python3", filepath.Join(home, "python3")); err != nil {
-		t.Fatal(err)
-	}
-	var steps []string
-	base := fakeCommands(t, c, &steps, false, nil)
-	stoppedComputer := false
-	command := func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if args[0] == "inspect" && args[1] == "id-computer" && args[len(args)-1] != "{{json .State}}" {
-			t.Fatal("excluded computer image or mounts were inspected")
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	for _, stmt := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA synchronous=NORMAL",
+		"CREATE TABLE events (seq INTEGER PRIMARY KEY, payload TEXT NOT NULL)",
+		"CREATE TABLE audit (seq INTEGER PRIMARY KEY, note TEXT NOT NULL)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
 		}
-		if slices.Contains(args, "stop") {
-			stoppedComputer = slices.Contains(args, "computer")
-		}
-		out, err := base(ctx, name, args...)
+	}
+	const seedCount = 20
+	for i := 1; i <= seedCount; i++ {
+		tx, err := db.Begin()
 		if err != nil {
-			return out, err
+			t.Fatal(err)
 		}
-		if strings.Contains(strings.Join(args, " "), " config --format json") {
-			var config map[string]map[string]any
-			if err := json.Unmarshal(out, &config); err != nil {
-				t.Fatal(err)
+		if _, err := tx.Exec("INSERT INTO events (seq, payload) VALUES (?, ?)", i, fmt.Sprintf("seed-%d", i)); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec("INSERT INTO audit (seq, note) VALUES (?, ?)", i, fmt.Sprintf("audit-%d", i)); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stopWriter := make(chan struct{})
+	writerStarted := make(chan struct{})
+	writerDone := make(chan error, 1)
+	var committed int
+	go func() {
+		seq := seedCount
+		for {
+			select {
+			case <-stopWriter:
+				writerDone <- nil
+				return
+			default:
 			}
-			// A local computer without a registry digest or standard data mounts
-			// must not prevent an application-only backup.
-			config["services"]["computer"] = map[string]any{"image": "local/computer:latest"}
-			return json.Marshal(config)
+			seq++
+			tx, err := db.Begin()
+			if err != nil {
+				writerDone <- err
+				return
+			}
+			if _, err := tx.Exec("INSERT INTO events (seq, payload) VALUES (?, ?)", seq, fmt.Sprintf("live-%d", seq)); err != nil {
+				_ = tx.Rollback()
+				writerDone <- err
+				return
+			}
+			if _, err := tx.Exec("INSERT INTO audit (seq, note) VALUES (?, ?)", seq, fmt.Sprintf("audit-%d", seq)); err != nil {
+				_ = tx.Rollback()
+				writerDone <- err
+				return
+			}
+			if err := tx.Commit(); err != nil {
+				writerDone <- err
+				return
+			}
+			committed = seq
+			if seq == seedCount+1 {
+				close(writerStarted)
+			}
+			time.Sleep(time.Millisecond)
 		}
-		if strings.Contains(string(out), "openalbert\n") && slices.Contains(args, "--services") {
-			out = append(out, []byte("\ncomputer")...)
-		}
-		return out, nil
-	}
-	remote := &memoryRemote{archives: map[string][]byte{}}
-	r := &Runner{Config: c, Remote: remote, Command: command}
+	}()
+
+	<-writerStarted
+	remote := &memoryRemote{}
+	r := &Runner{Config: c, Remote: remote}
 	if err := r.Create(context.Background()); err != nil {
-		t.Fatal(err)
+		close(stopWriter)
+		<-writerDone
+		t.Fatalf("online Create failed during concurrent writes: %v", err)
 	}
-	if !stoppedComputer || strings.Join(steps, ",") != "stop,start" {
-		t.Fatal("computer exclusion changed the service stop/resume lifecycle")
+	close(stopWriter)
+	if err := <-writerDone; err != nil {
+		t.Fatalf("concurrent writer failed: %v", err)
 	}
+	if committed <= seedCount {
+		t.Fatalf("expected concurrent writes to advance beyond %d, got %d", seedCount, committed)
+	}
+	assertWorkDirEmpty(t, c.WorkDir)
+
 	s, err := (Reader{Dir: c.StateDir}).Read()
 	if err != nil || s.Phase != "completed" || s.LastSuccess == nil {
-		t.Fatalf("backup did not complete: %+v, %v", s, err)
+		t.Fatalf("unexpected backup state: %+v %v", s, err)
 	}
-	archivePath := filepath.Join(t.TempDir(), "archive.age")
-	if err := os.WriteFile(archivePath, remote.archives[s.LastSuccess.ID], 0600); err != nil {
+	archivePath := filepath.Join(t.TempDir(), "concurrent.age")
+	if err := os.WriteFile(archivePath, remote.archiveBytes(s.LastSuccess.ID), 0600); err != nil {
 		t.Fatal(err)
 	}
 	identity := filepath.Join(t.TempDir(), "identity")
 	if err := os.WriteFile(identity, []byte(key.String()), 0600); err != nil {
 		t.Fatal(err)
 	}
-	destination := filepath.Join(t.TempDir(), "restore")
-	if err := Restore(context.Background(), archivePath, identity, destination); err != nil {
+	dest := filepath.Join(t.TempDir(), "restored")
+	if err := Restore(context.Background(), archivePath, identity, dest); err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+	for _, wal := range []string{"data/openalbert.db-wal", "data/openalbert.db-shm"} {
+		if _, err := os.Lstat(filepath.Join(dest, wal)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unexpected WAL/SHM file in restore: %s", wal)
+		}
+	}
+
+	restoredDB, err := sql.Open("sqlite", sqliteDSN(filepath.Join(dest, "data", "openalbert.db"), true))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(filepath.Join(destination, "container_data/computer")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("excluded computer data restored: %v", err)
+	defer restoredDB.Close()
+	var check string
+	if err := restoredDB.QueryRow("PRAGMA integrity_check").Scan(&check); err != nil || check != "ok" {
+		t.Fatalf("restored DB integrity_check=%q err=%v", check, err)
 	}
-	var manifest Manifest
-	if err := readJSON(filepath.Join(destination, "backup-manifest.json"), &manifest); err != nil {
+	var eventCount, auditCount, mismatched int
+	if err := restoredDB.QueryRow("SELECT COUNT(*) FROM events").Scan(&eventCount); err != nil {
 		t.Fatal(err)
 	}
-	if _, exists := manifest.Images["computer"]; exists {
-		t.Fatal("excluded local computer image present in restore manifest")
+	if err := restoredDB.QueryRow("SELECT COUNT(*) FROM audit").Scan(&auditCount); err != nil {
+		t.Fatal(err)
 	}
-	for _, name := range []string{".env", "models.toml", c.ComposeFile, "container_data/postgres/PG_VERSION", "container_data/minio/bucket/object", "container_data/knowledge/SOUL.md"} {
-		want, err := os.ReadFile(filepath.Join(c.Root, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := os.ReadFile(filepath.Join(destination, name))
-		if err != nil || !bytes.Equal(want, got) {
-			t.Fatalf("application data not restored: %s: %v", name, err)
-		}
+	if err := restoredDB.QueryRow("SELECT COUNT(*) FROM events e LEFT JOIN audit a ON e.seq = a.seq WHERE a.seq IS NULL").Scan(&mismatched); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount < seedCount || eventCount != auditCount || mismatched != 0 {
+		t.Fatalf("inconsistent snapshot: events=%d audit=%d mismatched=%d", eventCount, auditCount, mismatched)
 	}
 }
 
@@ -403,172 +787,41 @@ func TestRetentionCountsSuccessfulDatesAndPreservesSameDayCopies(t *testing.T) {
 	}
 }
 
-type memoryRemote struct {
-	copies    []Copy
-	archives  map[string][]byte
-	uploadErr error
-	deleted   []string
-	onUpload  func()
-}
-
-func (m *memoryRemote) List(context.Context) ([]Copy, error) {
-	return append([]Copy(nil), m.copies...), nil
-}
-func (m *memoryRemote) Upload(_ context.Context, c Copy, path string) error {
-	if m.onUpload != nil {
-		m.onUpload()
-	}
-	if m.uploadErr != nil {
-		return m.uploadErr
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	m.archives[c.ID] = b
-	m.copies = append(m.copies, c)
-	return nil
-}
-func (*memoryRemote) Download(context.Context, Copy, string) error { return errors.New("unused") }
-func (m *memoryRemote) Delete(_ context.Context, c Copy) error {
-	m.deleted = append(m.deleted, c.ID)
-	var kept []Copy
-	for _, old := range m.copies {
-		if old.ID != c.ID {
-			kept = append(kept, old)
-		}
-	}
-	m.copies = kept
-	return nil
-}
-
-func fakeCommands(t *testing.T, c Config, steps *[]string, failStop bool, failArchive func()) Command {
-	t.Helper()
-	running := true
-	return func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		joined := strings.Join(args, " ")
-		if args[0] == "image" {
-			return []byte(`["registry/test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]`), nil
-		}
-		if args[0] == "inspect" {
-			if args[len(args)-1] == "{{json .State}}" {
-				return []byte(`{"Running":true,"Health":{"Status":"healthy"}}`), nil
-			}
-			if args[len(args)-1] == "{{.Image}}" {
-				return []byte("sha256:test-image"), nil
-			}
-			service := strings.TrimPrefix(args[1], "id-")
-			paths := map[string][]string{"postgres": {"postgres", "/var/lib/postgresql/data"}, "minio": {"minio", "/data"}, "openalbert": {"knowledge", "/data/knowledge"}}
-			if p, ok := paths[service]; ok {
-				mounts := []mount{{Type: "bind", Source: filepath.Join(c.Root, "container_data", p[0]), Destination: p[1]}}
-				if service == "openalbert" {
-					mounts = append(mounts, mount{Type: "bind", Source: filepath.Join(c.Root, "models.toml"), Destination: "/etc/openalbert/models.toml"})
-				}
-				return json.Marshal(mounts)
-			}
-			return []byte(`[]`), nil
-		}
-		if strings.Contains(joined, " config --format json") {
-			services := map[string]any{}
-			services[ControllerService] = map[string]any{} // No digest is required for the controller itself.
-			for name, v := range map[string][]string{"postgres": {"postgres", "/var/lib/postgresql/data"}, "minio": {"minio", "/data"}, "openalbert": {"knowledge", "/data/knowledge"}, "temporal": nil} {
-				s := map[string]any{"image": "registry/test:stable"}
-				if v != nil {
-					s["volumes"] = []map[string]string{{"Type": "bind", "Source": filepath.Join(c.Root, "container_data", v[0]), "Target": v[1]}}
-				}
-				if name == "openalbert" {
-					s["volumes"] = append(s["volumes"].([]map[string]string), map[string]string{"Type": "bind", "Source": filepath.Join(c.Root, "models.toml"), "Target": "/etc/openalbert/models.toml"})
-				}
-				services[name] = s
-			}
-			return json.Marshal(map[string]any{"services": services})
-		}
-		if strings.Contains(joined, " ps --all --quiet") {
-			var ids []string
-			for i, arg := range args {
-				if arg == "--quiet" {
-					for _, name := range args[i+1:] {
-						ids = append(ids, "id-"+name)
-					}
-					break
-				}
-			}
-			return []byte(strings.Join(ids, "\n")), nil
-		}
-		if strings.Contains(joined, " ps --status running --services") {
-			if running {
-				return []byte("openalbert\ntemporal\npostgres\nminio\nbackup"), nil
-			}
-			return []byte("backup"), nil
-		}
-		if strings.Contains(joined, " stop --timeout") {
-			for _, arg := range args {
-				if arg == ControllerService {
-					t.Fatal("backup controller stopped itself")
-				}
-			}
-			*steps = append(*steps, "stop")
-			running = false
-			if failArchive != nil {
-				failArchive()
-			}
-			if failStop {
-				return nil, errors.New("stop failed")
-			}
-			return nil, nil
-		}
-		if strings.Contains(joined, " start ") {
-			for _, arg := range args {
-				if arg == ControllerService {
-					t.Fatal("backup controller resumed itself")
-				}
-			}
-			*steps = append(*steps, "start")
-			running = true
-			return nil, nil
-		}
-		t.Fatalf("unexpected Docker command %s", joined)
-		return nil, nil
-	}
-}
-
-func TestCreateResumesBeforeUploadAndRotatesOnlyAfterSuccess(t *testing.T) {
-	for _, scenario := range []string{"success", "upload failure", "partial stop failure", "archive failure", "cancelled"} {
+func TestCreateRotatesOnlyAfterSuccessAndCleansWorkDir(t *testing.T) {
+	for _, scenario := range []string{"success", "upload failure", "cancelled", "corrupt db"} {
 		t.Run(scenario, func(t *testing.T) {
 			c, _ := fixture(t)
-			remote := &memoryRemote{archives: map[string][]byte{}, copies: []Copy{{ID: "old1", Day: "2020-01-01", CreatedAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)}, {ID: "old2", Day: "2020-01-02", CreatedAt: time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC)}}}
+			remote := &memoryRemote{
+				copies: []Copy{
+					{ID: "old1", Day: "2020-01-01", CreatedAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)},
+					{ID: "old2", Day: "2020-01-02", CreatedAt: time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC)},
+				},
+			}
 			if scenario == "upload failure" {
 				remote.uploadErr = errors.New("upload failed")
 			}
-			var steps []string
-			remote.onUpload = func() {
-				if strings.Join(steps, ",") != "stop,start" {
-					t.Fatal("upload before service resumption")
+			if scenario == "corrupt db" {
+				if err := os.WriteFile(filepath.Join(c.Root, "data", "openalbert.db"), []byte("corrupt-bytes"), 0600); err != nil {
+					t.Fatal(err)
 				}
-				steps = append(steps, "upload")
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			r := &Runner{Config: c, Remote: remote, Command: fakeCommands(t, c, &steps, scenario == "partial stop failure", func() {
-				if scenario == "archive failure" {
-					_ = os.Remove(filepath.Join(c.Root, ".env"))
-				}
-				if scenario == "cancelled" {
-					cancel()
-				}
-			})}
+			if scenario == "cancelled" {
+				remote.onUpload = cancel
+			}
+			r := &Runner{Config: c, Remote: remote}
 			err := r.Create(ctx)
 			if (err == nil) != (scenario == "success") {
-				t.Fatalf("unexpected result %v", err)
+				t.Fatalf("unexpected result: %v", err)
 			}
-			if !strings.HasPrefix(strings.Join(steps, ","), "stop,start") {
-				t.Fatalf("services not resumed: %v", steps)
-			}
+			assertWorkDirEmpty(t, c.WorkDir)
 			if scenario == "success" {
-				if len(remote.deleted) != 1 || remote.deleted[0] != "old1" {
-					t.Fatalf("wrong rotation %v", remote.deleted)
+				deleted := remote.deletedIDs()
+				if len(deleted) != 1 || deleted[0] != "old1" {
+					t.Fatalf("wrong rotation %v", deleted)
 				}
-			} else if len(remote.deleted) != 0 {
+			} else if len(remote.deletedIDs()) != 0 {
 				t.Fatal("rotated after failed backup")
 			}
 			s, err := (Reader{Dir: c.StateDir}).Read()
@@ -581,21 +834,29 @@ func TestCreateResumesBeforeUploadAndRotatesOnlyAfterSuccess(t *testing.T) {
 			if scenario != "success" && s.Phase != "failed" {
 				t.Fatalf("missing failure %+v", s)
 			}
+			if scenario == "corrupt db" && s.ErrorCode != "snapshot_failed" {
+				t.Fatalf("expected snapshot_failed, got %q", s.ErrorCode)
+			}
 			raw, _ := os.ReadFile(filepath.Join(c.StateDir, "status.json"))
 			if bytes.Contains(raw, []byte("never-publish")) {
 				t.Fatal("secret leaked into status")
-			}
-			if _, err := os.Stat(filepath.Join(c.StateDir, "resume.json")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("resume journal not cleared")
 			}
 		})
 	}
 }
 
-func TestStateFreshnessMonitorAndInterruptedServiceRecovery(t *testing.T) {
+func TestStateFreshnessMonitorAndDeduplication(t *testing.T) {
 	c, _ := fixture(t)
 	now := time.Now().UTC()
-	old := State{Version: 1, Enabled: true, Phase: "uploading", UpdatedAt: now.Add(-10 * time.Minute), HeartbeatAt: now.Add(-10 * time.Minute), NextRunAt: now.Add(time.Hour), RunID: "interrupted"}
+	old := State{
+		Version:     1,
+		Enabled:     true,
+		Phase:       "uploading",
+		UpdatedAt:   now.Add(-10 * time.Minute),
+		HeartbeatAt: now.Add(-10 * time.Minute),
+		NextRunAt:   now.Add(time.Hour),
+		RunID:       "interrupted",
+	}
 	if err := AtomicJSON(filepath.Join(c.StateDir, "status.json"), old); err != nil {
 		t.Fatal(err)
 	}
@@ -603,8 +864,7 @@ func TestStateFreshnessMonitorAndInterruptedServiceRecovery(t *testing.T) {
 	if s := reader.View(now); s.Phase != "unknown" || s.ErrorCode != "heartbeat_expired" {
 		t.Fatalf("stale phase reported as live %+v", s)
 	}
-	var steps []string
-	r := &Runner{Config: c, Command: fakeCommands(t, c, &steps, false, nil)}
+	r := &Runner{Config: c}
 	if err := r.Monitor(now); err != nil {
 		t.Fatal(err)
 	}
@@ -612,87 +872,17 @@ func TestStateFreshnessMonitorAndInterruptedServiceRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, err := reader.Events()
-	if err != nil || len(events) != 1 {
+	if err != nil || len(events) != 1 || events[0].Kind != "overdue" {
 		t.Fatalf("health event not deduplicated: %v %v", events, err)
 	}
-	if err := AtomicJSON(filepath.Join(c.StateDir, "resume.json"), []string{"openalbert", "postgres"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Recover(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(steps, ",") != "start" {
-		t.Fatal("interrupted services not recovered")
-	}
-	s, _ := reader.Read()
-	if s.Phase != "failed" || s.ErrorCode != "interrupted_backup" {
-		t.Fatalf("interrupted copy reported as success: %+v", s)
-	}
+	// Monitor must skip quietly while another operation holds the lock.
 	lock, err := r.lock()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	if err := r.Recover(context.Background()); !errors.Is(err, ErrBusy) {
-		t.Fatalf("concurrent recovery accepted: %v", err)
-	}
-}
-
-func TestRecoverValidatesServiceNames(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		services []string
-		valid    bool
-	}{
-		{"standard hyphenated services", []string{"openalbert", "log-gateway", "temporal-ui"}, true},
-		{"compose service characters", []string{"Service_1.test-2", "1worker"}, true},
-		{"empty journal", nil, false},
-		{"empty name", []string{""}, false},
-		{"controller", []string{ControllerService}, false},
-		{"option", []string{"--help"}, false},
-		{"leading hyphen", []string{"-worker"}, false},
-		{"leading dot", []string{".worker"}, false},
-		{"leading underscore", []string{"_worker"}, false},
-		{"path", []string{"../worker"}, false},
-		{"space", []string{"two workers"}, false},
-		{"tab", []string{"worker\tother"}, false},
-		{"newline", []string{"worker\nother"}, false},
-		{"carriage return", []string{"worker\rother"}, false},
-		{"nul", []string{"worker\x00"}, false},
-		{"invalid after valid", []string{"log-gateway", "--help"}, false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			c, _ := fixture(t)
-			journal := filepath.Join(c.StateDir, "resume.json")
-			if err := AtomicJSON(journal, tt.services); err != nil {
-				t.Fatal(err)
-			}
-			var steps, started []string
-			command := fakeCommands(t, c, &steps, false, nil)
-			r := &Runner{Config: c, Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-				if !tt.valid {
-					t.Fatalf("invalid journal triggered command: %s %q", name, args)
-				}
-				if i := slices.Index(args, "start"); i >= 0 {
-					started = append(started, args[i+1:]...)
-				}
-				return command(ctx, name, args...)
-			}}
-			err := r.Recover(context.Background())
-			if (err == nil) != tt.valid {
-				t.Fatalf("Recover() = %v, valid = %v", err, tt.valid)
-			}
-			if tt.valid {
-				if !slices.Equal(started, tt.services) || strings.Join(steps, ",") != "start" {
-					t.Fatalf("started %q with steps %q; want exactly %q", started, steps, tt.services)
-				}
-				if _, err := os.Stat(journal); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("resume journal not cleared: %v", err)
-				}
-			} else if _, err := os.Stat(journal); err != nil {
-				t.Fatalf("invalid journal not retained: %v", err)
-			}
-		})
+	if err := r.Monitor(now.Add(48 * time.Hour)); err != nil {
+		t.Fatalf("monitor failed while busy: %v", err)
 	}
 }
 
@@ -709,11 +899,34 @@ func TestScheduleAndConfigValidation(t *testing.T) {
 	if got := dst.NextRun(beforeGap).Format(time.RFC3339); got != "2026-03-09T02:30:00-04:00" {
 		t.Fatalf("scheduled nonexistent DST time: %s", got)
 	}
-	for _, change := range []func(*Config){func(c *Config) { c.KeepDays = 0 }, func(c *Config) { c.Time = "24:00" }, func(c *Config) { c.Timezone = "bad/zone" }, func(c *Config) { c.Prefix = "" }, func(c *Config) { c.WorkDir = c.Root }, func(c *Config) { c.Recipient = "private key" }} {
+	// Explicit external absolute state_dir and empty compose_file are allowed.
+	custom := c
+	custom.ComposeFile = ""
+	custom.StateDir = t.TempDir()
+	custom.ModelConfigFile = "config/models.toml"
+	if err := custom.Validate(); err != nil {
+		t.Fatalf("valid custom config rejected: %v", err)
+	}
+	for _, change := range []func(*Config){
+		func(c *Config) { c.KeepDays = 0 },
+		func(c *Config) { c.Time = "24:00" },
+		func(c *Config) { c.Timezone = "bad/zone" },
+		func(c *Config) { c.Prefix = "" },
+		func(c *Config) { c.WorkDir = c.Root },
+		func(c *Config) { c.StateDir = c.Root },
+		func(c *Config) { c.StateDir = filepath.Join(c.Root, "data", "state") },
+		func(c *Config) { c.StateDir = c.WorkDir },
+		func(c *Config) { c.StateDir = "relative-state" },
+		func(c *Config) { c.ComposeFile = "other.yaml" },
+		func(c *Config) { c.ModelConfigFile = "../outside.toml" },
+		func(c *Config) { c.ModelConfigFile = "data/models.toml" },
+		func(c *Config) { c.ModelConfigFile = "models.yaml" },
+		func(c *Config) { c.Recipient = "private key" },
+	} {
 		bad := c
 		change(&bad)
 		if bad.Validate() == nil {
-			t.Fatal("accepted invalid config")
+			t.Fatalf("accepted invalid config: %+v", bad)
 		}
 	}
 	output := t.TempDir()
@@ -725,26 +938,28 @@ func TestScheduleAndConfigValidation(t *testing.T) {
 		t.Fatalf("invalid timer %s %v", b, err)
 	}
 	b, _ = os.ReadFile(filepath.Join(output, "openalbert-backup.service"))
-	if bytes.Contains(b, []byte("SECRET")) || !bytes.Contains(b, []byte("EnvironmentFile=")) {
-		t.Fatal("unit credential handling")
+	if bytes.Contains(b, []byte("SECRET")) || !bytes.Contains(b, []byte("EnvironmentFile=")) || bytes.Contains(b, []byte("docker.service")) {
+		t.Fatalf("unexpected service unit: %s", b)
 	}
 }
 
-func TestInputsRejectSymlinksBeforeStopping(t *testing.T) {
-	for _, exclude := range []bool{false, true} {
-		t.Run(fmt.Sprintf("exclude_computer=%t", exclude), func(t *testing.T) {
+func TestInputsRejectSymlinks(t *testing.T) {
+	for _, target := range []string{"data/knowledge/outside", "data/artifacts/outside", "data/openalbert.db", ".env"} {
+		t.Run(target, func(t *testing.T) {
 			c, _ := fixture(t)
-			c.ExcludeComputer = exclude
-			if err := os.Symlink("/tmp", filepath.Join(c.Root, "container_data/knowledge/outside")); err != nil {
+			full := filepath.Join(c.Root, target)
+			_ = os.Remove(full)
+			if err := os.Symlink("/tmp", full); err != nil {
 				t.Fatal(err)
 			}
-			var steps []string
-			r := &Runner{Config: c, Command: fakeCommands(t, c, &steps, false, nil), Remote: &memoryRemote{}}
+			uploaded := false
+			remote := &memoryRemote{onUpload: func() { uploaded = true }}
+			r := &Runner{Config: c, Remote: remote}
 			if err := r.Create(context.Background()); err == nil {
-				t.Fatal("accepted external symlink")
+				t.Fatalf("accepted symlink at %s", target)
 			}
-			if len(steps) != 0 {
-				t.Fatal("caused downtime before discovering unsupported input")
+			if uploaded {
+				t.Fatal("uploaded despite symlinked input")
 			}
 		})
 	}
@@ -778,15 +993,11 @@ func TestStagingSymlinkCannotPutArchiveInsideSource(t *testing.T) {
 	if err := os.Remove(c.WorkDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(c.Root, "container_data/postgres"), c.WorkDir); err != nil {
+	if err := os.Symlink(filepath.Join(c.Root, "data"), c.WorkDir); err != nil {
 		t.Fatal(err)
 	}
-	var steps []string
-	r := &Runner{Config: c, Remote: &memoryRemote{}, Command: fakeCommands(t, c, &steps, false, nil)}
+	r := &Runner{Config: c, Remote: &memoryRemote{}}
 	if err := r.Create(context.Background()); err == nil {
 		t.Fatal("staging symlink resolved into backup source")
-	}
-	if len(steps) != 0 {
-		t.Fatal("stopped services before detecting recursive backup layout")
 	}
 }

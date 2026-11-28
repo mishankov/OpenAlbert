@@ -10,12 +10,110 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"go.temporal.io/sdk/activity"
 )
 
+type LogSink func(occurredAt time.Time, level, msg string, fields map[string]any)
+
 func New(w io.Writer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})).With("service", "openalbert", "log_schema_version", 4)
+	return NewWithSink(w, nil)
+}
+
+func NewWithSink(w io.Writer, sink LogSink) *slog.Logger {
+	var h slog.Handler = slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})
+	if sink != nil {
+		h = &sinkHandler{base: h, sink: sink}
+	}
+	return slog.New(h).With("service", "openalbert", "log_schema_version", 4)
+}
+
+type sinkEntry struct {
+	prefix string
+	attr   slog.Attr
+}
+
+type sinkHandler struct {
+	base    slog.Handler
+	sink    LogSink
+	entries []sinkEntry
+	groups  []string
+}
+
+func (h *sinkHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.base.Enabled(ctx, level)
+}
+
+func (h *sinkHandler) Handle(ctx context.Context, r slog.Record) error {
+	err := h.base.Handle(ctx, r)
+	if h.sink != nil {
+		fields := make(map[string]any, len(h.entries)+r.NumAttrs())
+		for _, e := range h.entries {
+			addSinkAttr(fields, e.prefix, e.attr)
+		}
+		prefix := strings.Join(h.groups, ".")
+		r.Attrs(func(a slog.Attr) bool {
+			addSinkAttr(fields, prefix, a)
+			return true
+		})
+		ts := r.Time
+		if ts.IsZero() {
+			ts = time.Now().UTC()
+		}
+		h.sink(ts.UTC(), r.Level.String(), r.Message, fields)
+	}
+	return err
+}
+
+func (h *sinkHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	prefix := strings.Join(h.groups, ".")
+	next := make([]sinkEntry, len(h.entries), len(h.entries)+len(attrs))
+	copy(next, h.entries)
+	for _, a := range attrs {
+		next = append(next, sinkEntry{prefix: prefix, attr: a})
+	}
+	groups := make([]string, len(h.groups))
+	copy(groups, h.groups)
+	return &sinkHandler{base: h.base.WithAttrs(attrs), sink: h.sink, entries: next, groups: groups}
+}
+
+func (h *sinkHandler) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+	entries := make([]sinkEntry, len(h.entries))
+	copy(entries, h.entries)
+	groups := make([]string, len(h.groups), len(h.groups)+1)
+	copy(groups, h.groups)
+	groups = append(groups, name)
+	return &sinkHandler{base: h.base.WithGroup(name), sink: h.sink, entries: entries, groups: groups}
+}
+
+func addSinkAttr(dst map[string]any, prefix string, a slog.Attr) {
+	a.Value = a.Value.Resolve()
+	if a.Equal(slog.Attr{}) {
+		return
+	}
+	if a.Value.Kind() == slog.KindGroup {
+		subPrefix := prefix
+		if a.Key != "" {
+			if subPrefix != "" {
+				subPrefix += "." + a.Key
+			} else {
+				subPrefix = a.Key
+			}
+		}
+		for _, child := range a.Value.Group() {
+			addSinkAttr(dst, subPrefix, child)
+		}
+		return
+	}
+	if a.Key == "" {
+		return
+	}
+	key := a.Key
+	if prefix != "" {
+		key = prefix + "." + key
+	}
+	dst[key] = a.Value.Any()
 }
 
 type Event struct {
@@ -45,13 +143,6 @@ func Start(ctx context.Context, logger *slog.Logger, operation string) *Event {
 		for k, v := range fields {
 			e.fields[k] = v
 		}
-	}
-	if activity.IsActivity(ctx) {
-		info := activity.GetInfo(ctx)
-		e.fields["workflow_id"] = info.WorkflowExecution.ID
-		e.fields["workflow_run_id"] = info.WorkflowExecution.RunID
-		e.fields["activity_id"] = info.ActivityID
-		e.fields["attempt"] = info.Attempt
 	}
 	return e
 }

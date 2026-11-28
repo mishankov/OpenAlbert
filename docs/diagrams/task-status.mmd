@@ -4,7 +4,7 @@ sequenceDiagram
     actor User as Пользователь
     participant Old as Вчера: Telegram
     participant Tasks as Задачи
-    participant BG as Workflow задачи
+    participant BG as Фоновый запуск задачи
     participant New as Сегодня: Telegram
     User->>Old: Следи за билетами
     Old->>Tasks: Создать задачу

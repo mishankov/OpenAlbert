@@ -118,18 +118,6 @@ const state = {
   searchBusy: false,
 };
 const main = $("#main");
-const logsURL = new URL(location.href);
-logsURL.port = "9428";
-logsURL.pathname = "/select/vmui/";
-logsURL.search = "";
-logsURL.hash = "/?" + new URLSearchParams({
-  // Legacy UI access logs have status/latency and an incorrectly inferred
-  // ERROR level (from the JSON key "error"). Match HTTP facts before severity.
-  query: 'NOT service:temporal-ui OR http_status:>=400 OR status:>=400 OR duration_ms:>=1000 OR latency:>=1000000000 OR http_error:true OR NOT error:"" OR (status:"" level:in(warn,error,fatal))',
-  "g0.range_input": "1h",
-  "g0.relative_time": "last_1_hour",
-});
-$("#nav-logs").href = logsURL.href;
 const artifactURL = (artifact) =>
   `/api/inspect/artifact?${new URLSearchParams({ conversation_id: artifact.conversation_id, id: artifact.id })}`;
 async function api(path) {
@@ -162,7 +150,6 @@ function setBusy(value) {
     state.searchBusy;
   $("#refresh").disabled = anyBusy;
   $("#refresh").setAttribute("aria-busy", String(anyBusy));
-  $("#nav-logs").setAttribute("aria-disabled", String(anyBusy));
 }
 function listRender() {
   const focusedHref = $("#sessions").contains(document.activeElement)
@@ -1475,7 +1462,7 @@ const fileDate = (value) =>
   });
 function fileShell() {
   document.title = "Файлы · OpenAlbert Inspector";
-  main.innerHTML = `<div class="session-toolbar files-toolbar"><div class="session-heading"><h2>Файлы MinIO</h2><span id="file-bucket" class="mono muted"></span><span class="files-order">По дате изменения ↓ · сначала новые</span></div><label for="file-prefix">Префикс ключа</label><div class="search-wrap"><input id="file-prefix" type="search" placeholder="Например, artifacts/" autocomplete="off" value="${esc(state.filePrefix)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></div><div id="files-error" role="alert" class="error hidden"></div><div id="files-list" aria-busy="true"><div class="loading-line" role="status">Загружаем файлы…</div></div><div class="pagination"><span id="files-count" role="status"></span><button id="more-files" class="button hidden" title="Загрузить ещё файлы · Enter" aria-keyshortcuts="Enter">Ещё файлы</button></div>`;
+  main.innerHTML = `<div class="session-toolbar files-toolbar"><div class="session-heading"><h2>Файлы</h2><span id="file-bucket" class="mono muted"></span><span class="files-order">По дате изменения ↓ · сначала новые</span></div><label for="file-prefix">Префикс ключа</label><div class="search-wrap"><input id="file-prefix" type="search" placeholder="Например, artifacts/" autocomplete="off" value="${esc(state.filePrefix)}" aria-keyshortcuts="Meta+K Control+K"><kbd>${navigator.platform?.includes("Mac") ? "⌘ K" : "Ctrl K"}</kbd></div></div><div id="files-error" role="alert" class="error hidden"></div><div id="files-list" aria-busy="true"><div class="loading-line" role="status">Загружаем файлы…</div></div><div class="pagination"><span id="files-count" role="status"></span><button id="more-files" class="button hidden" title="Загрузить ещё файлы · Enter" aria-keyshortcuts="Enter">Ещё файлы</button></div>`;
   if (state.files.length) renderFiles();
 }
 
@@ -1934,7 +1921,7 @@ function renderSearchLimits(report, preserveUI = false) {
     </div>
   </div>`;
 
-  const footnote = `<p class="search-footnote">Расход рассчитывается локально по полю <code>costDollars.total</code> из ответов Exa, сохранённых этой инсталляцией OpenAlbert в PostgreSQL (кэшированные повторы Temporal не дублируются). Запросы тем же API-ключом вне OpenAlbert и разовый бонус регистрации ($10) здесь не учитываются — точный остаток аккаунта доступен в <a data-search-focus="billing-footnote" href="${esc(rt.billing_url || "https://dashboard.exa.ai/billing")}" target="_blank" rel="noopener noreferrer">Exa Billing Dashboard</a>.</p>`;
+  const footnote = `<p class="search-footnote">Расход рассчитывается локально по полю <code>costDollars.total</code> из ответов Exa, сохранённых этой инсталляцией OpenAlbert в SQLite (кэшированные повторы не дублируются). Запросы тем же API-ключом вне OpenAlbert и разовый бонус регистрации ($10) здесь не учитываются — точный остаток аккаунта доступен в <a data-search-focus="billing-footnote" href="${esc(rt.billing_url || "https://dashboard.exa.ai/billing")}" target="_blank" rel="noopener noreferrer">Exa Billing Dashboard</a>.</p>`;
 
   body.innerHTML = `<div class="analytics-root">
     ${alertBanner}
@@ -2181,17 +2168,6 @@ function closeDrawer(clearRoute = true) {
   }
 }
 $("#refresh").addEventListener("click", refresh);
-$("#nav-logs").addEventListener("click", (event) => {
-  if (
-    state.busy ||
-    state.fileBusy ||
-    state.memoryBusy ||
-    state.memoryStatsBusy ||
-    state.soulBusy ||
-    state.searchBusy
-  )
-    event.preventDefault();
-});
 $("#more-sessions").addEventListener("click", () => loadList(true));
 let debounce;
 $("#search").addEventListener("input", () => {
@@ -2382,7 +2358,7 @@ document.addEventListener("keydown", (event) => {
   if (event.isComposing || event.keyCode === 229 || event.repeat) {
     if (
       (event.key === "Enter" || event.key === " ") &&
-      event.target.closest("button,summary,#download-file,#nav-logs,#nav-memory,#nav-search,#show-other-tools")
+      event.target.closest("button,summary,#download-file,#nav-memory,#nav-search,#show-other-tools")
     )
       event.preventDefault();
     return;
@@ -2448,24 +2424,6 @@ document.addEventListener("keydown", (event) => {
     }
     $("#search").focus();
     $("#search").select();
-  }
-  if (
-    event.altKey &&
-    !event.metaKey &&
-    !event.ctrlKey &&
-    !event.shiftKey &&
-    event.code === "KeyL"
-  ) {
-    event.preventDefault();
-    if (
-      !state.busy &&
-      !state.fileBusy &&
-      !state.memoryBusy &&
-      !state.memoryStatsBusy &&
-      !state.soulBusy &&
-      !state.searchBusy
-    )
-      $("#nav-logs").click();
   }
   if (
     state.view === "search" &&

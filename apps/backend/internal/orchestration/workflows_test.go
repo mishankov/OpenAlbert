@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,20 +16,7 @@ import (
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/knowledge"
 	"openalbert/apps/backend/internal/storage"
-
-	"go.temporal.io/sdk/activity"
-	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/temporal"
-	"go.temporal.io/sdk/testsuite"
-	"go.temporal.io/sdk/workflow"
 )
-
-type quietLogger struct{}
-
-func (quietLogger) Debug(string, ...any) {}
-func (quietLogger) Info(string, ...any)  {}
-func (quietLogger) Warn(string, ...any)  {}
-func (quietLogger) Error(string, ...any) {}
 
 type scriptedModel struct {
 	mu    sync.Mutex
@@ -83,6 +71,7 @@ func (fakeMessenger) SendFile(context.Context, domain.Conversation, string, []by
 	return "file", nil
 }
 func (fakeMessenger) Download(context.Context, string) ([]byte, error) { return nil, nil }
+
 func newFixture(t *testing.T) (*agent.Activities, *storage.Memory, *knowledge.Store, domain.Conversation) {
 	t.Helper()
 	repo := storage.NewMemory()
@@ -96,14 +85,21 @@ func newFixture(t *testing.T) (*agent.Activities, *storage.Memory, *knowledge.St
 	}
 	return &agent.Activities{Repo: repo, Knowledge: know, Search: fakeSearch{}, Messenger: fakeMessenger{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), MinTaskInterval: time.Minute}, repo, know, conv
 }
-func newEnv(a *agent.Activities) *testsuite.TestWorkflowEnvironment {
-	var suite testsuite.WorkflowTestSuite
-	suite.SetLogger(quietLogger{})
-	env := suite.NewTestWorkflowEnvironment()
-	env.SetTestTimeout(15 * time.Second)
-	env.RegisterActivity(a)
-	return env
+
+func newTestRuntime(a *agent.Activities, clk *FakeClock, idleTimeout time.Duration, maxSteps int) *Runtime {
+	if clk == nil {
+		clk = NewFakeClock(time.Now().UTC())
+	}
+	return &Runtime{
+		Repo:        a.Repo,
+		Activities:  a,
+		IdleTimeout: idleTimeout,
+		MaxSteps:    maxSteps,
+		Clock:       clk,
+		Logger:      a.Logger,
+	}
 }
+
 func calls(c ...domain.ToolCall) domain.Message {
 	return domain.Message{Role: "assistant", ToolCalls: c}
 }
@@ -115,14 +111,14 @@ func finish(text string) domain.Message { return domain.Message{Role: "assistant
 func reply(text string) domain.Message {
 	return calls(call("reply", "send_message", map[string]string{"text": text}))
 }
-func requireWorkflowOK(t *testing.T, env *testsuite.TestWorkflowEnvironment) {
-	t.Helper()
-	if !env.IsWorkflowCompleted() {
-		t.Fatal("workflow did not complete")
+
+func finishOnlyTurn(ctx context.Context, r *Runtime, in agent.RunInput) (agent.Turn, error) {
+	turn, err := r.runTurn(ctx, in, 2)
+	if err != nil {
+		return turn, err
 	}
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
+	err = r.actFinish(ctx, finishInput(turn, nil))
+	return turn, err
 }
 
 func TestProgressToolDoesNotEndTheTurn(t *testing.T) {
@@ -134,10 +130,12 @@ func TestProgressToolDoesNotEndTheTurn(t *testing.T) {
 		return reply("Готовое сравнение."), nil
 	}}
 	a.Model = model
-	env := newEnv(a)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 4})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 4)
+	if err := r.SignalSession(context.Background(), conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
 	if model.count() != 3 {
 		t.Fatal("progress ended the research")
 	}
@@ -152,23 +150,6 @@ func TestProgressToolDoesNotEndTheTurn(t *testing.T) {
 	if err != nil || len(progress) != 1 || progress[0].Outcome != "delivered" || progress[0].Text != "Проверяю характеристики." {
 		t.Fatalf("Finish lost status/delivery state: %+v %v", progress, err)
 	}
-}
-func twoSessions(ctx workflow.Context, in SessionInput) error {
-	sessions := []struct{ workflowID, incomingID string }{
-		{workflowID: "first-session", incomingID: "first"},
-		{workflowID: "second-session", incomingID: "tomorrow"},
-	}
-	for _, session := range sessions {
-		childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: session.workflowID})
-		child := workflow.ExecuteChildWorkflow(childCtx, SessionWorkflow, in)
-		if err := child.SignalChildWorkflow(ctx, MessageSignal, Event{ID: session.incomingID}).Get(ctx, nil); err != nil {
-			return err
-		}
-		if err := child.Get(ctx, nil); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func TestSessionsPreservePersonalMemoryAndIndependentTask(t *testing.T) {
@@ -208,10 +189,14 @@ func TestSessionsPreservePersonalMemoryAndIndependentTask(t *testing.T) {
 		}
 	}
 	a.Model = model
-	env := newEnv(a)
-	env.RegisterWorkflow(SessionWorkflow)
-	env.ExecuteWorkflow(twoSessions, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 6})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Minute, 6)
+	for _, incomingID := range []string{"first", "tomorrow"} {
+		if err := r.SignalSession(ctx, conv.ID, Event{ID: incomingID}); err != nil {
+			t.Fatal(err)
+		}
+		waitWithFakeClock(t, r, clk)
+	}
 	tasks, err := repo.FindTasks(ctx, conv.ID, "")
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("task duplicated %+v %v", tasks, err)
@@ -239,6 +224,7 @@ func TestSessionsPreservePersonalMemoryAndIndependentTask(t *testing.T) {
 		t.Fatalf("unexpected model calls%d", model.count())
 	}
 }
+
 func TestTaskWaitsPastSessionCloseThenCompletes(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
 	ctx := context.Background()
@@ -254,10 +240,9 @@ func TestTaskWaitsPastSessionCloseThenCompletes(t *testing.T) {
 	if err = a.CloseSession(ctx, "old-session"); err != nil {
 		t.Fatal(err)
 	}
-	env := newEnv(a)
-	env.SetStartTime(start)
+	clk := NewFakeClock(start)
 	model := &scriptedModel{run: func(n int, msg []domain.Message) (domain.Message, error) {
-		if env.Now().Before(due) {
+		if clk.Now().Before(due) {
 			return domain.Message{}, fmt.Errorf("task ran before durable timer")
 		}
 		if n == 0 {
@@ -269,8 +254,28 @@ func TestTaskWaitsPastSessionCloseThenCompletes(t *testing.T) {
 		return domain.Message{}, fmt.Errorf("one-time task executed twice")
 	}}
 	a.Model = model
-	env.ExecuteWorkflow(TaskWorkflow, TaskInput{ConversationID: conv.ID, ID: task.ID, MaxSteps: 4})
-	requireWorkflowOK(t, env)
+	r := newTestRuntime(a, clk, time.Minute, 4)
+
+	schedCtx, stopSched := context.WithCancel(ctx)
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		r.runTaskScheduler(schedCtx)
+	}()
+
+	waitUntil(t, func() bool { return clk.ActiveTimers() > 0 })
+	if model.count() != 0 {
+		t.Fatal("task ran early")
+	}
+	clk.Set(due)
+	_ = r.NotifyTaskChanged(ctx, conv.ID, task.ID)
+	waitUntil(t, func() bool {
+		saved, _, _ := repo.Task(ctx, conv.ID, task.ID)
+		return saved.Status == "completed"
+	})
+	stopSched()
+	r.Wait()
+
 	saved, _, err := repo.Task(ctx, conv.ID, task.ID)
 	if err != nil || saved.Status != "completed" {
 		t.Fatalf("one-time task did not complete %+v %v", saved, err)
@@ -287,6 +292,7 @@ func TestTaskWaitsPastSessionCloseThenCompletes(t *testing.T) {
 		t.Fatalf("background session did not close %+v", closed)
 	}
 }
+
 func TestRepeatingTaskReschedulesAndCanCancelItself(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
 	ctx := context.Background()
@@ -295,14 +301,13 @@ func TestRepeatingTaskReschedulesAndCanCancelItself(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := newEnv(a)
-	env.SetStartTime(start)
+	clk := NewFakeClock(start)
 	model := &scriptedModel{run: func(n int, msg []domain.Message) (domain.Message, error) {
 		if n == 0 {
 			return reply("First useful result"), nil
 		}
 		if n == 1 {
-			if env.Now().Before(start.Add(300 * time.Second)) {
+			if clk.Now().Before(start.Add(300 * time.Second)) {
 				return domain.Message{}, fmt.Errorf("repeat did not wait")
 			}
 			return calls(call("cancel", "task_update", map[string]string{"id": task.ID, "status": "cancelled", "result": "No longer needed"})), nil
@@ -310,8 +315,55 @@ func TestRepeatingTaskReschedulesAndCanCancelItself(t *testing.T) {
 		return domain.Message{}, fmt.Errorf("cancelled task kept running")
 	}}
 	a.Model = model
-	env.ExecuteWorkflow(TaskWorkflow, TaskInput{ConversationID: conv.ID, ID: task.ID, MaxSteps: 4})
-	requireWorkflowOK(t, env)
+	advanced := make(chan struct{}, 4)
+	r := newTestRuntime(a, clk, time.Minute, 4)
+	r.hooks = &activityHooks{
+		onComplete: func(name string, _ any, err error) {
+			if name == "AdvanceTask" && err == nil {
+				advanced <- struct{}{}
+			}
+		},
+	}
+
+	schedCtx, stopSched := context.WithCancel(ctx)
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		r.runTaskScheduler(schedCtx)
+	}()
+
+	select {
+	case <-advanced:
+	case <-time.After(5 * time.Second):
+		stopSched()
+		t.Fatal("timed out waiting for first repeat")
+	}
+	waitUntil(t, func() bool {
+		r.mu.Lock()
+		active := r.activeTasks[task.ID]
+		r.mu.Unlock()
+		return !active
+	})
+	clk.Set(start.Add(300 * time.Second))
+	_ = r.NotifyTaskChanged(ctx, conv.ID, task.ID)
+
+	select {
+	case <-advanced:
+	case <-time.After(5 * time.Second):
+		stopSched()
+		t.Fatal("timed out waiting for second repeat")
+	}
+	waitUntil(t, func() bool {
+		r.mu.Lock()
+		active := r.activeTasks[task.ID]
+		r.mu.Unlock()
+		return !active
+	})
+	clk.Advance(10 * time.Minute)
+	_ = r.NotifyTaskChanged(ctx, conv.ID, task.ID)
+	stopSched()
+	r.Wait()
+
 	saved, _, _ := repo.Task(ctx, conv.ID, task.ID)
 	if saved.Status != "cancelled" || saved.Result != "No longer needed" {
 		t.Fatalf("cancellation lost %+v", saved)
@@ -320,6 +372,7 @@ func TestRepeatingTaskReschedulesAndCanCancelItself(t *testing.T) {
 		t.Fatalf("cancelled task called model%d times", model.count())
 	}
 }
+
 func TestTaskPauseOrCancellationInterruptsFutureTimer(t *testing.T) {
 	for _, status := range []string{"paused", "cancelled"} {
 		t.Run(status, func(t *testing.T) {
@@ -334,41 +387,52 @@ func TestTaskPauseOrCancellationInterruptsFutureTimer(t *testing.T) {
 				return domain.Message{}, fmt.Errorf("stopped task executed")
 			}}
 			a.Model = model
-			env := newEnv(a)
-			env.SetStartTime(start)
-			env.RegisterDelayedCallback(func() {
-				current, _, e := repo.Task(ctx, conv.ID, task.ID)
-				if e != nil {
-					t.Error(e)
-					return
-				}
-				current.Status = status
-				if _, e = repo.UpdateTask(ctx, current); e != nil {
-					t.Error(e)
-				}
-				env.SignalWorkflow(TaskSignal, "changed")
-			}, time.Minute)
-			env.ExecuteWorkflow(TaskWorkflow, TaskInput{ConversationID: conv.ID, ID: task.ID, MaxSteps: 4})
-			requireWorkflowOK(t, env)
+			clk := NewFakeClock(start)
+			r := newTestRuntime(a, clk, time.Minute, 4)
+
+			schedCtx, stopSched := context.WithCancel(ctx)
+			r.wg.Add(1)
+			go func() {
+				defer r.wg.Done()
+				r.runTaskScheduler(schedCtx)
+			}()
+
+			waitUntil(t, func() bool { return clk.ActiveTimers() > 0 })
+			clk.Advance(time.Minute)
+			current, _, e := repo.Task(ctx, conv.ID, task.ID)
+			if e != nil {
+				t.Fatal(e)
+			}
+			current.Status = status
+			if _, e = repo.UpdateTask(ctx, current); e != nil {
+				t.Fatal(e)
+			}
+			_ = r.NotifyTaskChanged(ctx, conv.ID, task.ID)
+			clk.Set(start.Add(25 * time.Hour))
+			_ = r.NotifyTaskChanged(ctx, conv.ID, task.ID)
+			time.Sleep(10 * time.Millisecond)
+			stopSched()
+			r.Wait()
+
 			if model.count() != 0 {
 				t.Fatal("model ran despite stopped timer")
-			}
-			if !env.Now().Before(start.Add(24 * time.Hour)) {
-				t.Fatal("stop did not interrupt timer")
 			}
 		})
 	}
 }
+
 func TestStepBudgetStopsRunAndNotifiesUser(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
 	model := &scriptedModel{run: func(n int, msg []domain.Message) (domain.Message, error) {
 		return calls(call(fmt.Sprintf("loop-%d", n), "web_search", map[string]string{"query": "same query"})), nil
 	}}
 	a.Model = model
-	env := newEnv(a)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 2})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Minute, 2)
+	if err := r.SignalSession(context.Background(), conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
 	if model.count() != 3 {
 		t.Fatalf("research budget plus one finalization call ignored: %d", model.count())
 	}
@@ -381,6 +445,7 @@ func TestStepBudgetStopsRunAndNotifiesUser(t *testing.T) {
 		t.Fatal("failed turn retried forever")
 	}
 }
+
 func TestNewMessageSteersActiveRunBeforeNextModelCall(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
 	ctx := context.Background()
@@ -404,22 +469,24 @@ func TestNewMessageSteersActiveRunBeforeNextModelCall(t *testing.T) {
 		return domain.Message{}, fmt.Errorf("steering started a duplicate turn")
 	}}
 	a.Model = model
-	env := newEnv(a)
-	signalled := false
-	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, args converter.EncodedValues) {
-		if info.ActivityType.Name != "ToolCall" || signalled {
-			return
-		}
-		var in agent.ToolInput
-		if args.Get(&in) == nil && in.Call.Name == "web_read" {
-			signalled = true
-			env.SignalWorkflow(MessageSignal, Event{ID: "steer"})
-		}
-	})
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
-	requireWorkflowOK(t, env)
-	if !signalled || model.count() != 3 {
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Minute, 4)
+	var signalled atomic.Bool
+	r.hooks = &activityHooks{
+		onStart: func(name string, arg any) {
+			if name != "ToolCall" {
+				return
+			}
+			if in, ok := arg.(agent.ToolInput); ok && in.Call.Name == "web_read" && signalled.CompareAndSwap(false, true) {
+				_ = r.SignalSession(ctx, conv.ID, Event{ID: "steer"})
+			}
+		},
+	}
+	if err := r.SignalSession(ctx, conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
+	if !signalled.Load() || model.count() != 3 {
 		t.Fatalf("steering did not join active run, calls%d", model.count())
 	}
 	pending, _ := repo.PendingIncoming(ctx, 10)
@@ -463,23 +530,29 @@ func TestStopCancelsActiveTurnAndNextMessageHasValidHistory(t *testing.T) {
 		return domain.Message{}, fmt.Errorf("stopped run continued unexpectedly")
 	}}
 	a.Model = model
-	env := newEnv(a)
-	sentStop := false
-	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, args converter.EncodedValues) {
-		if info.ActivityType.Name != "ToolCall" || sentStop {
-			return
-		}
-		var in agent.ToolInput
-		if args.Get(&in) == nil && in.Call.Name == "web_read" {
-			sentStop = true
-			env.SignalWorkflow(MessageSignal, Event{ID: "stop", Stop: true})
-		}
-	})
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "continue"}) }, 100*time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
-	requireWorkflowOK(t, env)
-	if !sentStop || model.count() != 3 {
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Minute, 4)
+	var sentStop, sentContinue atomic.Bool
+	r.hooks = &activityHooks{
+		onStart: func(name string, arg any) {
+			if name != "ToolCall" {
+				return
+			}
+			if in, ok := arg.(agent.ToolInput); ok && in.Call.Name == "web_read" && sentStop.CompareAndSwap(false, true) {
+				_ = r.SignalSession(ctx, conv.ID, Event{ID: "stop", Stop: true})
+			}
+		},
+		onComplete: func(name string, _ any, err error) {
+			if name == "AcknowledgeStop" && err == nil && sentContinue.CompareAndSwap(false, true) {
+				_ = r.SignalSession(ctx, conv.ID, Event{ID: "continue"})
+			}
+		},
+	}
+	if err := r.SignalSession(ctx, conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
+	if !sentStop.Load() || model.count() != 3 {
 		t.Fatalf("unexpected stop model calls%d", model.count())
 	}
 	inbox, _ := repo.PendingIncoming(ctx, 10)
@@ -500,11 +573,11 @@ func TestStopBatchPreservesNewRequestAfterLastStop(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	afterSeen := false
+	var afterSeen atomic.Bool
 	model := &scriptedModel{run: func(_ int, msg []domain.Message) (domain.Message, error) {
 		for _, m := range msg {
 			if m.Role == "user" && strings.Contains(m.Content, "independent request") {
-				afterSeen = true
+				afterSeen.Store(true)
 				return reply("Handled the new request."), nil
 			}
 		}
@@ -513,15 +586,13 @@ func TestStopBatchPreservesNewRequestAfterLastStop(t *testing.T) {
 		return reply("Earlier request response"), nil
 	}}
 	a.Model = model
-	env := newEnv(a)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(MessageSignal, Event{ID: "first"})
-		env.SignalWorkflow(MessageSignal, Event{ID: "stop-batch", Stop: true})
-		env.SignalWorkflow(MessageSignal, Event{ID: "after-stop"})
-	}, time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
-	requireWorkflowOK(t, env)
-	if !afterSeen {
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Minute, 4)
+	_ = r.SignalSession(ctx, conv.ID, Event{ID: "first"})
+	_ = r.SignalSession(ctx, conv.ID, Event{ID: "stop-batch", Stop: true})
+	_ = r.SignalSession(ctx, conv.ID, Event{ID: "after-stop"})
+	waitWithFakeClock(t, r, clk)
+	if !afterSeen.Load() {
 		t.Fatal("request after last stop was dropped")
 	}
 	out, _ := repo.PendingOutgoing(ctx, 10)
@@ -537,6 +608,7 @@ func TestStopBatchPreservesNewRequestAfterLastStop(t *testing.T) {
 		t.Fatalf("stop batch left pending %+v", pending)
 	}
 }
+
 func TestInputDuringModelCallDiscardsStaleSideEffect(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
 	ctx := context.Background()
@@ -560,17 +632,20 @@ func TestInputDuringModelCallDiscardsStaleSideEffect(t *testing.T) {
 		return domain.Message{}, fmt.Errorf("unexpected model call%d", n)
 	}}
 	a.Model = model
-	env := newEnv(a)
-	steered := false
-	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
-		if info.ActivityType.Name == "ModelCall" && !steered {
-			steered = true
-			env.SignalWorkflow(MessageSignal, Event{ID: "new-scope"})
-		}
-	})
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Minute, MaxSteps: 4})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Minute, 4)
+	var steered atomic.Bool
+	r.hooks = &activityHooks{
+		onStart: func(name string, _ any) {
+			if name == "ModelCall" && steered.CompareAndSwap(false, true) {
+				_ = r.SignalSession(ctx, conv.ID, Event{ID: "new-scope"})
+			}
+		},
+	}
+	if err := r.SignalSession(ctx, conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
 	if model.count() != 3 {
 		t.Fatalf("stale completion not discarded, calls%d", model.count())
 	}
@@ -587,10 +662,12 @@ func TestInputDuringModelCallDiscardsStaleSideEffect(t *testing.T) {
 func TestInitiativeUsesInterestsAndCreatesIndependentTaskWithoutNotificationSpam(t *testing.T) {
 	a, repo, k, conv := newFixture(t)
 	ctx := context.Background()
+	if err := repo.MarkIncomingHandled(ctx, "first"); err != nil {
+		t.Fatal(err)
+	}
 	if err := k.Update(ctx, domain.MemoryEntry{ID: "interest", Scope: conv.ID, Content: "Interested in Go release announcements", Kind: "preference", Source: "first"}); err != nil {
 		t.Fatal(err)
 	}
-	env := newEnv(a)
 	model := &scriptedModel{run: func(n int, msg []domain.Message) (domain.Message, error) {
 		switch n {
 		case 0:
@@ -607,11 +684,33 @@ func TestInitiativeUsesInterestsAndCreatesIndependentTaskWithoutNotificationSpam
 		}
 	}}
 	a.Model = model
-	env.RegisterDelayedCallback(func() { env.CancelWorkflow() }, 90*time.Minute)
-	env.ExecuteWorkflow(InitiativeWorkflow, InitiativeInput{ConversationID: conv.ID, Interval: time.Hour, MaxSteps: 6})
-	if !env.IsWorkflowCompleted() {
-		t.Fatal("initiative cancellation did not finish")
+	clk := NewFakeClock(time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC))
+	r := newTestRuntime(a, clk, time.Minute, 6)
+	r.InitiativeInterval = time.Hour
+
+	// First dispatch seeds the baseline timestamp without immediately firing.
+	if err := r.dispatchInitiative(ctx); err != nil {
+		t.Fatal(err)
 	}
+	r.Wait()
+	if model.count() != 0 {
+		t.Fatalf("initiative fired before interval elapsed: %d", model.count())
+	}
+
+	// After 1 hour, exactly one initiative run executes.
+	clk.Advance(time.Hour)
+	if err := r.dispatchInitiative(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.Wait()
+
+	// At 90 minutes (30 minutes after the run), no second run starts.
+	clk.Advance(30 * time.Minute)
+	if err := r.dispatchInitiative(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.Wait()
+
 	tasks, err := repo.FindTasks(ctx, conv.ID, "")
 	if err != nil || len(tasks) != 1 || tasks[0].Reason == "" {
 		t.Fatalf("independent initiative task missing: %+v %v", tasks, err)
@@ -627,50 +726,6 @@ func TestInitiativeUsesInterestsAndCreatesIndependentTaskWithoutNotificationSpam
 	if len(analyses) != 1 {
 		t.Fatalf("initiative session not closed: %+v", analyses)
 	}
-}
-
-func TestRecordedTurnsStillStopAfterReply(t *testing.T) {
-	for _, maxSteps := range []int{1, 5} {
-		t.Run(fmt.Sprint(maxSteps), func(t *testing.T) {
-			a, repo, _, conv := newFixture(t)
-			model := &scriptedModel{continueAfterReply: true, run: func(n int, _ []domain.Message) (domain.Message, error) {
-				return calls(call(fmt.Sprintf("reply-%d", n), "send_message", map[string]string{"text": "Hello; ready to help."})), nil
-			}}
-			a.Model = model
-			env := newEnv(a)
-			env.OnGetVersion("multi-message-turn/legacy-reply", workflow.DefaultVersion, 1).Return(workflow.DefaultVersion).Once()
-			env.ExecuteWorkflow(func(ctx workflow.Context) error {
-				ctx = options(ctx)
-				turn, err := runTurn(ctx, agent.RunInput{Key: "legacy-reply", SessionID: "legacy-session", ConversationID: conv.ID, IncomingIDs: []string{"first"}}, maxSteps)
-				if err != nil {
-					return err
-				}
-				return workflow.ExecuteActivity(ctx, "Finish", finishInput(turn, nil)).Get(ctx, nil)
-			})
-			requireWorkflowOK(t, env)
-			outgoing, err := repo.PendingOutgoing(context.Background(), 100)
-			if err != nil || len(outgoing) != 1 || outgoing[0].Text != "Hello; ready to help." {
-				t.Fatalf("reply repeated or followed by failure notification: %+v %v", outgoing, err)
-			}
-			if model.count() != 1 {
-				t.Fatalf("model called %d times after final reply", model.count())
-			}
-			pending, _ := repo.PendingIncoming(context.Background(), 100)
-			if len(pending) != 0 {
-				t.Fatal("answered request left pending")
-			}
-		})
-	}
-}
-
-func finishOnlyTurn(ctx workflow.Context, in agent.RunInput) (agent.Turn, error) {
-	ctx = options(ctx)
-	turn, err := runTurn(ctx, in, 2)
-	if err != nil {
-		return turn, err
-	}
-	err = workflow.ExecuteActivity(ctx, "Finish", finishInput(turn, nil)).Get(ctx, nil)
-	return turn, err
 }
 
 func TestFinalTextIsSavedWithoutDelivery(t *testing.T) {
@@ -694,11 +749,9 @@ func TestFinalTextIsSavedWithoutDelivery(t *testing.T) {
 			a.Model = &scriptedModel{run: func(int, []domain.Message) (domain.Message, error) {
 				return finish(conclusion), nil
 			}}
-			env := newEnv(a)
-			env.ExecuteWorkflow(finishOnlyTurn, in)
-			requireWorkflowOK(t, env)
-			var turn agent.Turn
-			if err := env.GetWorkflowResult(&turn); err != nil {
+			r := newTestRuntime(a, nil, time.Second, 2)
+			turn, err := finishOnlyTurn(ctx, r, in)
+			if err != nil {
 				t.Fatal(err)
 			}
 			if turn.Sent || turn.LastText != conclusion || turn.Stats.FinishReason != "no_reply" || turn.Stats.ToolCalls != 0 || turn.Stats.ModelCalls != 1 {
@@ -750,11 +803,9 @@ func TestBackgroundTaskPersistsProgressAndInitiativePreservesIt(t *testing.T) {
 			if !initiative {
 				in.TaskID = taskID
 			}
-			env := newEnv(a)
-			env.ExecuteWorkflow(finishOnlyTurn, in)
-			requireWorkflowOK(t, env)
-			var turn agent.Turn
-			if err := env.GetWorkflowResult(&turn); err != nil {
+			r := newTestRuntime(a, nil, time.Second, 2)
+			turn, err := finishOnlyTurn(ctx, r, in)
+			if err != nil {
 				t.Fatal(err)
 			}
 			wantErrors := 0
@@ -800,11 +851,9 @@ func TestBackgroundPlaceholderCanRecoverWithoutDelivery(t *testing.T) {
 		return finish("Проверка завершена, новых событий нет."), nil
 	}}
 	a.Model = model
-	env := newEnv(a)
-	env.ExecuteWorkflow(finishOnlyTurn, agent.RunInput{Key: "placeholder-check", SessionID: "placeholder-session", ConversationID: conv.ID, Initiative: true})
-	requireWorkflowOK(t, env)
-	var turn agent.Turn
-	if err := env.GetWorkflowResult(&turn); err != nil {
+	r := newTestRuntime(a, nil, time.Second, 2)
+	turn, err := finishOnlyTurn(context.Background(), r, agent.RunInput{Key: "placeholder-check", SessionID: "placeholder-session", ConversationID: conv.ID, Initiative: true})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if turn.Sent || turn.Stats.FinishReason != "no_reply" || turn.Stats.ToolErrors != 1 || model.count() != 2 {
@@ -816,41 +865,7 @@ func TestBackgroundPlaceholderCanRecoverWithoutDelivery(t *testing.T) {
 	}
 }
 
-func TestExplicitDeliveryAppliesToNextTurnOfExistingWorkflow(t *testing.T) {
-	a, repo, _, conv := newFixture(t)
-	a.Model = &scriptedModel{run: func(n int, _ []domain.Message) (domain.Message, error) {
-		return finish(fmt.Sprintf("conclusion-%d", n)), nil
-	}}
-	env := newEnv(a)
-	// Old commands must still replay, but must not enable the fallback for new turns.
-	env.OnGetVersion("explicit-message-delivery/legacy", workflow.DefaultVersion, 1).Return(workflow.DefaultVersion).Once()
-	env.ExecuteWorkflow(func(ctx workflow.Context) ([]agent.Turn, error) {
-		turns := []agent.Turn{}
-		for _, key := range []string{"legacy", "current"} {
-			turn, err := finishOnlyTurn(ctx, agent.RunInput{Key: key, SessionID: "existing-session", ConversationID: conv.ID})
-			if err != nil {
-				return turns, err
-			}
-			turns = append(turns, turn)
-		}
-		return turns, nil
-	})
-	requireWorkflowOK(t, env)
-	env.AssertExpectations(t)
-	var turns []agent.Turn
-	if err := env.GetWorkflowResult(&turns); err != nil {
-		t.Fatal(err)
-	}
-	if len(turns) != 2 || !turns[0].Sent || turns[1].Sent || turns[1].Stats.FinishReason != "no_reply" {
-		t.Fatalf("delivery version leaked across turns: %+v", turns)
-	}
-	outgoing, err := repo.PendingOutgoing(context.Background(), 10)
-	if err != nil || len(outgoing) != 1 || outgoing[0].Text != "conclusion-0" {
-		t.Fatalf("new turn inherited old automatic delivery: %+v %v", outgoing, err)
-	}
-}
-
-func TestBrowserActivityUsesSeparateQueueAndRetriesOnlyCapacity(t *testing.T) {
+func TestBrowserActivityUsesSeparateLaneAndRetriesCapacity(t *testing.T) {
 	a, _, _, conv := newFixture(t)
 	a.Model = &scriptedModel{run: func(i int, _ []domain.Message) (domain.Message, error) {
 		if i == 0 {
@@ -858,24 +873,26 @@ func TestBrowserActivityUsesSeparateQueueAndRetriesOnlyCapacity(t *testing.T) {
 		}
 		return finish("Page read."), nil
 	}}
-	env := newEnv(a)
-	tries := 0
-	env.RegisterActivityWithOptions(func(ctx context.Context, in agent.ToolInput) (string, error) {
-		info := activity.GetInfo(ctx)
-		if !strings.HasSuffix(info.TaskQueue, ".browser-ui") {
-			t.Errorf("browser used main queue: %s", info.TaskQueue)
-		}
-		tries++
-		if tries == 1 {
-			return "", temporal.NewApplicationErrorWithOptions("full", "browser_capacity", temporal.ApplicationErrorOptions{NextRetryDelay: time.Second})
-		}
-		return `{"page_id":"page-one","text":"Example"}`, nil
-	}, activity.RegisterOptions{Name: "BrowserToolCall", DisableAlreadyRegisteredCheck: true})
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 4})
-	requireWorkflowOK(t, env)
-	if tries != 2 {
-		t.Fatalf("capacity retry did not resume, got %d calls", tries)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 4)
+	var tries atomic.Int32
+	r.hooks = &activityHooks{
+		browserCall: func(_ context.Context, lane string, _ agent.ToolInput, _ func(context.Context, agent.ToolInput) (string, error)) (string, error) {
+			if lane != ".browser-ui" {
+				t.Errorf("browser used wrong lane: %s", lane)
+			}
+			if tries.Add(1) == 1 {
+				return "", domain.NewRetryableError("full", "browser_capacity", time.Second, nil)
+			}
+			return `{"page_id":"page-one","text":"Example"}`, nil
+		},
+	}
+	if err := r.SignalSession(context.Background(), conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
+	if tries.Load() != 2 {
+		t.Fatalf("capacity retry did not resume, got %d calls", tries.Load())
 	}
 }
 
@@ -893,10 +910,12 @@ func TestGroupPostContinuesTurnForPrivateAcknowledgement(t *testing.T) {
 		}
 		return reply("Сообщение для группы поставлено в очередь."), nil
 	}}
-	env := newEnv(a)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: owner.ID, IdleTimeout: time.Minute, MaxSteps: 4})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Minute, 4)
+	if err := r.SignalSession(context.Background(), owner.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
 	outgoing, err := repo.PendingOutgoing(context.Background(), 100)
 	if err != nil || len(outgoing) != 2 || outgoing[0].Conversation.ID != group.ID || outgoing[1].Conversation.ID != owner.ID {
 		t.Fatalf("group post ended private turn or misrouted acknowledgement: %v %v", outgoing, err)

@@ -2,9 +2,9 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,18 +13,7 @@ import (
 
 func TestProgressRepositoryContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { progressContract(t, NewMemory()) })
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL for PostgreSQL")
-		}
-		s, err := Open(context.Background(), url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer s.Close()
-		progressContract(t, s)
-	})
+	t.Run("sqlite", func(t *testing.T) { progressContract(t, openTestSQLite(t)) })
 }
 
 func progressContract(t *testing.T, repo domain.Repository) {
@@ -220,15 +209,12 @@ func progressContract(t *testing.T, repo domain.Repository) {
 	}
 }
 
-func TestPostgresProgressRestartRecovery(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL for PostgreSQL")
-	}
+func TestSQLiteProgressRestartRecovery(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	prefix := fmt.Sprintf("restart-%d", now.UnixNano())
-	s, err := Open(ctx, url)
+	dbPath := filepath.Join(t.TempDir(), "progress.db")
+	s, err := Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,14 +232,14 @@ func TestPostgresProgressRestartRecovery(t *testing.T) {
 		}
 	}
 	s.Close()
-	s, err = Open(ctx, url)
+	s, err = Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
 	for _, id := range []string{"creating", "editing"} {
 		var state, messageID string
-		if err = s.pool.QueryRow(ctx, `SELECT data->'delivery'->>'state',data->'delivery'->>'message_id' FROM openalbert_progress WHERE id=$1`, prefix+id).Scan(&state, &messageID); err != nil {
+		if err = s.queryRow(ctx, `SELECT json_extract(data, '$.delivery.state'), COALESCE(json_extract(data, '$.delivery.message_id'), '') FROM openalbert_progress WHERE id = ?1`, prefix+id).Scan(&state, &messageID); err != nil {
 			t.Fatal(err)
 		}
 		if id == "creating" && state != "disabled" {
@@ -265,134 +251,125 @@ func TestPostgresProgressRestartRecovery(t *testing.T) {
 	}
 }
 
-func TestPostgresDueProgressQueryPlan(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL for PostgreSQL")
-	}
+func TestSQLiteDueProgressQueryPlan(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(s.Close)
+	s := openTestSQLite(t)
 
 	now := time.Now().UTC().Truncate(time.Second)
 	prefix := fmt.Sprintf("plan-%d-", time.Now().UTC().UnixNano())
-	t.Cleanup(func() {
-		if _, err := s.pool.Exec(context.Background(), `DELETE FROM openalbert_progress WHERE id LIKE $1`, prefix+"%"); err != nil {
-			t.Errorf("cleanup openalbert_progress: %v", err)
-		}
-		if _, err := s.pool.Exec(context.Background(), `DELETE FROM openalbert_outgoing WHERE id LIKE $1`, prefix+"%"); err != nil {
-			t.Errorf("cleanup openalbert_outgoing: %v", err)
-		}
-	})
 
-	// Seed a production-sized backlog of terminal/suspended progress rows and
-	// historical outgoing rows so the planner mirrors the Raspberry Pi dataset.
-	if _, err := s.pool.Exec(ctx, `
-INSERT INTO openalbert_progress(id, data)
-SELECT
- $1 || g,
- jsonb_build_object(
-  'turn_id', $1 || g,
-  'conversation', jsonb_build_object(
-   'id', $1 || 'conv-' || (g % 5),
-   'chat_id', CASE WHEN g % 20 = 0 THEN -100 ELSE 7 END,
-   'delivery_channel', CASE WHEN g > 800 AND g <= 875 THEN 'desktop' ELSE '' END
-  ),
-  'started_at', ($2::timestamptz - (g || ' seconds')::interval),
-  'step', 1,
-  'text', 'working',
-  'status', CASE WHEN g > 875 THEN 'active' ELSE 'waiting_delivery' END,
-  'delivery', jsonb_build_object(
-   'version', 2,
-   'state', CASE
-    WHEN g <= 750 THEN 'done'
-    WHEN g <= 800 THEN 'disabled'
-    WHEN g <= 875 THEN 'suspended'
-    WHEN g = 876 THEN 'suspended'
-    ELSE 'ready'
-   END,
-   'message_id', CASE WHEN g <= 750 THEN '42' ELSE '' END,
-   'last_text', '',
-   'updated_at', '0001-01-01T00:00:00Z',
-   'retry_at', '0001-01-01T00:00:00Z'
-  )
- )
-FROM generate_series(1, 881) g`, prefix, now); err != nil {
+	// Seed a production-sized backlog of terminal/suspended progress rows and historical outgoing rows.
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(ctx, `
-INSERT INTO openalbert_outgoing(id, data, state, attempts)
-SELECT
- $1 || 'out-' || g,
- jsonb_build_object(
-  'id', $1 || 'out-' || g,
-  'turn_id', $1 || ((g % 750) + 1),
-  'conversation', jsonb_build_object('id', $1 || 'conv-' || (((g % 750) + 1) % 5), 'chat_id', 7),
-  'text', 'sent reply',
-  'enqueued_at', ($2::timestamptz - (g || ' seconds')::interval),
-  'state', 'sent'
- ),
- 'sent',
- 1
-FROM generate_series(1, 1233) g`, prefix, now); err != nil {
+	zeroTS := formatTime(time.Time{})
+	for g := 1; g <= 881; g++ {
+		turnID := fmt.Sprintf("%s%d", prefix, g)
+		convID := fmt.Sprintf("%sconv-%d", prefix, g%5)
+		chatID := int64(7)
+		if g%20 == 0 {
+			chatID = -100
+		}
+		channel := ""
+		if g > 800 && g <= 875 {
+			channel = "desktop"
+		}
+		status := "waiting_delivery"
+		if g > 875 {
+			status = "active"
+		}
+		dState := "ready"
+		msgID := ""
+		switch {
+		case g <= 750:
+			dState, msgID = "done", "42"
+		case g <= 800:
+			dState = "disabled"
+		case g <= 876:
+			dState = "suspended"
+		}
+		startedAt := now.Add(-time.Duration(g) * time.Second)
+		p := domain.Progress{
+			TurnID:       turnID,
+			Conversation: domain.Conversation{ID: convID, ChatID: chatID, DeliveryChannel: channel},
+			StartedAt:    startedAt,
+			Step:         1,
+			Text:         "working",
+			Status:       status,
+			Delivery:     domain.ProgressDelivery{Version: 2, State: dState, MessageID: msgID},
+		}
+		raw, err := encode(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.exec(ctx, `INSERT INTO openalbert_progress(
+ id, conversation_id, delivery_channel, started_at, status, direct_reply,
+ delivery_state, delivery_version, delivery_removing, delivery_updated_at, delivery_retry_at, data
+) VALUES(?1, ?2, ?3, ?4, ?5, 0, ?6, 2, 0, ?7, ?7, ?8)`,
+			turnID, convID, channel, formatTime(startedAt), status, dState, zeroTS, string(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for g := 1; g <= 1233; g++ {
+		outID := fmt.Sprintf("%sout-%d", prefix, g)
+		turnNum := (g % 750) + 1
+		turnID := fmt.Sprintf("%s%d", prefix, turnNum)
+		convID := fmt.Sprintf("%sconv-%d", prefix, turnNum%5)
+		out := domain.Outgoing{
+			ID:           outID,
+			TurnID:       turnID,
+			Conversation: domain.Conversation{ID: convID, ChatID: 7},
+			Text:         "sent reply",
+			EnqueuedAt:   now.Add(-time.Duration(g) * time.Second),
+			State:        "sent",
+			Attempts:     1,
+		}
+		raw, err := encode(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.exec(ctx, `INSERT INTO openalbert_outgoing(id, turn_id, conversation_id, session_id, data, state, attempts)
+ VALUES(?1, ?2, ?3, '', ?4, 'sent', 1)`, outID, turnID, convID, string(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(ctx, `VACUUM ANALYZE openalbert_progress`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.pool.Exec(ctx, `VACUUM ANALYZE openalbert_outgoing`); err != nil {
+	if _, err := s.exec(ctx, `ANALYZE`); err != nil {
 		t.Fatal(err)
 	}
 
 	assertFastPlan := func(label string) {
 		t.Helper()
-		var planJSON string
-		if err := s.pool.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) `+dueProgressSQL,
-			now, now.Add(-domain.ProgressDelay), now.Add(-domain.ProgressInterval), 50).Scan(&planJSON); err != nil {
-			t.Fatalf("%s: EXPLAIN failed: %v", label, err)
+		rows, err := s.query(ctx, `EXPLAIN QUERY PLAN `+dueProgressSQL,
+			formatTime(now), formatTime(now.Add(-domain.ProgressDelay)), formatTime(now.Add(-domain.ProgressInterval)), 50)
+		if err != nil {
+			t.Fatalf("%s: EXPLAIN QUERY PLAN failed: %v", label, err)
 		}
-		type planNode struct {
-			NodeType       string     `json:"Node Type"`
-			Relation       string     `json:"Relation Name"`
-			IndexName      string     `json:"Index Name"`
-			ParentRelation string     `json:"Parent Relationship"`
-			SubplanName    string     `json:"Subplan Name"`
-			Plans          []planNode `json:"Plans"`
-		}
-		var root []struct {
-			Plan planNode `json:"Plan"`
-			JIT  *struct {
-				Functions int `json:"Functions"`
-			} `json:"JIT"`
-		}
-		if err := json.Unmarshal([]byte(planJSON), &root); err != nil || len(root) == 0 {
-			t.Fatalf("%s: parse EXPLAIN JSON: %v\n%s", label, err, planJSON)
-		}
-		if root[0].JIT != nil && root[0].JIT.Functions > 0 {
-			t.Fatalf("%s: DueProgress triggered JIT (%d functions):\n%s", label, root[0].JIT.Functions, planJSON)
-		}
+		defer rows.Close()
+		var lines []string
 		sawDueIndex := false
-		var walk func(n planNode)
-		walk = func(n planNode) {
-			if n.NodeType == "Seq Scan" && (n.Relation == "openalbert_progress" || n.Relation == "openalbert_outgoing") {
-				t.Fatalf("%s: unexpected Seq Scan on %s:\n%s", label, n.Relation, planJSON)
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				t.Fatal(err)
 			}
-			if n.ParentRelation == "SubPlan" || n.SubplanName != "" {
-				t.Fatalf("%s: unexpected correlated SubPlan %q:\n%s", label, n.SubplanName, planJSON)
-			}
-			if n.IndexName == "openalbert_progress_due" {
+			lines = append(lines, detail)
+			if strings.Contains(detail, "openalbert_progress_due") {
 				sawDueIndex = true
 			}
-			for _, child := range n.Plans {
-				walk(child)
+			if (strings.HasPrefix(detail, "SCAN p") || strings.HasPrefix(detail, "SCAN openalbert_progress") || strings.HasPrefix(detail, "SCAN o") || strings.HasPrefix(detail, "SCAN openalbert_outgoing")) && !strings.Contains(detail, "USING INDEX") && !strings.Contains(detail, "USING COVERING INDEX") {
+				t.Fatalf("%s: unexpected full table scan: %s", label, detail)
 			}
 		}
-		walk(root[0].Plan)
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
 		if !sawDueIndex {
-			t.Fatalf("%s: DueProgress did not use openalbert_progress_due:\n%s", label, planJSON)
+			t.Fatalf("%s: DueProgress did not use openalbert_progress_due:\n%s", label, strings.Join(lines, "\n"))
 		}
 	}
 
@@ -402,7 +379,7 @@ FROM generate_series(1, 1233) g`, prefix, now); err != nil {
 	}
 	found := 0
 	for _, row := range rows {
-		if len(row.TurnID) >= len(prefix) && row.TurnID[:len(prefix)] == prefix {
+		if strings.HasPrefix(row.TurnID, prefix) {
 			found++
 		}
 	}
@@ -412,11 +389,10 @@ FROM generate_series(1, 1233) g`, prefix, now); err != nil {
 	}
 	assertFastPlan("with-candidates")
 
-	// Idle state (all prefix rows done) must also stay on the partial index without JIT.
-	if _, err := s.pool.Exec(ctx, `UPDATE openalbert_progress SET data=jsonb_set(data,'{delivery,state}','"done"'::jsonb) WHERE id LIKE $1`, prefix+"%"); err != nil {
+	if _, err := s.exec(ctx, `UPDATE openalbert_progress SET delivery_state = 'done', data = json_set(data, '$.delivery.state', 'done') WHERE id LIKE ?1`, prefix+"%"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(ctx, `VACUUM ANALYZE openalbert_progress`); err != nil {
+	if _, err := s.exec(ctx, `ANALYZE`); err != nil {
 		t.Fatal(err)
 	}
 	assertFastPlan("idle")

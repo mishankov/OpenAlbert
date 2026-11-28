@@ -15,10 +15,6 @@ import (
 
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
-
-	"go.temporal.io/sdk/activity"
-	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/workflow"
 )
 
 type codemodeTestModel func([]domain.Message, []domain.Tool) domain.Message
@@ -90,17 +86,21 @@ return {summary: text, delivery: receipt.state}
 			return finish("")
 		}
 	})
-	env := newEnv(a)
-	env.RegisterActivityWithOptions(func(ctx context.Context, in agent.ToolInput) (string, error) {
-		result, err := a.ToolCall(ctx, in)
-		if err == nil && in.Call.Name == "send_message" && replyAttempts.Add(1) == 1 {
-			return "", errors.New("activity completion lost after queuing reply")
-		}
-		return result, err
-	}, activity.RegisterOptions{Name: "ToolCall", DisableAlreadyRegisteredCheck: true})
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 4})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 4)
+	r.hooks = &activityHooks{
+		toolCall: func(ctx context.Context, in agent.ToolInput, next func(context.Context, agent.ToolInput) (string, error)) (string, error) {
+			result, err := next(ctx, in)
+			if err == nil && in.Call.Name == "send_message" && replyAttempts.Add(1) == 1 {
+				return "", errors.New("activity completion lost after queuing reply")
+			}
+			return result, err
+		},
+	}
+	if err := r.SignalSession(context.Background(), conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
 
 	outgoing, err := repo.PendingOutgoing(context.Background(), 10)
 	if err != nil || len(outgoing) != 1 || outgoing[0].Text != "first, second" {
@@ -144,10 +144,12 @@ if (typeof tools.web_read !== "undefined") throw Error("finalization allows web 
 await tools.send_message({text: "finalized"})
 `))
 	})
-	env := newEnv(a)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 1})
-	requireWorkflowOK(t, env)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 1)
+	if err := r.SignalSession(context.Background(), conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
 	outgoing, err := repo.PendingOutgoing(context.Background(), 10)
 	if err != nil || len(outgoing) != 1 || outgoing[0].Text != "finalized" {
 		t.Fatalf("unexpected outgoing: %+v, %v", outgoing, err)
@@ -176,11 +178,10 @@ func TestScheduledTaskUsesCodemode(t *testing.T) {
 		}
 		return finish("")
 	})
-	env := newEnv(a)
-	env.ExecuteWorkflow(func(ctx workflow.Context) (agent.Turn, error) {
-		return runTurn(options(ctx), agent.RunInput{Key: "codemode-task-run", SessionID: "codemode-task-session", ConversationID: conv.ID, TaskID: taskID}, 3)
-	})
-	requireWorkflowOK(t, env)
+	r := newTestRuntime(a, nil, time.Second, 3)
+	if _, err := r.runTurn(context.Background(), agent.RunInput{Key: "codemode-task-run", SessionID: "codemode-task-session", ConversationID: conv.ID, TaskID: taskID}, 3); err != nil {
+		t.Fatal(err)
+	}
 	task, found, err := repo.Task(context.Background(), conv.ID, taskID)
 	if err != nil || !found || task.Result != "checked" {
 		t.Fatalf("task mutation missing: %+v, %v", task, err)
@@ -226,12 +227,19 @@ try {
 		}
 		return finish("")
 	})
-	env := newEnv(a)
-	env.ExecuteWorkflow(func(ctx workflow.Context) (agent.Turn, error) {
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 3)
+	var runErr error
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
 		in := agent.RunInput{Key: runKey, SessionID: runKey, ConversationID: conv.ID, TaskID: taskID}
-		return runTurn(options(ctx), in, 3)
-	})
-	requireWorkflowOK(t, env)
+		_, runErr = r.runTurn(context.Background(), in, 3)
+	}()
+	waitWithFakeClock(t, r, clk)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
 	task, found, err := repo.Task(context.Background(), conv.ID, taskID)
 	if err != nil || !found || task.Result != "checked" || task.Version != original.Version+1 {
 		t.Fatalf("mutation was lost or repeated: %+v, %v", task, err)
@@ -277,23 +285,25 @@ return screenshot.artifact_id
 		}
 		return finish("")
 	})
-	env := newEnv(a)
-	env.RegisterActivityWithOptions(func(ctx context.Context, in agent.ToolInput) (string, error) {
-		if queue := activity.GetInfo(ctx).TaskQueue; !strings.HasSuffix(queue, ".browser-ui") {
-			t.Errorf("unexpected browser queue %q", queue)
-		}
-		return a.BrowserToolCall(ctx, in)
-	}, activity.RegisterOptions{Name: "BrowserToolCall", DisableAlreadyRegisteredCheck: true})
-	env.ExecuteWorkflow(func(ctx workflow.Context) (agent.Turn, error) {
-		return runTurn(options(ctx), agent.RunInput{Key: "codemode-browser", SessionID: "codemode-browser", ConversationID: conv.ID, IncomingIDs: []string{"first"}}, 3)
-	})
-	requireWorkflowOK(t, env)
+	r := newTestRuntime(a, nil, time.Second, 3)
+	r.hooks = &activityHooks{
+		browserCall: func(ctx context.Context, lane string, in agent.ToolInput, next func(context.Context, agent.ToolInput) (string, error)) (string, error) {
+			if lane != ".browser-ui" {
+				t.Errorf("unexpected browser lane %q", lane)
+			}
+			return next(ctx, in)
+		},
+	}
+	if _, err := r.runTurn(context.Background(), agent.RunInput{Key: "codemode-browser", SessionID: "codemode-browser", ConversationID: conv.ID, IncomingIDs: []string{"first"}}, 3); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCodemodeSteeringRetainsCompletedActions(t *testing.T) {
 	a, repo, _, conv := newFixture(t)
 	a.Codemode = true
-	if _, err := repo.AcceptIncoming(context.Background(), domain.Incoming{ID: "second", Conversation: conv, Text: "Stop sending more parts."}, 2); err != nil {
+	ctx := context.Background()
+	if _, err := repo.AcceptIncoming(ctx, domain.Incoming{ID: "second", Conversation: conv, Text: "Stop sending more parts."}, 2); err != nil {
 		t.Fatal(err)
 	}
 	var modelSteps atomic.Int32
@@ -316,23 +326,28 @@ await tools.send_message({text: "Second part"})
 		}
 		return finish("")
 	})
-	env := newEnv(a)
-	steered := false
-	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, args converter.EncodedValues) {
-		var sessionID, key string
-		var message domain.Message
-		if info.ActivityType.Name == "PersistMessage" && !steered &&
-			args.Get(&sessionID, &key, &message) == nil && message.ParentToolCallID == "parts" &&
-			len(message.ToolCalls) == 1 && strings.Contains(string(message.ToolCalls[0].Arguments), "Second part") {
-			steered = true
-			env.SignalWorkflow(MessageSignal, Event{ID: "second"})
-		}
-	})
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 5})
-	requireWorkflowOK(t, env)
-	outgoing, err := repo.PendingOutgoing(context.Background(), 10)
-	if err != nil || !steered || len(outgoing) != 1 || outgoing[0].Text != "First part" || modelSteps.Load() != 2 {
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 5)
+	var steered atomic.Bool
+	r.hooks = &activityHooks{
+		onStart: func(name string, arg any) {
+			if name != "PersistMessage" {
+				return
+			}
+			p, ok := arg.(persistMessageArg)
+			if ok && p.Message.ParentToolCallID == "parts" &&
+				len(p.Message.ToolCalls) == 1 && strings.Contains(string(p.Message.ToolCalls[0].Arguments), "Second part") &&
+				steered.CompareAndSwap(false, true) {
+				_ = r.SignalSession(ctx, conv.ID, Event{ID: "second"})
+			}
+		},
+	}
+	if err := r.SignalSession(ctx, conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
+	outgoing, err := repo.PendingOutgoing(ctx, 10)
+	if err != nil || !steered.Load() || len(outgoing) != 1 || outgoing[0].Text != "First part" || modelSteps.Load() != 2 {
 		t.Fatalf("unexpected model steps or replies: %d, %+v, %v", modelSteps.Load(), outgoing, err)
 	}
 }
@@ -383,21 +398,25 @@ func checkCodemodeExecutionReceipt(t *testing.T, loseCompletion bool) {
 		}
 		return finish("")
 	})
-	env := newEnv(a)
+	clk := NewFakeClock(time.Now().UTC())
+	r := newTestRuntime(a, clk, time.Second, 4)
 	var lost atomic.Int32
 	if loseCompletion {
-		env.RegisterActivityWithOptions(func(ctx context.Context, in agent.ToolInput) (string, error) {
-			result, err := a.ToolCall(ctx, in)
-			if err == nil && in.Call.Name == "computer_exec" {
-				lost.Add(1)
-				return "", errors.New("lost Activity completion after dispatch")
-			}
-			return result, err
-		}, activity.RegisterOptions{Name: "ToolCall", DisableAlreadyRegisteredCheck: true})
+		r.hooks = &activityHooks{
+			toolCall: func(ctx context.Context, in agent.ToolInput, next func(context.Context, agent.ToolInput) (string, error)) (string, error) {
+				result, err := next(ctx, in)
+				if err == nil && in.Call.Name == "computer_exec" {
+					lost.Add(1)
+					return "", errors.New("lost Activity completion after dispatch")
+				}
+				return result, err
+			},
+		}
 	}
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(MessageSignal, Event{ID: "first"}) }, 0)
-	env.ExecuteWorkflow(SessionWorkflow, SessionInput{ConversationID: conv.ID, IdleTimeout: time.Second, MaxSteps: 4})
-	requireWorkflowOK(t, env)
+	if err := r.SignalSession(context.Background(), conv.ID, Event{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWithFakeClock(t, r, clk)
 	if got := modelSteps.Load(); got != 3 {
 		t.Fatalf("model took %d steps, want 3", got)
 	}

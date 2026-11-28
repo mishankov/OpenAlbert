@@ -61,21 +61,20 @@ class LocalRunTests(unittest.TestCase):
             self.assertIn("FAIL p/Bad", console.getvalue())
 
     def test_go_cleanup_runs_even_when_startup_or_tests_fail(self):
-        for failing in ("go-services", "go-race-integration"):
-            with self.subTest(failing=failing), tempfile.TemporaryDirectory() as directory:
-                run = self.make_run(directory)
-                calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.make_run(directory)
+            calls = []
 
-                def command(name, args, **kwargs):
-                    calls.append((name, args))
-                    if name == failing:
-                        raise RuntimeError("synthetic failure")
+            def command(name, args, **kwargs):
+                calls.append((name, args))
+                if name == "go-race-integration":
+                    raise RuntimeError("synthetic failure")
 
-                with mock.patch.object(run, "command", side_effect=command), self.assertRaises(RuntimeError):
-                    run.go()
-                self.assertEqual(calls[-1][0], "go-cleanup")
-                self.assertIn("--volumes", calls[-1][1])
-                self.assertIn(run.repository, calls[-1][1])
+            with mock.patch.object(run, "command", side_effect=command), self.assertRaises(RuntimeError):
+                run.go()
+            self.assertEqual(calls[-1][0], "go-cleanup")
+            self.assertIn("--volumes", calls[-1][1])
+            self.assertIn(run.repository, calls[-1][1])
 
     def test_publication_never_pushes_after_a_failed_architecture(self):
         with tempfile.TemporaryDirectory() as directory:

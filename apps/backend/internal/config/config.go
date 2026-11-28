@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,8 +21,7 @@ type Config struct {
 	OpenAILaneCooldown                                      time.Duration
 	DesktopAPIToken                                         string
 	TelegramOwnerUserID                                     int64
-	DatabaseURL                                             string
-	TemporalAddress, TemporalNamespace, TemporalTaskQueue   string
+	DataDir, DatabasePath, ArtifactsDir                     string
 	TelegramWidgets                                         string
 	TelegramBotToken, TelegramBaseURL                       string
 	TelegramAllowedUserIDs, TelegramAllowedGroupIDs         []int64
@@ -40,12 +40,9 @@ type Config struct {
 	CodingSessionStaleTimeout                               time.Duration
 	MemoryConsolidationInterval                             time.Duration
 	MaxAgentSteps                                           int
-	S3Endpoint, S3AccessKey, S3SecretKey, S3Bucket          string
-	S3Secure                                                bool
 	BrowserEnabled, BrowserNoSandbox                        bool
 	BrowserExecutable                                       string
 	InspectorPublicURL                                      string
-	VictoriaLogsURL                                         string
 	ComputerSSHAddress                                      string
 	ComputerSSHUser                                         string
 	ComputerSSHPassword                                     string
@@ -61,19 +58,18 @@ func load(get func(string) string) (Config, error) {
 		}
 		return fallback
 	}
+	dataDir := value("DATA_DIR", "./data")
 	c := Config{
-		OpenAIAuthMode: value("OPENAI_AUTH_MODE", "profiles"), OpenAITokenStore: value("OPENAI_TOKEN_STORE", "./container_data/chatgpt/credentials.json"), OpenAISiWCModel: value("OPENAI_SIWC_MODEL", ""),
+		OpenAIAuthMode: value("OPENAI_AUTH_MODE", "profiles"), OpenAITokenStore: value("OPENAI_TOKEN_STORE", filepath.Join(dataDir, "chatgpt", "credentials.json")), OpenAISiWCModel: value("OPENAI_SIWC_MODEL", ""),
 		TelegramWidgets: value("TELEGRAM_WIDGETS", "auto"),
 		DesktopAPIToken: value("DESKTOP_API_TOKEN", ""),
 		STTBaseURL:      value("STT_BASE_URL", ""), STTAPIKey: value("STT_API_KEY", ""), STTModel: value("STT_MODEL", ""), STTRevision: value("STT_REVISION", ""),
 		TTSBaseURL: value("TTS_BASE_URL", ""), TTSAPIKey: value("TTS_API_KEY", ""), TTSModel: value("TTS_MODEL", "piper"), TTSVoice: value("TTS_VOICE", "ru_RU-dmitri-medium"),
-		DatabaseURL: value("DATABASE_URL", ""), TemporalAddress: value("TEMPORAL_ADDRESS", "localhost:7233"), TemporalNamespace: value("TEMPORAL_NAMESPACE", "default"), TemporalTaskQueue: value("TEMPORAL_TASK_QUEUE", "openalbert"),
+		DataDir: dataDir, DatabasePath: value("DATABASE_PATH", filepath.Join(dataDir, "openalbert.db")), ArtifactsDir: value("ARTIFACTS_DIR", filepath.Join(dataDir, "artifacts")),
 		TelegramBotToken: value("TELEGRAM_BOT_TOKEN", ""), TelegramBaseURL: value("TELEGRAM_BASE_URL", ""), ModelsFile: value("LLM_CONFIG_FILE", ""),
 		WebSearchProvider: strings.ToLower(value("WEB_SEARCH_PROVIDER", "")), ExaAPIKey: value("EXA_API_KEY", ""), ExaEndpoint: value("EXA_SEARCH_URL", ""),
-		YandexAPIKey: value("YANDEX_API_KEY", ""), YandexEndpoint: value("YANDEX_SEARCH_URL", ""), YandexFolderID: value("YANDEX_FOLDER_ID", ""), KnowledgeDir: value("KNOWLEDGE_DIR", "./container_data/knowledge"), SoulFile: value("SOUL_FILE", ""), HTTPAddr: value("HTTP_ADDR", ":8080"),
-		S3Endpoint: value("S3_ENDPOINT", "localhost:9000"), S3AccessKey: value("S3_ACCESS_KEY", ""), S3SecretKey: value("S3_SECRET_KEY", ""), S3Bucket: value("S3_BUCKET", "openalbert"),
+		YandexAPIKey: value("YANDEX_API_KEY", ""), YandexEndpoint: value("YANDEX_SEARCH_URL", ""), YandexFolderID: value("YANDEX_FOLDER_ID", ""), KnowledgeDir: value("KNOWLEDGE_DIR", filepath.Join(dataDir, "knowledge")), SoulFile: value("SOUL_FILE", ""), HTTPAddr: value("HTTP_ADDR", "127.0.0.1:8080"),
 		InspectorPublicURL:  value("INSPECTOR_PUBLIC_URL", "http://localhost:8080/inspect/"),
-		VictoriaLogsURL:     strings.TrimSpace(get("VICTORIALOGS_URL")),
 		ComputerSSHAddress:  value("COMPUTER_SSH_ADDRESS", ""),
 		ComputerSSHUser:     value("COMPUTER_SSH_USER", "albert"),
 		ComputerSSHPassword: get("COMPUTER_SSH_PASSWORD"),
@@ -133,7 +129,7 @@ func load(get func(string) string) (Config, error) {
 	if c.OpenAIAuthMode != "profiles" && c.OpenAIAuthMode != "api_key" && c.OpenAIAuthMode != "siwc" && c.OpenAIAuthMode != "auto" {
 		problems = append(problems, errors.New("OPENAI_AUTH_MODE must be profiles, api_key, siwc or auto"))
 	}
-	required := []struct{ name, value string }{{"DATABASE_URL", c.DatabaseURL}, {"TELEGRAM_BOT_TOKEN", c.TelegramBotToken}, {"S3_ACCESS_KEY", c.S3AccessKey}, {"S3_SECRET_KEY", c.S3SecretKey}}
+	required := []struct{ name, value string }{{"TELEGRAM_BOT_TOKEN", c.TelegramBotToken}}
 	for _, r := range required {
 		if r.value == "" {
 			problems = append(problems, fmt.Errorf("%s is required", r.name))
@@ -239,10 +235,6 @@ func load(get func(string) string) (Config, error) {
 	if err != nil || c.MaxAgentSteps < 1 || c.MaxAgentSteps > 200 {
 		problems = append(problems, errors.New("MAX_AGENT_STEPS must be between 1 and 200"))
 	}
-	c.S3Secure, err = strconv.ParseBool(value("S3_SECURE", "false"))
-	if err != nil {
-		problems = append(problems, errors.New("S3_SECURE must be a boolean"))
-	}
 	c.TelegramAllowBotMessages, err = strconv.ParseBool(value("TELEGRAM_ALLOW_BOT_MESSAGES", "false"))
 	if err != nil {
 		problems = append(problems, errors.New("TELEGRAM_ALLOW_BOT_MESSAGES must be a boolean"))
@@ -256,19 +248,8 @@ func load(get func(string) string) (Config, error) {
 		problems = append(problems, errors.New("BROWSER_NO_SANDBOX must be a boolean"))
 	}
 	c.BrowserExecutable = value("BROWSER_EXECUTABLE", "")
-	if u, e := url.Parse(c.DatabaseURL); e != nil || u.Host == "" || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
-		problems = append(problems, errors.New("DATABASE_URL must be a PostgreSQL connection URL"))
-	}
 	if u, e := url.Parse(c.InspectorPublicURL); e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		problems = append(problems, errors.New("INSPECTOR_PUBLIC_URL must be an HTTP(S) URL without credentials, query or fragment"))
-	}
-	if c.VictoriaLogsURL != "" {
-		if u, e := url.Parse(c.VictoriaLogsURL); e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			problems = append(problems, errors.New("VICTORIALOGS_URL must be an HTTP(S) URL without credentials, query or fragment"))
-		}
-	}
-	if strings.Contains(c.S3Endpoint, "://") || strings.ContainsAny(c.S3Endpoint, "/?#@") {
-		problems = append(problems, errors.New("S3_ENDPOINT must be a host[:port], without scheme or credentials"))
 	}
 	if len(problems) > 0 {
 		return Config{}, errors.Join(problems...)

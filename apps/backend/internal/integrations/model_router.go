@@ -606,7 +606,7 @@ func (r *ModelRouter) completeRouted(ctx context.Context, role domain.ModelRole,
 	}
 	for _, message := range messages {
 		if message.ContextOverflow {
-			return out, errors.New("required current-turn input exceeds the Temporal payload budget")
+			return out, errors.New("required current-turn input exceeds the context payload budget")
 		}
 		if (len(message.ToolCalls) > 0 || message.Role == "tool") && !hasCapability(model.profile, "tools") {
 			return out, errors.New("model profile does not support tool history")

@@ -1,11 +1,11 @@
 sequenceDiagram
     accTitle: Приём сообщения
-    accDescr: Ядро определяет разговор по ключу, сохраняет событие, находит или создаёт сессию и пробуждает её Workflow.
+    accDescr: Ядро определяет разговор по ключу, сохраняет событие в SQLite, находит или создаёт сессию и пробуждает её обработчик в оркестраторе.
     actor User as Пользователь
     participant Channel as Telegram
     participant Core as Ядро
-    participant Store as Хранилище приложения
-    participant WF as Workflow сессии
+    participant Store as Хранилище (SQLite)
+    participant WF as Обработчик сессии
     User->>Channel: Сообщение
     Channel->>Core: Событие и отправитель
     Core->>Core: Определить ключ разговора

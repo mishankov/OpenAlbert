@@ -3,9 +3,9 @@ flowchart TD
     accDescr: Цикл сессии обрабатывает сообщения через модель и инструменты, затем ожидает следующее сообщение до таймаута либо завершается при остановке.
     Start["Запуск / пробуждение"] --> Events["Получить события"]
     Events --> Context["Собрать текущий контекст"]
-    Context --> LLM["Activity: вызов LLM"]
+    Context --> LLM["Вызов LLM (checkpoint)"]
     LLM --> Decision{"Следующее действие?"}
-    Decision -->|"Tool call"| Tool["Activity: инструмент"]
+    Decision -->|"Tool call"| Tool["Инструмент (checkpoint)"]
     Tool --> Save["Сохранить результат"]
     Save --> Events
     Decision -->|"Ответ завершён"| Wait["Ожидать сообщение"]

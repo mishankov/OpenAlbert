@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -12,18 +11,7 @@ import (
 
 func TestConversationActivityRepositoryContract(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { activityContract(t, NewMemory()) })
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
-		}
-		repo, err := Open(context.Background(), url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer repo.Close()
-		activityContract(t, repo)
-	})
+	t.Run("sqlite", func(t *testing.T) { activityContract(t, openTestSQLite(t)) })
 }
 func activityContract(t *testing.T, repo domain.Repository) {
 	t.Helper()

@@ -11,8 +11,13 @@ COPY apps/backend ./
 RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/openalbert ./cmd/openalbert
 
 FROM alpine:3.24
-RUN apk add --no-cache ca-certificates tzdata chromium font-dejavu && addgroup -g 10001 openalbert && adduser -D -u 10001 -G openalbert openalbert && mkdir -p /data/knowledge && chown -R openalbert:openalbert /data
+RUN apk add --no-cache ca-certificates tzdata chromium font-dejavu \
+    && addgroup -g 10001 openalbert \
+    && adduser -D -u 10001 -G openalbert openalbert \
+    && mkdir -p /data/knowledge /data/artifacts /data/chatgpt \
+    && chown -R openalbert:openalbert /data
 COPY --from=build /out/openalbert /usr/local/bin/openalbert
+ENV DATA_DIR=/data
 USER openalbert
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/openalbert"]

@@ -3,13 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
 
-	"go.temporal.io/sdk/activity"
-	"go.temporal.io/sdk/temporal"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/telemetry"
 )
@@ -23,9 +22,6 @@ type toolTraceOutput struct {
 // are operational warnings; the durable tool checkpoints remain authoritative.
 func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any, event *telemetry.Event) func(output any, err error, name string) {
 	tr.Attempt = 1
-	if activity.IsActivity(ctx) {
-		tr.Attempt = int(activity.GetInfo(ctx).Attempt)
-	}
 	tr.ID = ID(tr.Kind, tr.TurnID, fmt.Sprint(tr.Step), tr.CallID, fmt.Sprint(tr.Attempt))
 	if event != nil {
 		event.Set("trace_id", tr.ID)
@@ -88,7 +84,7 @@ func (a *Activities) startTrace(ctx context.Context, tr domain.Trace, input any,
 		}
 		if err != nil {
 			tr.Status = "failed"
-			if temporal.IsCanceledError(err) || ctx.Err() != nil {
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				tr.Status = "cancelled"
 			}
 			tr.Error = err.Error()

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -65,13 +65,9 @@ func TestCodemodeRecoversDownloadAfterLostReceipt(t *testing.T) {
 	}
 }
 
-func TestCodemodeExecRetryReadsPostgresRegistration(t *testing.T) {
-	url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set OPENALBERT_TEST_DATABASE_URL to a disposable database")
-	}
+func TestCodemodeExecRetryReadsSQLiteRegistration(t *testing.T) {
 	ctx := context.Background()
-	repo, err := storage.Open(ctx, url)
+	repo, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +87,6 @@ func TestCodemodeExecRetryReadsPostgresRegistration(t *testing.T) {
 	id := ComputerExecutionID(in)
 	if err != nil || !strings.Contains(result, id) || !strings.Contains(result, `"state":"completed"`) ||
 		len(computer.calls) != 2 || computer.calls[0].ExecutionID != id || computer.calls[1].ExecutionID != id {
-		t.Fatalf("retry failed to reuse the PostgreSQL execution registration: %s, %v", result, err)
+		t.Fatalf("retry failed to reuse the SQLite execution registration: %s, %v", result, err)
 	}
 }

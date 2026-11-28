@@ -1,4 +1,4 @@
-// albert-backup runs in an independent controller container or on the Docker host.
+// albert-backup runs encrypted online SQLite backups as a Compose service or standalone host binary.
 package main
 
 import (
@@ -81,7 +81,7 @@ func run(ctx context.Context, args []string) error {
 		if err = runner.Request(); err != nil {
 			return err
 		}
-		fmt.Println("Backup requested; follow the backup container logs for its result.")
+		fmt.Println("Backup requested; follow the backup service logs for its result.")
 		return nil
 	case "create":
 		return runner.Create(ctx)
@@ -131,7 +131,7 @@ func run(ctx context.Context, args []string) error {
 				if err = backup.Restore(ctx, archive, *identity, *destination); err != nil {
 					return err
 				}
-				fmt.Println("Restored to", *destination, "— services remain stopped. Review backup-manifest.json before starting.")
+				fmt.Println("Restored to", *destination, "— review backup-manifest.json before switching to the restored directory.")
 				return nil
 			}
 		}

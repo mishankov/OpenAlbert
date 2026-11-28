@@ -14,12 +14,6 @@ import (
 	"openalbert/apps/backend/internal/agent"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/knowledge"
-
-	"github.com/stretchr/testify/mock"
-	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/mocks"
-	"go.temporal.io/sdk/temporal"
-	"go.temporal.io/sdk/workflow"
 )
 
 func TestMemoryConsolidationWorkflowRunsTwoPhasesAndPersistsReport(t *testing.T) {
@@ -42,22 +36,18 @@ func TestMemoryConsolidationWorkflowRunsTwoPhasesAndPersistsReport(t *testing.T)
 	a.Model = &scriptedModel{run: func(step int, messages []domain.Message) (domain.Message, error) {
 		switch step {
 		case 0:
-			// Phase 1: profile & preferences.
 			return finish(`{"operations":[{"op":"merge","ids":["pref-1","pref-2"],"content":"Answer briefly.","kind":"preference","reason":"duplicate preference"}]}`), nil
 		case 1:
-			// Phase 2: hygiene batch.
 			return finish(`{"operations":[{"op":"delete","ids":["noise-1"],"reason":"expired watcher log"},{"op":"keep","ids":["fact-1"],"reason":"durable fact"}]}`), nil
 		default:
 			return domain.Message{}, fmt.Errorf("unexpected step %d", step)
 		}
 	}}
 
-	env := newEnv(a)
-	env.ExecuteWorkflow(MemoryConsolidationWorkflow, MemoryConsolidationInput{
-		Scope:   conv.ID,
-		Trigger: "scheduled",
-	})
-	requireWorkflowOK(t, env)
+	r := newTestRuntime(a, NewFakeClock(now), time.Second, 4)
+	if err := r.RunMemoryConsolidation(ctx, MemoryConsolidationInput{Scope: conv.ID, Trigger: "scheduled"}); err != nil {
+		t.Fatal(err)
+	}
 
 	entries, err := k.ListMemory(ctx, conv.ID)
 	if err != nil || len(entries) != 2 {
@@ -109,38 +99,26 @@ func TestMemoryConsolidationWorkflowConvergesLargeBacklogAcrossRuns(t *testing.T
 		return finish(string(raw)), nil
 	}}
 
-	threeRuns := func(ctx workflow.Context, in MemoryConsolidationInput) error {
-		for i := range 3 {
-			childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: fmt.Sprintf("consolidation-run-%d", i)})
-			if err := workflow.ExecuteChildWorkflow(childCtx, MemoryConsolidationWorkflow, in).Get(ctx, nil); err != nil {
-				return err
-			}
+	clk := NewFakeClock(base.Add(24 * time.Hour))
+	r := newTestRuntime(a, clk, time.Second, 4)
+	in := MemoryConsolidationInput{Scope: conv.ID, Trigger: "backlog", BatchSize: 2, MaxBatches: 1}
+	for range 3 {
+		if err := r.RunMemoryConsolidation(ctx, in); err != nil {
+			t.Fatal(err)
 		}
-		return nil
+		clk.Advance(time.Second)
 	}
-
-	env := newEnv(a)
-	env.RegisterWorkflow(MemoryConsolidationWorkflow)
-	env.ExecuteWorkflow(threeRuns, MemoryConsolidationInput{
-		Scope:      conv.ID,
-		Trigger:    "backlog",
-		BatchSize:  2,
-		MaxBatches: 1,
-	})
-	requireWorkflowOK(t, env)
 
 	reports, err := repo.ListMemoryConsolidations(ctx, conv.ID, 10)
 	if err != nil || len(reports) != 3 {
 		t.Fatalf("expected 3 reports, got %+v %v", reports, err)
 	}
-	// ListMemoryConsolidations returns newest first: run 2 (final) has HasMore=false, runs 1 and 0 have HasMore=true.
 	if reports[0].HasMore || !reports[1].HasMore || !reports[2].HasMore {
 		t.Fatalf("unexpected HasMore progression: %+v", reports)
 	}
 	if reports[0].Status != "completed" || reports[1].Status != "partial" || reports[2].Status != "partial" {
 		t.Fatalf("unexpected statuses: %+v", reports)
 	}
-
 	if len(visited) != 5 {
 		t.Fatalf("backlog sweep missed entries: visited=%v", visited)
 	}
@@ -155,7 +133,6 @@ func TestDispatchMemoryConsolidationScheduledThresholdAndBacklog(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
 
-	// Coding conversation must be skipped; empty group must be skipped.
 	if err := repo.SaveConversation(ctx, domain.Conversation{ID: "coding:1", Private: true, OwnerID: 7}); err != nil {
 		t.Fatal(err)
 	}
@@ -166,15 +143,20 @@ func TestDispatchMemoryConsolidationScheduledThresholdAndBacklog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 1. Initial run with no prior state -> scheduled trigger.
-	cl := &mocks.Client{}
-	cl.On("ExecuteWorkflow", mock.Anything, mock.MatchedBy(func(o client.StartWorkflowOptions) bool {
-		return o.ID == MemoryConsolidationWorkflowID(conv.ID)
-	}), mock.Anything, mock.MatchedBy(func(in MemoryConsolidationInput) bool {
-		return in.Scope == conv.ID && in.Trigger == "scheduled"
-	})).Return(nil, nil).Once()
+	var dispatched []MemoryConsolidationInput
+	r := &Runtime{
+		Repo:                        repo,
+		Activities:                  a,
+		MemoryConsolidationInterval: 24 * time.Hour,
+		hooks: &activityHooks{
+			dispatchConsol: func(in MemoryConsolidationInput) bool {
+				dispatched = append(dispatched, in)
+				return true
+			},
+		},
+	}
 
-	r := &Runtime{Repo: repo, Activities: a, Client: cl, TaskQueue: "openalbert", MemoryConsolidationInterval: 24 * time.Hour}
+	// 1. Initial run with no prior state -> scheduled trigger.
 	if err := r.DispatchMemoryConsolidation(ctx, now); err != nil {
 		t.Fatal(err)
 	}
@@ -182,14 +164,13 @@ func TestDispatchMemoryConsolidationScheduledThresholdAndBacklog(t *testing.T) {
 	if err := r.DispatchMemoryConsolidation(ctx, now.Add(5*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	cl.AssertExpectations(t)
+	if len(dispatched) != 1 || dispatched[0].Scope != conv.ID || dispatched[0].Trigger != "scheduled" {
+		t.Fatalf("unexpected initial dispatch: %+v", dispatched)
+	}
 
 	// 2. Threshold trigger when USER.md crosses 6000 chars after cooldown.
-	rawState, _ := json.Marshal(agent.ConsolidationState{
-		LastRunAt:      now,
-		LastAttemptAt:  now,
-		LastEntryCount: 1,
-	})
+	dispatched = nil
+	rawState, _ := json.Marshal(agent.ConsolidationState{LastRunAt: now, LastAttemptAt: now, LastEntryCount: 1})
 	if err := repo.SaveCheckpoint(ctx, agent.ConsolidationStateKey(conv.ID), rawState); err != nil {
 		t.Fatal(err)
 	}
@@ -204,17 +185,15 @@ func TestDispatchMemoryConsolidationScheduledThresholdAndBacklog(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cl2 := &mocks.Client{}
-	cl2.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(in MemoryConsolidationInput) bool {
-		return in.Scope == conv.ID && in.Trigger == "threshold"
-	})).Return(nil, nil).Once()
-	r.Client = cl2
 	if err := r.DispatchMemoryConsolidation(ctx, now.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	cl2.AssertExpectations(t)
+	if len(dispatched) != 1 || dispatched[0].Scope != conv.ID || dispatched[0].Trigger != "threshold" {
+		t.Fatalf("unexpected threshold dispatch: %+v", dispatched)
+	}
 
 	// 3. Backlog trigger when HasMore is true after short backlog cooldown.
+	dispatched = nil
 	rawBacklog, _ := json.Marshal(agent.ConsolidationState{
 		LastRunAt:      now.Add(2 * time.Hour),
 		LastAttemptAt:  now.Add(2 * time.Hour),
@@ -224,17 +203,15 @@ func TestDispatchMemoryConsolidationScheduledThresholdAndBacklog(t *testing.T) {
 	if err := repo.SaveCheckpoint(ctx, agent.ConsolidationStateKey(conv.ID), rawBacklog); err != nil {
 		t.Fatal(err)
 	}
-	cl3 := &mocks.Client{}
-	cl3.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(in MemoryConsolidationInput) bool {
-		return in.Scope == conv.ID && in.Trigger == "backlog"
-	})).Return(nil, nil).Once()
-	r.Client = cl3
 	if err := r.DispatchMemoryConsolidation(ctx, now.Add(2*time.Hour+10*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	cl3.AssertExpectations(t)
+	if len(dispatched) != 1 || dispatched[0].Scope != conv.ID || dispatched[0].Trigger != "backlog" {
+		t.Fatalf("unexpected backlog dispatch: %+v", dispatched)
+	}
 
-	// 4. Empty scope still prunes expired archives without starting a workflow or calling the model.
+	// 4. Empty scope still prunes expired archives without starting consolidation or calling the model.
+	dispatched = nil
 	emptyRoot := t.TempDir()
 	emptyKnow, err := knowledge.New(emptyRoot)
 	if err != nil {
@@ -260,7 +237,6 @@ func TestDispatchMemoryConsolidationScheduledThresholdAndBacklog(t *testing.T) {
 		t.Fatalf("expected archived directory before prune: %v %v", matchesBefore, err)
 	}
 	a.Knowledge = emptyKnow
-	// Mark conv.ID recently consolidated with HasMore=false so no workflow should start at all.
 	rawDone, _ := json.Marshal(agent.ConsolidationState{
 		LastRunAt:      now.Add(2 * time.Hour),
 		LastAttemptAt:  now.Add(2 * time.Hour),
@@ -269,12 +245,12 @@ func TestDispatchMemoryConsolidationScheduledThresholdAndBacklog(t *testing.T) {
 	if err := repo.SaveCheckpoint(ctx, agent.ConsolidationStateKey(conv.ID), rawDone); err != nil {
 		t.Fatal(err)
 	}
-	cl4 := &mocks.Client{}
-	r.Client = cl4
 	if err := r.DispatchMemoryConsolidation(ctx, now.Add(2*time.Hour+15*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	cl4.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	if len(dispatched) != 0 {
+		t.Fatalf("unexpected consolidation dispatch on empty scope: %+v", dispatched)
+	}
 	if _, err := os.Stat(matchesBefore[0]); !os.IsNotExist(err) {
 		t.Fatalf("expired archive directory on empty scope was not pruned: %v", err)
 	}
@@ -315,20 +291,15 @@ func TestMemoryConsolidationWorkflowBoundsPhase1BacklogAndPersistsFailureReceipt
 			return finish(`{"operations":[]}`), nil
 		}}
 
-		// BatchSize=2, MaxBatches=1: Run 0 processes pref-00..01, Run 1 processes pref-02, Run 2 processes fact-00.
-		threeRuns := func(ctx workflow.Context, in MemoryConsolidationInput) error {
-			for i := range 3 {
-				childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: fmt.Sprintf("phase1-run-%d", i)})
-				if err := workflow.ExecuteChildWorkflow(childCtx, MemoryConsolidationWorkflow, in).Get(ctx, nil); err != nil {
-					return err
-				}
+		clk := NewFakeClock(base.Add(24 * time.Hour))
+		r := newTestRuntime(a, clk, time.Second, 4)
+		in := MemoryConsolidationInput{Scope: conv.ID, Trigger: "scheduled", BatchSize: 2, MaxBatches: 1}
+		for range 3 {
+			if err := r.RunMemoryConsolidation(ctx, in); err != nil {
+				t.Fatal(err)
 			}
-			return nil
+			clk.Advance(time.Second)
 		}
-		env := newEnv(a)
-		env.RegisterWorkflow(MemoryConsolidationWorkflow)
-		env.ExecuteWorkflow(threeRuns, MemoryConsolidationInput{Scope: conv.ID, Trigger: "scheduled", BatchSize: 2, MaxBatches: 1})
-		requireWorkflowOK(t, env)
 
 		if strings.Join(seen, ",") != "pref-00,pref-01,pref-02,fact-00" {
 			t.Fatalf("unexpected phase 1 -> phase 2 order: %v", seen)
@@ -358,17 +329,16 @@ func TestMemoryConsolidationWorkflowBoundsPhase1BacklogAndPersistsFailureReceipt
 			if step == 0 {
 				return finish(`{"operations":[{"op":"merge","ids":["p1","p2"],"content":"Rule A","kind":"preference","reason":"dup"}]}`), nil
 			}
-			return domain.Message{}, temporal.NewNonRetryableApplicationError("provider outage", "provider_outage", errors.New("provider outage"))
+			return domain.Message{}, domain.NewNonRetryableError("provider outage", "provider_outage", errors.New("provider outage"))
 		}}
 
-		env := newEnv(a)
-		env.ExecuteWorkflow(MemoryConsolidationWorkflow, MemoryConsolidationInput{Scope: conv.ID, Trigger: "scheduled"})
-		if !env.IsWorkflowCompleted() || env.GetWorkflowError() == nil {
-			t.Fatalf("expected workflow error on hygiene batch failure, got %v", env.GetWorkflowError())
+		r := newTestRuntime(a, NewFakeClock(now), time.Second, 4)
+		if err := r.RunMemoryConsolidation(ctx, MemoryConsolidationInput{Scope: conv.ID, Trigger: "scheduled"}); err == nil {
+			t.Fatal("expected error on hygiene batch failure")
 		}
 		reports, err := repo.ListMemoryConsolidations(ctx, conv.ID, 10)
 		if err != nil || len(reports) != 1 {
-			t.Fatalf("expected failed report persisted in Postgres, got %+v %v", reports, err)
+			t.Fatalf("expected failed report persisted, got %+v %v", reports, err)
 		}
 		if reports[0].Status != "failed" || !reports[0].HasMore || len(reports[0].Operations) != 1 || reports[0].Operations[0].Status != "applied" || reports[0].Error == "" {
 			t.Fatalf("unexpected failure report: %+v", reports[0])
@@ -392,14 +362,13 @@ func TestMemoryConsolidationWorkflowBoundsPhase1BacklogAndPersistsFailureReceipt
 				if step == 0 {
 					return finish(`{"operations":[{"op":"delete","ids":["sub-0"],"reason":"expired sub-chunk 0"}]}`), nil
 				}
-				return domain.Message{}, temporal.NewNonRetryableApplicationError("sub-chunk 1 failed", "subchunk_err", errors.New("sub-chunk 1 failed"))
+				return domain.Message{}, domain.NewNonRetryableError("sub-chunk 1 failed", "subchunk_err", errors.New("sub-chunk 1 failed"))
 			}},
 		}
 
-		env := newEnv(a)
-		env.ExecuteWorkflow(MemoryConsolidationWorkflow, MemoryConsolidationInput{Scope: conv.ID, Trigger: "scheduled"})
-		if !env.IsWorkflowCompleted() || env.GetWorkflowError() == nil {
-			t.Fatalf("expected error on sub-chunk 1 failure, got %v", env.GetWorkflowError())
+		r := newTestRuntime(a, NewFakeClock(now), time.Second, 4)
+		if err := r.RunMemoryConsolidation(ctx, MemoryConsolidationInput{Scope: conv.ID, Trigger: "scheduled"}); err == nil {
+			t.Fatal("expected error on sub-chunk 1 failure")
 		}
 		reports, err := repo.ListMemoryConsolidations(ctx, conv.ID, 10)
 		if err != nil || len(reports) != 1 {
@@ -415,7 +384,6 @@ func TestMemoryConsolidationWorkflowBoundsPhase1BacklogAndPersistsFailureReceipt
 		ctx := context.Background()
 		base := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 
-		// 61 preferences: duplicates at position 0 (pref-00) and position 60 (pref-60).
 		for i := range 61 {
 			content := fmt.Sprintf("Unique preference %02d", i)
 			if i == 0 || i == 60 {
@@ -458,9 +426,10 @@ func TestMemoryConsolidationWorkflowBoundsPhase1BacklogAndPersistsFailureReceipt
 			return finish(`{"operations":[]}`), nil
 		}}
 
-		env := newEnv(a)
-		env.ExecuteWorkflow(MemoryConsolidationWorkflow, MemoryConsolidationInput{Scope: conv.ID, Trigger: "scheduled", BatchSize: 60, MaxBatches: 5})
-		requireWorkflowOK(t, env)
+		r := newTestRuntime(a, NewFakeClock(base.Add(24*time.Hour)), time.Second, 4)
+		if err := r.RunMemoryConsolidation(ctx, MemoryConsolidationInput{Scope: conv.ID, Trigger: "scheduled", BatchSize: 60, MaxBatches: 5}); err != nil {
+			t.Fatal(err)
+		}
 
 		if !mergedAcrossBoundary {
 			t.Fatal("pref-00 and pref-60 never appeared together across batch boundary")
@@ -476,7 +445,6 @@ func TestMemoryConsolidationWorkflowBoundsPhase1BacklogAndPersistsFailureReceipt
 	})
 }
 
-// splitBudgetModel forces a 2-entry batch to split into two 1-entry sub-chunks.
 type splitBudgetModel struct {
 	*scriptedModel
 }
@@ -510,7 +478,6 @@ func TestDispatchMemoryConsolidationPreventsHourlyProfileThresholdLoop(t *testin
 		t.Fatalf("test setup error: expected USER.md >= %d chars, got %d", agent.DefaultProfileCharThreshold, stableChars)
 	}
 
-	// Persist state as if consolidation just completed and USER.md stabilized >= 6000 chars.
 	rawState, _ := json.Marshal(agent.ConsolidationState{
 		LastRunAt:        now,
 		LastAttemptAt:    now,
@@ -523,15 +490,28 @@ func TestDispatchMemoryConsolidationPreventsHourlyProfileThresholdLoop(t *testin
 		t.Fatal(err)
 	}
 
+	var dispatched []MemoryConsolidationInput
+	r := &Runtime{
+		Repo:                        repo,
+		Activities:                  a,
+		MemoryConsolidationInterval: 24 * time.Hour,
+		hooks: &activityHooks{
+			dispatchConsol: func(in MemoryConsolidationInput) bool {
+				dispatched = append(dispatched, in)
+				return true
+			},
+		},
+	}
+
 	// 1. After threshold cooldown (2h, 6h, 12h), unchanged USER.md >= 6000 chars must NOT re-trigger.
-	clNone := &mocks.Client{}
-	r := &Runtime{Repo: repo, Activities: a, Client: clNone, TaskQueue: "openalbert", MemoryConsolidationInterval: 24 * time.Hour}
 	for _, offset := range []time.Duration{2 * time.Hour, 6 * time.Hour, 12 * time.Hour} {
 		if err := r.DispatchMemoryConsolidation(ctx, now.Add(offset)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	clNone.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	if len(dispatched) != 0 {
+		t.Fatalf("unchanged profile re-triggered: %+v", dispatched)
+	}
 
 	// 2. If USER.md shrinks slightly while staying >= 6000 chars, still do NOT trigger threshold.
 	if err := k.Update(ctx, domain.MemoryEntry{
@@ -546,7 +526,9 @@ func TestDispatchMemoryConsolidationPreventsHourlyProfileThresholdLoop(t *testin
 	if err := r.DispatchMemoryConsolidation(ctx, now.Add(4*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	clNone.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	if len(dispatched) != 0 {
+		t.Fatalf("shrunk profile triggered: %+v", dispatched)
+	}
 
 	// 3. If USER.md changes at the exact same length (hash changes), trigger threshold once.
 	if err := k.Update(ctx, domain.MemoryEntry{
@@ -558,17 +540,15 @@ func TestDispatchMemoryConsolidationPreventsHourlyProfileThresholdLoop(t *testin
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clChanged := &mocks.Client{}
-	clChanged.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(in MemoryConsolidationInput) bool {
-		return in.Scope == conv.ID && in.Trigger == "threshold"
-	})).Return(nil, nil).Once()
-	r.Client = clChanged
 	if err := r.DispatchMemoryConsolidation(ctx, now.Add(6*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	clChanged.AssertExpectations(t)
+	if len(dispatched) != 1 || dispatched[0].Trigger != "threshold" {
+		t.Fatalf("hash change did not trigger threshold: %+v", dispatched)
+	}
 
 	// 4. Reset to stable state, then grow USER.md -> triggers threshold.
+	dispatched = nil
 	if err := repo.SaveCheckpoint(ctx, agent.ConsolidationStateKey(conv.ID), rawState); err != nil {
 		t.Fatal(err)
 	}
@@ -581,17 +561,15 @@ func TestDispatchMemoryConsolidationPreventsHourlyProfileThresholdLoop(t *testin
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clGrew := &mocks.Client{}
-	clGrew.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(in MemoryConsolidationInput) bool {
-		return in.Scope == conv.ID && in.Trigger == "threshold"
-	})).Return(nil, nil).Once()
-	r.Client = clGrew
 	if err := r.DispatchMemoryConsolidation(ctx, now.Add(8*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	clGrew.AssertExpectations(t)
+	if len(dispatched) != 1 || dispatched[0].Trigger != "threshold" {
+		t.Fatalf("profile growth did not trigger threshold: %+v", dispatched)
+	}
 
 	// 5. After MemoryConsolidationInterval (24h), scheduled run still fires even without growth.
+	dispatched = nil
 	if err := k.Delete(ctx, conv.ID, "extra-pref"); err != nil {
 		t.Fatal(err)
 	}
@@ -607,15 +585,12 @@ func TestDispatchMemoryConsolidationPreventsHourlyProfileThresholdLoop(t *testin
 	if err := repo.SaveCheckpoint(ctx, agent.ConsolidationStateKey(conv.ID), rawState); err != nil {
 		t.Fatal(err)
 	}
-	clScheduled := &mocks.Client{}
-	clScheduled.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.MatchedBy(func(in MemoryConsolidationInput) bool {
-		return in.Scope == conv.ID && in.Trigger == "scheduled"
-	})).Return(nil, nil).Once()
-	r.Client = clScheduled
 	if err := r.DispatchMemoryConsolidation(ctx, now.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	clScheduled.AssertExpectations(t)
+	if len(dispatched) != 1 || dispatched[0].Trigger != "scheduled" {
+		t.Fatalf("scheduled run did not fire at 24h: %+v", dispatched)
+	}
 }
 
 func TestMemoryConsolidationWorkflowPhase2PromotionQueuesPhase1FollowUp(t *testing.T) {
@@ -633,7 +608,6 @@ func TestMemoryConsolidationWorkflowPhase2PromotionQueuesPhase1FollowUp(t *testi
 		t.Fatal(err)
 	}
 
-	// Simulate a Phase-2-only backlog continuation where Phase 1 already completed in a prior run.
 	rawState, _ := json.Marshal(agent.ConsolidationState{
 		LastRunAt:     now.Add(-10 * time.Minute),
 		LastAttemptAt: now.Add(-10 * time.Minute),
@@ -652,10 +626,8 @@ func TestMemoryConsolidationWorkflowPhase2PromotionQueuesPhase1FollowUp(t *testi
 		modelCalls++
 		switch step {
 		case 0:
-			// Run 0: Phase-2-only continuation promotes f-promote to preference and keeps f-keep.
 			return finish(`{"operations":[{"op":"reclassify","ids":["f-promote"],"kind":"preference","reason":"lasting preference"},{"op":"keep","ids":["f-keep"],"reason":"durable fact"}]}`), nil
 		case 1:
-			// Run 1: Queued Phase 1 follow-up compacts/merges USER.md without re-running hygiene over f-keep.
 			if strings.Contains(messages[0].Content, `"compact"`) && strings.Contains(messages[1].Content, `"f-promote"`) && strings.Contains(messages[1].Content, `"p-existing"`) {
 				sawPhase1InSecondRun = true
 			}
@@ -665,20 +637,14 @@ func TestMemoryConsolidationWorkflowPhase2PromotionQueuesPhase1FollowUp(t *testi
 		}
 	}}
 
-	twoRuns := func(ctx workflow.Context, in MemoryConsolidationInput) error {
-		for i := range 2 {
-			childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: fmt.Sprintf("p2-promo-run-%d", i)})
-			if err := workflow.ExecuteChildWorkflow(childCtx, MemoryConsolidationWorkflow, in).Get(ctx, nil); err != nil {
-				return err
-			}
+	clk := NewFakeClock(now)
+	r := newTestRuntime(a, clk, time.Second, 4)
+	for range 2 {
+		if err := r.RunMemoryConsolidation(ctx, MemoryConsolidationInput{Scope: conv.ID, Trigger: "backlog"}); err != nil {
+			t.Fatal(err)
 		}
-		return nil
+		clk.Advance(time.Second)
 	}
-
-	env := newEnv(a)
-	env.RegisterWorkflow(MemoryConsolidationWorkflow)
-	env.ExecuteWorkflow(twoRuns, MemoryConsolidationInput{Scope: conv.ID, Trigger: "backlog"})
-	requireWorkflowOK(t, env)
 
 	if !sawPhase1InSecondRun || modelCalls != 2 {
 		t.Fatalf("expected exactly 2 model calls (phase 2 + phase 1 follow-up only), got calls=%d sawPhase1=%v", modelCalls, sawPhase1InSecondRun)
@@ -687,7 +653,6 @@ func TestMemoryConsolidationWorkflowPhase2PromotionQueuesPhase1FollowUp(t *testi
 	if err != nil || len(reports) != 2 {
 		t.Fatalf("expected 2 reports, got %+v %v", reports, err)
 	}
-	// Newest first: run 1 completed cleanly, run 0 was partial with HasMore=true to trigger Phase 1.
 	if reports[1].Status != "partial" || !reports[1].HasMore || reports[0].Status != "completed" || reports[0].HasMore {
 		t.Fatalf("unexpected report progression after Phase 2 promotion: %+v", reports)
 	}

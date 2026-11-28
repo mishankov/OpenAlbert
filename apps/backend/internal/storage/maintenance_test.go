@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -15,18 +14,7 @@ import (
 
 func TestMaintenanceRepository(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { maintenanceContract(t, NewMemory()) })
-	t.Run("postgres", func(t *testing.T) {
-		url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-		if url == "" {
-			t.Skip("set OPENALBERT_TEST_DATABASE_URL to test PostgreSQL persistence")
-		}
-		repo, err := Open(context.Background(), url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer repo.Close()
-		maintenanceContract(t, repo)
-	})
+	t.Run("sqlite", func(t *testing.T) { maintenanceContract(t, openTestSQLite(t)) })
 }
 
 func maintenanceContract(t *testing.T, repo domain.Repository) {

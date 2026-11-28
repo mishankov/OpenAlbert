@@ -12,14 +12,14 @@ const queuedActivityText = "Обрабатываю сообщение…"
 // actual work. Scheduled tasks marked running between checks are not work signals.
 func (s *Store) ConversationActivity(ctx context.Context, scope string) (domain.ConversationActivity, error) {
 	var out domain.ConversationActivity
-	err := s.pool.QueryRow(ctx, `WITH active AS (
- SELECT data->>'text' AS text FROM openalbert_progress
- WHERE data->'conversation'->>'id'=$1 AND data->>'status'='active'
- ORDER BY (data->>'started_at')::timestamptz DESC,id DESC LIMIT 1
- )
- SELECT CASE WHEN EXISTS(SELECT 1 FROM active) THEN 'processing'
- WHEN EXISTS(SELECT 1 FROM openalbert_incoming WHERE NOT handled AND data->'conversation'->>'id'=$1) THEN 'queued'
- ELSE 'idle' END,COALESCE((SELECT text FROM active),'')`, scope).Scan(&out.State, &out.Text)
+	err := s.queryRow(ctx, `WITH active AS (
+ SELECT json_extract(data, '$.text') AS text FROM openalbert_progress
+ WHERE conversation_id = ?1 AND status = 'active'
+ ORDER BY started_at DESC, id DESC LIMIT 1
+)
+SELECT CASE WHEN EXISTS(SELECT 1 FROM active) THEN 'processing'
+WHEN EXISTS(SELECT 1 FROM openalbert_incoming WHERE handled = 0 AND conversation_id = ?1) THEN 'queued'
+ELSE 'idle' END, COALESCE((SELECT text FROM active), '')`, scope).Scan(&out.State, &out.Text)
 	if out.State == "queued" {
 		out.Text = queuedActivityText
 	}

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -25,25 +26,6 @@ func validProgressStatus(status string) bool {
 	return status == "waiting_delivery" || status == "failed" || status == "cancelled"
 }
 
-// Only replies in this conversation count. A requested cross-chat post does not
-// complete the owner's reply and cannot cause a private status to disappear.
-const progressOutgoingJoinSQL = `LEFT JOIN LATERAL (
- SELECT count(*)>0 AS has_outgoing,
-  COALESCE(bool_or(o.state IN ('failed','unknown')),false) AS has_failed,
-  COALESCE(bool_or(o.state<>'sent'),false) AS has_unsent
- FROM openalbert_outgoing o
- WHERE COALESCE(p.data->>'status','') NOT IN ('failed','cancelled')
-  AND o.data->>'turn_id'=p.id
-  AND o.data->'conversation'->>'id'=p.data->'conversation'->>'id'
-) agg ON true`
-
-const progressOutcomeCaseSQL = `CASE
- WHEN p.data->>'status' IN ('failed','cancelled') THEN p.data->>'status'
- WHEN p.data->>'status'='active' THEN CASE WHEN COALESCE((p.data->>'direct_reply')::boolean,false) OR agg.has_outgoing THEN 'waiting' ELSE 'active' END
- WHEN agg.has_failed THEN 'delivery_failed'
- WHEN (COALESCE((p.data->>'direct_reply')::boolean,false) OR agg.has_outgoing) AND NOT agg.has_unsent THEN 'delivered'
- ELSE 'waiting' END`
-
 func (s *Store) StartProgress(ctx context.Context, p domain.Progress) error {
 	if err := validID(p.TurnID); err != nil {
 		return err
@@ -51,16 +33,34 @@ func (s *Store) StartProgress(ctx context.Context, p domain.Progress) error {
 	if err := validID(p.Conversation.ID); err != nil {
 		return err
 	}
-	raw, err := encode(newProgress(p))
+	np := newProgress(p)
+	raw, err := encode(np)
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO openalbert_progress(id,data) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET data=jsonb_set(openalbert_progress.data,'{conversation}',excluded.data->'conversation')`, p.TurnID, raw)
+	convRaw, err := encode(np.Conversation)
+	if err != nil {
+		return err
+	}
+	_, err = s.exec(ctx, `INSERT INTO openalbert_progress(
+ id, conversation_id, delivery_channel, started_at, status, direct_reply,
+ delivery_state, delivery_version, delivery_removing, delivery_updated_at, delivery_retry_at, data
+) VALUES(?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10, ?11)
+ON CONFLICT(id) DO UPDATE SET
+ conversation_id = excluded.conversation_id,
+ delivery_channel = excluded.delivery_channel,
+ data = json_set(openalbert_progress.data, '$.conversation', json(?12))`,
+		np.TurnID, np.Conversation.ID, np.Conversation.DeliveryChannel, formatTime(np.StartedAt), np.Status,
+		np.Delivery.State, np.Delivery.Version, boolInt(np.Delivery.Removing),
+		formatTime(np.Delivery.UpdatedAt), formatTime(np.Delivery.RetryAt), string(raw), string(convRaw),
+	)
 	return err
 }
 
 func (s *Store) ReportProgress(ctx context.Context, id string, step int, text string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE openalbert_progress SET data=data||jsonb_build_object('step',$2::int,'text',$3::text) WHERE id=$1 AND data->>'status'='active' AND (data->>'step')::int<=$2`, id, step, text)
+	_, err := s.exec(ctx, `UPDATE openalbert_progress
+ SET data = json_set(data, '$.step', ?2, '$.text', ?3)
+ WHERE id = ?1 AND status = 'active' AND CAST(json_extract(data, '$.step') AS INTEGER) <= ?2`, id, step, text)
 	return err
 }
 
@@ -68,14 +68,18 @@ func (s *Store) EndProgress(ctx context.Context, id, status string) error {
 	if !validProgressStatus(status) {
 		return errors.New("invalid progress status")
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE openalbert_progress SET data=jsonb_set(data,'{status}',to_jsonb($2::text)) WHERE id=$1 AND data->>'status'='active'`, id, status)
+	_, err := s.exec(ctx, `UPDATE openalbert_progress
+ SET status = ?2, data = json_set(data, '$.status', ?2)
+ WHERE id = ?1 AND status = 'active'`, id, status)
 	return err
 }
 
 // ConfirmProgressReply records an acknowledged direct send. Ordinary queued
 // parts must still finish before progress is removed.
 func (s *Store) ConfirmProgressReply(ctx context.Context, id string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE openalbert_progress SET data=jsonb_set(data,'{direct_reply}','true'::jsonb) WHERE id=$1`, id)
+	_, err := s.exec(ctx, `UPDATE openalbert_progress
+ SET direct_reply = 1, data = json_set(data, '$.direct_reply', json('true'))
+ WHERE id = ?1`, id)
 	return err
 }
 
@@ -92,36 +96,59 @@ func (m *Memory) ConfirmProgressReply(ctx context.Context, id string) error {
 	return nil
 }
 
+// Only replies in this conversation count. A requested cross-chat post does not
+// complete the owner's reply and cannot cause a private status to disappear.
 // Filter candidate rows with the openalbert_progress_due partial index and
-// aggregate outgoing state once per candidate so PostgreSQL does not inline
-// correlated EXISTS subplans across every JSONB reference or trigger JIT.
-const dueProgressSQL = `WITH matched AS (
- SELECT p.id, p.data, ` + progressOutcomeCaseSQL + ` AS outcome
+// aggregate outgoing state once per candidate in a grouped CTE.
+const dueProgressSQL = `WITH candidates AS (
+ SELECT p.id, p.conversation_id, p.delivery_channel, p.started_at, p.status,
+  p.direct_reply, p.delivery_removing, p.delivery_updated_at, p.data
  FROM openalbert_progress p
- ` + progressOutgoingJoinSQL + `
- WHERE (p.data->'delivery'->>'state'='ready'
-  OR (p.data->'delivery'->>'state'='suspended' AND COALESCE(p.data->'conversation'->>'delivery_channel','')<>'desktop'))
- AND (p.data->'delivery'->>'retry_at')::timestamptz<=$1
+ WHERE (p.delivery_state = 'ready'
+  OR (p.delivery_state = 'suspended' AND p.delivery_channel <> 'desktop'))
+ AND p.delivery_retry_at <= ?1
+),
+agg AS (
+ SELECT o.turn_id, o.conversation_id,
+  COUNT(*) AS outgoing_count,
+  MAX(CASE WHEN o.state IN ('failed', 'unknown') THEN 1 ELSE 0 END) AS has_failed,
+  MAX(CASE WHEN o.state <> 'sent' THEN 1 ELSE 0 END) AS has_unsent
+ FROM openalbert_outgoing o
+ JOIN candidates c
+  ON c.status NOT IN ('failed', 'cancelled')
+  AND o.turn_id = c.id
+  AND o.conversation_id = c.conversation_id
+ GROUP BY o.turn_id, o.conversation_id
+),
+matched AS (
+ SELECT c.id, c.started_at, c.delivery_channel, c.delivery_removing, c.delivery_updated_at, c.data,
+  CASE
+   WHEN c.status IN ('failed', 'cancelled') THEN c.status
+   WHEN c.status = 'active' THEN CASE WHEN c.direct_reply = 1 OR COALESCE(agg.outgoing_count, 0) > 0 THEN 'waiting' ELSE 'active' END
+   WHEN COALESCE(agg.has_failed, 0) = 1 THEN 'delivery_failed'
+   WHEN (c.direct_reply = 1 OR COALESCE(agg.outgoing_count, 0) > 0) AND COALESCE(agg.has_unsent, 0) = 0 THEN 'delivered'
+   ELSE 'waiting'
+  END AS outcome
+ FROM candidates c
+ LEFT JOIN agg ON agg.turn_id = c.id AND agg.conversation_id = c.conversation_id
 )
-SELECT data||jsonb_build_object('outcome',outcome) FROM matched
-WHERE data->'conversation'->>'delivery_channel'='desktop'
- OR data->'delivery'->>'removing'='true'
- OR (outcome<>'waiting' AND (outcome<>'active'
-  OR ((data->>'started_at')::timestamptz<=$2 AND (data->'delivery'->>'updated_at')::timestamptz<=$3)))
-ORDER BY data->>'started_at',data->>'turn_id' LIMIT $4`
+SELECT json_set(data, '$.outcome', outcome)
+FROM matched
+WHERE delivery_channel = 'desktop'
+ OR delivery_removing = 1
+ OR (outcome <> 'waiting' AND (outcome <> 'active'
+  OR (started_at <= ?2 AND delivery_updated_at <= ?3)))
+ORDER BY started_at ASC, id ASC
+LIMIT ?4`
 
 func (s *Store) DueProgress(ctx context.Context, now time.Time, n int) ([]domain.Progress, error) {
-	return selectJSON[domain.Progress](ctx, s.pool, dueProgressSQL, now, now.Add(-domain.ProgressDelay), now.Add(-domain.ProgressInterval), limitValue(n))
+	return selectJSON[domain.Progress](ctx, s, dueProgressSQL,
+		formatTime(now),
+		formatTime(now.Add(-domain.ProgressDelay)),
+		formatTime(now.Add(-domain.ProgressInterval)),
+		limitValue(n),
+	)
 }
-
-const setProgressDeliverySQL = `WITH updated AS (
- UPDATE openalbert_progress p SET data=jsonb_set(data,'{delivery}',$3::jsonb)
- WHERE id=$1 AND (data->'delivery'->>'version')::bigint=$2
- RETURNING p.id, p.data
-)
-SELECT p.data||jsonb_build_object('outcome',` + progressOutcomeCaseSQL + `)
-FROM updated p
-` + progressOutgoingJoinSQL
 
 // Only delivery fields are replaced. Concurrent model updates/Finish are retained.
 // The compare-and-swap also claims initial creation before contacting Telegram.
@@ -131,7 +158,66 @@ func (s *Store) SetProgressDelivery(ctx context.Context, id string, version int6
 	if err != nil {
 		return domain.Progress{}, false, err
 	}
-	return oneJSON[domain.Progress](ctx, s.pool, setProgressDeliverySQL, id, version, raw)
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return domain.Progress{}, false, err
+	}
+	defer tx.Rollback()
+
+	var dataStr, convID, status string
+	var directReply int
+	err = tx.queryRow(ctx, `UPDATE openalbert_progress SET
+ delivery_state = ?3,
+ delivery_version = ?4,
+ delivery_removing = ?5,
+ delivery_updated_at = ?6,
+ delivery_retry_at = ?7,
+ data = json_set(data, '$.delivery', json(?8))
+ WHERE id = ?1 AND delivery_version = ?2
+ RETURNING data, conversation_id, status, direct_reply`,
+		id, version, next.State, next.Version, boolInt(next.Removing),
+		formatTime(next.UpdatedAt), formatTime(next.RetryAt), string(raw),
+	).Scan(&dataStr, &convID, &status, &directReply)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Progress{}, false, nil
+	}
+	if err != nil {
+		return domain.Progress{}, false, err
+	}
+	p, err := decode[domain.Progress]([]byte(dataStr))
+	if err != nil {
+		return domain.Progress{}, false, err
+	}
+	outcome := status
+	if status != "failed" && status != "cancelled" {
+		var count, hasFailed, hasUnsent int
+		if err := tx.queryRow(ctx, `SELECT COUNT(*),
+ COALESCE(MAX(CASE WHEN state IN ('failed', 'unknown') THEN 1 ELSE 0 END), 0),
+ COALESCE(MAX(CASE WHEN state <> 'sent' THEN 1 ELSE 0 END), 0)
+ FROM openalbert_outgoing
+ WHERE turn_id = ?1 AND conversation_id = ?2`, id, convID).Scan(&count, &hasFailed, &hasUnsent); err != nil {
+			return domain.Progress{}, false, err
+		}
+		switch {
+		case status == "active":
+			if directReply == 1 || count > 0 {
+				outcome = "waiting"
+			} else {
+				outcome = "active"
+			}
+		case hasFailed == 1:
+			outcome = "delivery_failed"
+		case (directReply == 1 || count > 0) && hasUnsent == 0:
+			outcome = "delivered"
+		default:
+			outcome = "waiting"
+		}
+	}
+	p.Outcome = outcome
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Progress{}, false, err
+	}
+	return p, true, nil
 }
 
 func (m *Memory) StartProgress(ctx context.Context, p domain.Progress) error {

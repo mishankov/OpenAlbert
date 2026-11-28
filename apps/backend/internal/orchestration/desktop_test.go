@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"openalbert/apps/backend/internal/domain"
 	"openalbert/apps/backend/internal/storage"
-	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -67,7 +67,7 @@ func TestDesktopSteeringSuppressesTelegramTyping(t *testing.T) {
 }
 
 func TestProgressRouteChangesCleanUpAndResume(t *testing.T) {
-	for _, backend := range []string{"memory", "postgres"} {
+	for _, backend := range []string{"memory", "sqlite"} {
 		t.Run(backend, func(t *testing.T) {
 			ctx := context.Background()
 			now := time.Now().UTC()
@@ -88,12 +88,8 @@ func TestProgressRouteChangesCleanUpAndResume(t *testing.T) {
 				_, _ = fmt.Fprintf(w, `{"ok":true,"result":{"message_id":%d}}`, 41+sends)
 			})
 			var repo domain.Repository = storage.NewMemory()
-			if backend == "postgres" {
-				url := os.Getenv("OPENALBERT_TEST_DATABASE_URL")
-				if url == "" {
-					t.Skip("set OPENALBERT_TEST_DATABASE_URL")
-				}
-				s, err := storage.Open(ctx, url)
+			if backend == "sqlite" {
+				s, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
 				if err != nil {
 					t.Fatal(err)
 				}

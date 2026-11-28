@@ -1,12 +1,10 @@
 package backup
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -25,7 +23,7 @@ func (c Config) Units(binary, configPath, envPath, output string) error {
 		return err
 	}
 	service := func(command string) string {
-		return fmt.Sprintf("[Unit]\nDescription=OpenAlbert backup %s\nWants=network-online.target\nAfter=network-online.target docker.service\n\n[Service]\nType=oneshot\nUser=root\nUMask=0077\nEnvironmentFile=%s\nExecStart=%s %s --config %s\nTimeoutStartSec=infinity\nTimeoutStopSec=300\nKillMode=mixed\n", command, quote(envPath), quote(binary), command, quote(configPath))
+		return fmt.Sprintf("[Unit]\nDescription=OpenAlbert backup %s\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nUMask=0077\nEnvironmentFile=%s\nExecStart=%s %s --config %s\nTimeoutStartSec=infinity\nTimeoutStopSec=300\nKillMode=mixed\n", command, quote(envPath), quote(binary), command, quote(configPath))
 	}
 	timer := fmt.Sprintf("[Unit]\nDescription=Daily encrypted OpenAlbert backup\n\n[Timer]\nOnCalendar=*-*-* %s:00 %s\nPersistent=true\nAccuracySec=1s\nUnit=openalbert-backup.service\n\n[Install]\nWantedBy=timers.target\n", c.Time, c.Timezone)
 	monitor := "[Unit]\nDescription=Check OpenAlbert backup freshness\n\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=5min\nUnit=openalbert-backup-monitor.service\n\n[Install]\nWantedBy=timers.target\n"
@@ -38,14 +36,15 @@ func (c Config) Units(binary, configPath, envPath, output string) error {
 }
 
 func (r *Runner) Monitor(now time.Time) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-	defer cancel()
-	if err := r.Recover(ctx); err != nil {
-		if errors.Is(err, ErrBusy) {
-			return nil
-		}
+	lock, err := r.lock()
+	if errors.Is(err, ErrBusy) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
+	defer lock.Close()
+
 	s := (Reader{Dir: r.Config.StateDir}).View(now)
 	if !r.Config.Enabled {
 		return nil
@@ -74,43 +73,4 @@ func (r *Runner) Monitor(now time.Time) error {
 		return err
 	}
 	return AtomicJSON(path, Event{ID: id, Kind: "overdue", At: now.UTC(), ErrorCode: code})
-}
-
-// Compose service names allow internal hyphens, but cannot start with an option prefix.
-var composeServiceName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
-
-// The journal survives SIGKILL or power loss. The monitor retries service startup
-// after the backup lock is released, and never starts previously stopped services.
-func (r *Runner) Recover(ctx context.Context) error {
-	lock, err := r.lock()
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	path := filepath.Join(r.Config.StateDir, "resume.json")
-	var services []string
-	if err = readJSON(path, &services); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	for _, name := range services {
-		if name == ControllerService || !composeServiceName.MatchString(name) {
-			return errors.New("invalid resume journal")
-		}
-	}
-	if len(services) == 0 {
-		return errors.New("empty resume journal")
-	}
-	if err = r.resumeServices(ctx, services); err != nil {
-		return err
-	}
-	if err = os.Remove(path); err != nil {
-		return err
-	}
-	r.loadState()
-	if err = r.save("failed", "interrupted_backup"); err != nil {
-		return err
-	}
-	return r.emit("failed", "interrupted_backup")
 }
