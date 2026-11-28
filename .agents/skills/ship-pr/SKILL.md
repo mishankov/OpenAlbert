@@ -57,7 +57,9 @@ one appears.
    and CI failures. Get proof for each fix before you push it.
 6. **Merge** when the merge gate passes.
 7. **Report** in your final message: the PR link, the merge commit, your proof,
-   and each decision you made for the user.
+   and each decision you made for the user. If the prompt or harness requests a
+   structured output schema, also submit the handoff data matching that schema
+   before ending the turn (see "Structured handoff").
 
 Stay active from step 1 to step 7. If you end your turn while checks or bots are
 pending, the work stops, because nobody will prompt you again. Wait with the
@@ -103,10 +105,12 @@ review" if you have high confidence in your changes.
 ## Asking the user
 
 A question in a normal message goes unseen, and the thread looks done. To ask
-the user something, use the harness's question tool so the thread shows that
-it is waiting: `AskUserQuestion` in Claude Code, `request_user_input` in Codex,
-or the question tool your harness has. Put all the context in the question:
-the PR link, what blocks you, and the options with your recommendation first.
+the user something, use the harness's structured interactive question tool so
+the thread shows that it is waiting and a user or orchestrator can answer it
+cleanly: `AskUserQuestion` in Claude Code, `request_user_input` in Codex,
+`ask_question`, or the question tool your harness provides. Put all the context
+in the question: the PR link, what blocks you, and the options with your
+recommendation first.
 
 Ask only when you cannot continue alone:
 
@@ -122,5 +126,17 @@ Decide everything else yourself with sensible defaults, and list those decisions
 in the report.
 
 If no question tool is available, or the tool returns no answer, take the safe
-path: leave the PR open and unmerged, and start your final message with the
-question.
+path: leave the PR open and unmerged, start your final message with the
+question, and include the blocker in any requested structured output before
+ending the turn.
+
+## Structured handoff
+
+When the prompt or harness requests a structured output schema, submit the final
+handoff data matching that schema through the mechanism it specifies (for
+example, `t3_submit_output` in T3 Code or an `outputSchema` contract) before
+ending the turn alongside your concise final reply. Populate exact factual
+fields requested by the schema (such as verdict, PR URL, head SHA, merge commit
+or published artifact/revision when applicable, concise summary, and any
+blocking question or open decisions). Never fabricate missing values; use `null`
+or empty values per the schema when a field does not apply.

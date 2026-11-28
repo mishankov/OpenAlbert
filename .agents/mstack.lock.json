@@ -30,9 +30,9 @@
       "sha256": "786abeba8be9d757f6cc4f747b0a2de5e6527b0cd80a6fb76f796bc90b41f236"
     },
     "impeccable": {
-      "commit": "b49177d32788f2dc585c42831d845dacf1ebed2c",
-      "sha256": "100803e6091f6f0033dc4e6f7cfbcdca8aa86473bd031159bcc3d4ec8dda42ec",
-      "release": "skill-v4.10.0",
+      "commit": "2fc5e1459efbbf06d92c7306517c286bf12490cf",
+      "sha256": "5289437426bf019dac72772efb1424ac3822e19befbff34a45bfad10bd44535f",
+      "release": "skill-v4.11.1",
       "source": {
         "repository": "https://github.com/pbakaus/impeccable.git",
         "path": ".agents/skills/impeccable",
@@ -51,8 +51,8 @@
       "sha256": "31a62359a2b24bc14b1543c6579cf21d51a7081840555644994f250dae94ab1d"
     },
     "pick-next-work": {
-      "commit": "e81d1ab413a52a0fcdf53cc071834e1829a0118e",
-      "sha256": "8bafac1ec7182ffeb906dfdf3f21b5ee7963c4336be787469be76405216f6e26"
+      "commit": "a92a9c8deae97eb5988cbfd88e7fd257561529e7",
+      "sha256": "895c908f55fa16189178322e6a3330f50cf248be02725cdbe525419289c61b88"
     },
     "review-loop": {
       "commit": "e81d1ab413a52a0fcdf53cc071834e1829a0118e",
@@ -63,12 +63,12 @@
       "sha256": "e12108c02e4e3fec7e832f7725dd4799f0154e7a80f54c0339be89712b65cb2f"
     },
     "ship-pr": {
-      "commit": "e81d1ab413a52a0fcdf53cc071834e1829a0118e",
-      "sha256": "ec68667a21b2660f07806707b8c74b8b1556136ae8804ff8a6920c5f4810b5dc"
+      "commit": "a92a9c8deae97eb5988cbfd88e7fd257561529e7",
+      "sha256": "6bd5176220ce418a8ef87409ce70dff98602aed3a844625c0b97c9b7311f02c0"
     },
     "stage-pr": {
-      "commit": "e81d1ab413a52a0fcdf53cc071834e1829a0118e",
-      "sha256": "e1351a0f5677b429615236e5c67a8ae9c32a270dd1aa7df0077087dddb8abbee"
+      "commit": "a92a9c8deae97eb5988cbfd88e7fd257561529e7",
+      "sha256": "46046ed83b2b5eba0d3e267b554b07e0b3c6809a4964d05d31bb213291b51483"
     },
     "start-thread": {
       "commit": "e81d1ab413a52a0fcdf53cc071834e1829a0118e",

@@ -1,27 +1,27 @@
 flowchart LR
     accTitle: Компоненты OpenAlbert
-    accDescr: В MVP Telegram связан с ядром, Temporal управляет исполнением, а инструменты обращаются к выбранной при запуске модели и данным. Отдельный Ubuntu Computer box подключён по SSH. HTTP-клиент обращается к API владельца.
-    Channels["Telegram · MVP"]
+    accDescr: Единый Go-процесс OpenAlbert объединяет каналы, встроенный оркестратор, агентский цикл, инструменты, инспектор и Chromium. Все данные хранятся локально в SQLite и файлах каталога data. LLM, веб-поиск, STT/TTS, онлайн-бэкапы и Computer box подключаются отдельно.
+    Channels["Telegram"]
     Client["HTTP-клиент<br/>Владелец"]
-    TemporalDB[("База Temporal")]
-    Temporal["Temporal<br/>Workflows и расписания"]
-    DB[("PostgreSQL<br/>Состояние приложения")]
-    Files[("Файлы ядра<br/>SOUL.md · skills · память")]
-    Core["Основной контейнер OpenAlbert · Go<br/><br/>Каналы · разговоры · сессии<br/>Агентский цикл · tools<br/>BrowserManager · Chromium (до 5)"]
-    LLM["OpenAI-совместимые API<br/>Модель из настроек запуска"]
-    Search["Поиск (опционально): Yandex Search API<br/>Чтение страниц"]
-    Computer["Ubuntu Computer box<br/>SSH · sudo · рабочие файлы"]
-    S3[("S3<br/>Вложения и результаты")]
+    subgraph Data["Каталог data/"]
+        DB[("SQLite · WAL<br/>Состояние · расписания · логи")]
+        Artifacts[("Локальные артефакты<br/>Вложения и результаты")]
+        Files[("Знания<br/>SOUL.md · skills · память")]
+    end
+    Core["OpenAlbert · Go (единый бинарник / контейнер)<br/><br/>Каналы · разговоры · сессии · инспектор<br/>Встроенный оркестратор и планировщик<br/>Агентский цикл · tools · Chromium (до 5)"]
+    LLM["LLM API<br/>OpenAI-совместимые · ChatGPT"]
+    Search["Веб-поиск (опционально)<br/>Exa · Yandex Search · web_read"]
+    Aux["Опциональные сервисы<br/>STT · TTS · Backup → S3"]
+    Computer["Linux Computer box<br/>SSH · рабочие файлы"]
 
     Channels <--> Core
-    TemporalDB <--> Temporal
-    Temporal <--> Core
+    Client <-.-> Core
     DB <--> Core
+    Artifacts <--> Core
     Files <--> Core
     Core <--> LLM
-    Core <--> Search
-    Core <--> Computer
-    Client <-.-> Core
+    Core <-.-> Search
+    Core <-.-> Aux
+    Core <-.-> Computer
     classDef optional fill:#f5f5f5,stroke:#999,stroke-dasharray:5 5,color:#666
-    class Client optional
-    Core <--> S3
+    class Client,Search,Aux,Computer optional
